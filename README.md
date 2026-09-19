@@ -7,16 +7,22 @@ Runs as a single Docker container (built for Portainer).
 
 Every `poll_interval` (default 15 min) it:
 
-1. Reads your **composite** tab (one event per column, row headers down column A).
-2. For each column with an **event name**, a **PCR** letter, and a **start time**,
-   maps the PCR (A/B/C/D/E/V) to an LSP channel.
+1. Reads every **visible** sport tab (Football, Fall/Winter/Spring Olympic,
+   Basketball, Special Events) — each transposed, one event per column, row
+   headers down column A. **Hidden tabs are skipped automatically** (so the
+   `COUNT` tab and the old `*RELAYOUT` composites are ignored with no config).
+2. For each event column, reads the **event name**, **start time**, and the
+   **`CONTROL ROOM`** letter (`A`–`E`), mapping that room to an LSP channel.
 3. Creates an LSP recording event starting `lead_in_minutes` before the sheet's
    start time, ending after a `safety_cap_hours` cap (an engineer normally stops
    it manually in LSP first).
 4. Skips events that already exist (checked against LSP and a local state file),
    so it is safe to run repeatedly.
 
-Football is intentionally not included — only the composite tab is read.
+There is **no composite tab** — the schedule lives across the per-sport tabs and
+the service assembles it. Tabs with no `CONTROL ROOM` row (e.g. **Football**) get
+their channel from a per-tab **default control room** set in the UI, or they can
+be toggled off entirely.
 
 ---
 
@@ -25,13 +31,20 @@ Football is intentionally not included — only the composite tab is read.
 Once deployed, open **`http://<docker-host>:8080`**. From there an engineer can:
 
 - Set the **LSP server URL and login**, and **Test connection**.
-- Edit the **PCR → channel mapping** (channel names auto-complete from the live
-  channel list after a successful connection test).
+- Edit the **control room → channel mapping** (`A`–`E`; channel names
+  auto-complete from the live channel list after a successful connection test).
+- Manage **Sheet tabs** — every visible tab is listed with an on/off toggle and
+  a **default control room** selector (used for tabs without a `CONTROL ROOM`
+  row, e.g. Football).
 - Adjust **lead-in**, **safety-cap hours**, the active window, and the event
   name prefix.
 - Toggle **Dry run** and the **sync interval**.
 - **Preview events** — see exactly what the next sync would create/skip, with no
-  changes made.
+  changes made. Each row has an inline **room selector** and an **Ignore**
+  checkbox for fixing individual events.
+- Stage **Manual overrides** — per-event fixes (matched by tab + date + event
+  name): assign/correct the control room, override the start time, or ignore an
+  event. They persist in the overrides list until removed.
 - **Run now**, and see the **last-run status**.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
@@ -42,23 +55,28 @@ by setting `UI_USER` / `UI_PASSWORD`.)
 
 ## How events are read
 
-The sheet is **transposed**: labels live in column A, and **each event is a
+Each sport tab is **transposed**: labels live in column A, and **each event is a
 column**. The service finds these label rows (editable under *Advanced* in the UI):
 
-| Field        | Default label(s)              | Required | Notes |
-|--------------|-------------------------------|----------|-------|
-| Event name   | `EVENT`                       | yes      | Used as the LSP event name |
-| PCR / room   | `PCR`, `CONTROL ROOM`         | yes      | `A`/`B`/`C`/`D`/`E`/`V` (also accepts `PCR A`, `Control Room B`) |
-| Start        | `START`, `GAME START`         | one of   | **Recommended:** one cell with full date + time **including year** |
-| Date + Time  | `DATE` + `GAME TIME`/`START TIME` | one of | Fallback if kept in separate rows |
+| Field        | Default label(s)                    | Required | Notes |
+|--------------|-------------------------------------|----------|-------|
+| Event name   | `EVENT`                             | yes      | Used as the LSP event name |
+| Control room | `CONTROL ROOM`, `PCR`               | for a channel | Letters `A`–`E` (also accepts `PCR A`, `Control Room B`). The **first** matching row wins — a repeated block lower down (e.g. a scoreboard feed) is ignored. |
+| Date + Time  | `DATE` + `GAME START`/`GAME TIME`/`START TIME` | one of | These tabs keep date and time in separate rows |
+| Start        | *(combined)* `datetime`             | one of   | Optional: a single cell with full date + time including year |
 
-A column becomes a recording only once it has **event name + PCR + a valid
-start**. Blank cells or `TBD`/`TBA` are skipped — so an event is scheduled the
-moment an engineer assigns it a PCR.
+A column becomes a recording once it has an **event name** and a **valid start**
+(`DATE` + a game time). Blank cells or `TBD`/`TBA` are skipped. If its
+`CONTROL ROOM` is blank the event still shows in Preview flagged **no room**, so
+an engineer can assign one via the inline selector or a manual override.
 
-**Recommended composite-tab layout:** a `START` row with an explicit date-time
-including the year, e.g. `2026-09-12 15:30` or `9/12/2026 3:30 PM`. That removes
-all year guessing. (Bare `9/12` dates fall back to academic-year inference.)
+**Control rooms are letters `A`–`E` only.** A stray value that isn't a letter
+(e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
+or with a manual override.
+
+**Which tabs are read:** all **visible** tabs by default (hidden tabs skipped).
+Leave `sheet.tabs` empty to auto-discover, or list specific tabs as an
+allow-list. Turn individual tabs off in the UI (**Sheet tabs** card).
 
 ---
 
@@ -146,7 +164,23 @@ Each event is matched by **channel + name + start minute (UTC)**:
 The UI covers everything; `config.example.yaml` documents every field inline
 (it seeds the live config on first run). Highlights: `scheduling.lead_in_minutes`,
 `scheduling.safety_cap_hours`, `scheduling.horizon_days` / `past_grace_minutes`,
-`runtime.poll_interval_seconds`, `runtime.dry_run`.
+`runtime.poll_interval_seconds`, `runtime.dry_run`. Multi-tab settings:
+`sheet.tabs` (empty = auto-discover visible tabs), `tab_overrides`
+(enable/disable a tab, `default_control_room`), and `event_overrides` (per-event
+`control_room` / `start` / `ignore`, matched by tab + date + event name).
+
+## Keeping docs current
+
+**Documentation is part of every change — keep it up to date as you go, in the
+same commit as the code.** When behavior, config, the sheet layout, or the UI
+changes, update, in the same commit:
+
+- this **README** (flow, the "How events are read" table, the UI list),
+- **`config.example.yaml`** (every field is documented inline; it also seeds the
+  live config), and
+- any code docstrings/comments the change touches.
+
+Treat a change as unfinished until the docs match it.
 
 ## Project layout
 
@@ -158,7 +192,7 @@ app/
   main.py        # headless runner (RUN_ONCE / cron)
   config.py      # config model, parse/validate, load/save
   settings_store.py # live config on /data, seeded from the example
-  sheets.py      # Google Sheets read + transposed-column parsing
+  sheets.py      # Google fetch + pure parse_grid() (multi-tab, hidden-skip)
   lsp_client.py  # Live Schedule Pro API client (auth, channels, events)
   sync.py        # plan() (read-only) + run_once() (creates)
   state.py       # local created-event cache
