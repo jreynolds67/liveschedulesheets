@@ -78,6 +78,24 @@ class SyncManager:
             chans = syncer.lsp.get_all_channels()
         return [{"Id": c.get("Id"), "Name": c.get("Name")} for c in chans]
 
+    def tabs(self) -> list[dict]:
+        """Visible tabs in the sheet with their current UI state."""
+        with self._lock:
+            cfg, syncer = self._components()
+            visible = syncer.reader._visible_tabs()
+        allow = set(cfg.sheet.tabs)
+        out = []
+        for name in visible:
+            ov = cfg.tab_overrides.get(name)
+            out.append({
+                "name": name,
+                "enabled": (True if ov is None else ov.enabled)
+                           and (name in allow if allow else True),
+                "default_control_room": (ov.default_control_room if ov else None),
+                "in_allow_list": (name in allow) if allow else True,
+            })
+        return out
+
     def test_connection(self) -> dict:
         try:
             chans = self.channels()

@@ -56,6 +56,22 @@
   .pcr-row { display:grid; grid-template-columns:70px 1fr 1fr 34px; gap:10px; align-items:end; }
   .pcr-row .rm { background:transparent; border:1px solid var(--line); color:var(--err);
     padding:9px 0; border-radius:8px; }
+  .pill.no_room { background:rgba(245,181,68,.16); color:var(--warn); }
+  .pill.ignore { background:rgba(147,161,181,.16); color:var(--muted); }
+  .tab-row { display:grid; grid-template-columns:1fr auto 150px; gap:12px; align-items:center;
+    padding:9px 0; border-bottom:1px solid var(--line); }
+  .tab-row:last-child { border-bottom:none; }
+  .tab-row .tname { font-weight:600; }
+  .tab-row.off .tname { color:var(--muted); text-decoration:line-through; }
+  .tab-row select { padding:6px 8px; }
+  .mini { padding:4px 8px; font-size:12px; }
+  .roomsel { background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:6px; padding:4px 6px; font-size:12px; }
+  td .inline { display:flex; gap:6px; align-items:center; }
+  .ov-row { display:grid; grid-template-columns:1fr 1fr 90px 70px auto auto; gap:10px;
+    align-items:center; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; }
+  .ov-row:last-child { border-bottom:none; }
+  .ov-row .k { color:var(--muted); font-size:11px; }
   #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
     background:var(--panel2); border:1px solid var(--line); padding:10px 16px; border-radius:8px;
     opacity:0; transition:opacity .2s; pointer-events:none; max-width:80vw; }
@@ -96,12 +112,20 @@
   <!-- Sheet -->
   <section class="card"><h2>Google Sheet</h2><div class="body">
     <div><label>Spreadsheet ID</label><input type="text" id="sheet_id" class="mono" /></div>
-    <div class="grid3">
-      <div><label>Composite tab name</label><input type="text" id="sheet_tab" /></div>
+    <div class="grid2">
       <div><label>Header column</label><input type="text" id="sheet_header_col" value="A" /></div>
       <div><label>Timezone (IANA)</label><input type="text" id="sheet_tz" placeholder="America/New_York" /></div>
     </div>
     <div class="hint">Google service-account key: <span id="googleSet"></span> (mounted into the container).</div>
+  </div></section>
+
+  <!-- Tabs -->
+  <section class="card"><h2>Sheet tabs</h2><div class="body">
+    <div class="hint">Every <b>visible</b> tab is read automatically (hidden tabs like COUNT and the
+      old composites are skipped). Turn a tab off to exclude it, or set a default control room for
+      tabs that have no CONTROL ROOM row (e.g. Football).</div>
+    <div id="tabsBox" class="hint">Loading tabs…</div>
+    <div class="row"><button id="btnRefreshTabs" class="ghost">Refresh tabs</button></div>
   </div></section>
 
   <!-- PCR mapping -->
@@ -156,7 +180,17 @@
 
   <!-- Preview -->
   <section class="card"><h2>Preview</h2><div class="body">
-    <div id="previewBox" class="hint">Click “Preview events” to see what the next sync would do (no changes made).</div>
+    <div class="hint">What the next sync would do (no changes made). Use the room selector to
+      assign a missing/wrong control room, or Ignore to drop an event. Staged fixes appear below
+      under “Manual overrides” — click <b>Save</b> to apply them.</div>
+    <div id="previewBox" class="hint">Click “Preview events” to see the plan.</div>
+  </div></section>
+
+  <!-- Overrides -->
+  <section class="card"><h2>Manual overrides</h2><div class="body">
+    <div class="hint">Per-event fixes, matched by tab + date + event name. These override what the
+      sheet says (or fill in what it is missing).</div>
+    <div id="overridesBox" class="hint">No overrides staged.</div>
   </div></section>
 
   <!-- Status -->
@@ -192,9 +226,11 @@ function fillForm(){
   $("googleSet").textContent = cfg.google_credentials_set ? "configured ✓" : "NOT configured";
 
   $("sheet_id").value = get(cfg,"sheet.spreadsheet_id","");
-  const tabs = get(cfg,"sheet.tabs",[]); $("sheet_tab").value = tabs[0]||"";
   $("sheet_header_col").value = get(cfg,"sheet.header_column","A");
   $("sheet_tz").value = get(cfg,"sheet.timezone","America/New_York");
+
+  cfg.tab_overrides = cfg.tab_overrides || {};
+  cfg.event_overrides = cfg.event_overrides || {};
 
   $("lead_in").value = get(cfg,"scheduling.lead_in_minutes",10);
   $("safety_cap").value = get(cfg,"scheduling.safety_cap_hours",6);
@@ -215,11 +251,15 @@ function fillForm(){
   $("dp_skip").value = csv(get(cfg,"date_parsing.skip_values",["TBD","TBA"]));
 
   renderPcr(get(cfg,"pcr_channel_map",{}));
+  renderOverrides();
 }
+
+// Canonical control rooms.
+const ROOMS = ["A","B","C","D","E"];
 
 function renderPcr(map){
   const box = $("pcrRows"); box.innerHTML = "";
-  const letters = Object.keys(map).length ? Object.keys(map) : ["A","B","C","D","E","V"];
+  const letters = Object.keys(map).length ? Object.keys(map) : ROOMS.slice();
   letters.forEach(letter => addPcrRow(letter, map[letter]||{}));
 }
 function addPcrRow(letter="", ref={}){
@@ -244,7 +284,7 @@ function gather(){
 
   cfg.sheet = cfg.sheet || {};
   cfg.sheet.spreadsheet_id = $("sheet_id").value.trim();
-  cfg.sheet.tabs = [ $("sheet_tab").value.trim() ].filter(Boolean);
+  cfg.sheet.tabs = [];  // auto-discover visible tabs; disable via tab_overrides
   cfg.sheet.header_column = $("sheet_header_col").value.trim() || "A";
   cfg.sheet.timezone = $("sheet_tz").value.trim();
   cfg.sheet.labels = {
@@ -280,8 +320,101 @@ function gather(){
     map[L] = {}; if (name) map[L].channel_name = name; if (id) map[L].channel_id = id;
   });
   cfg.pcr_channel_map = map;
+
+  cfg.tab_overrides = gatherTabs();
+  cfg.event_overrides = cfg.event_overrides || {};
   delete cfg.google_credentials_set;
   return cfg;
+}
+
+// ---- Tabs ----------------------------------------------------------------
+let tabsList = [];
+
+async function loadTabs(){
+  $("tabsBox").textContent = "Loading tabs…";
+  const r = await api("GET","/api/tabs");
+  if (!r.ok){ $("tabsBox").innerHTML = `<span style="color:var(--err)">Could not read tabs: ${r.error||""}</span>`; return; }
+  tabsList = r.tabs || [];
+  renderTabs();
+}
+
+function renderTabs(){
+  if (!tabsList.length){ $("tabsBox").textContent = "No visible tabs found."; return; }
+  const box = $("tabsBox"); box.className = ""; box.innerHTML = "";
+  tabsList.forEach(t => {
+    const ov = cfg.tab_overrides[t.name] || {};
+    const enabled = ov.enabled !== undefined ? ov.enabled : t.enabled;
+    const room = ov.default_control_room || t.default_control_room || "";
+    const row = document.createElement("div");
+    row.className = "tab-row" + (enabled ? "" : " off");
+    row.innerHTML = `
+      <span class="tname">${t.name}</span>
+      <label class="switch" style="margin:0"><input type="checkbox" class="tab-en" ${enabled?"checked":""}/> <span class="hint">enabled</span></label>
+      <select class="roomsel tab-room"><option value="">default room…</option>
+        ${ROOMS.map(l=>`<option value="${l}" ${room===l?"selected":""}>Room ${l}</option>`).join("")}</select>`;
+    row.dataset.tab = t.name;
+    row.querySelector(".tab-en").onchange = (e)=> row.classList.toggle("off", !e.target.checked);
+    box.appendChild(row);
+  });
+}
+
+function gatherTabs(){
+  const out = {};
+  document.querySelectorAll(".tab-row").forEach(r => {
+    const name = r.dataset.tab;
+    const enabled = r.querySelector(".tab-en").checked;
+    const room = r.querySelector(".tab-room").value;
+    // Only record a tab that deviates from the default (enabled, no room).
+    if (!enabled || room) out[name] = { enabled, ...(room?{default_control_room:room}:{}) };
+  });
+  return out;
+}
+
+// ---- Event overrides -----------------------------------------------------
+function ovList(tab){ return (cfg.event_overrides[tab] = cfg.event_overrides[tab] || []); }
+function findOv(tab,date,event,occ){
+  return ovList(tab).find(o => o.date===date && (o.event||"").toLowerCase()===event.toLowerCase() && (o.occurrence||0)===occ);
+}
+function upsertOv(item, patch){
+  const tab=item.source_tab, date=item.event_date, event=item.event_name, occ=item.occurrence||0;
+  let o = findOv(tab,date,event,occ);
+  if (!o){ o = {date, event, occurrence:occ}; ovList(tab).push(o); }
+  Object.assign(o, patch);
+  cleanOv();
+}
+function removeOv(tab,date,event,occ){
+  cfg.event_overrides[tab] = ovList(tab).filter(o =>
+    !(o.date===date && (o.event||"").toLowerCase()===event.toLowerCase() && (o.occurrence||0)===occ));
+  if (!cfg.event_overrides[tab].length) delete cfg.event_overrides[tab];
+  renderOverrides();
+}
+function cleanOv(){
+  // Drop entries that no longer carry any actual override.
+  for (const tab of Object.keys(cfg.event_overrides)){
+    cfg.event_overrides[tab] = ovList(tab).filter(o => o.control_room || o.start || o.ignore);
+    if (!cfg.event_overrides[tab].length) delete cfg.event_overrides[tab];
+  }
+  renderOverrides();
+}
+
+function renderOverrides(){
+  const box = $("overridesBox");
+  const entries = [];
+  Object.keys(cfg.event_overrides||{}).forEach(tab =>
+    (cfg.event_overrides[tab]||[]).forEach(o => entries.push({tab, ...o})));
+  if (!entries.length){ box.className="hint"; box.textContent = "No overrides staged."; return; }
+  box.className = "";
+  box.innerHTML = entries.map((o,i) => `
+    <div class="ov-row" data-i="${i}">
+      <div><div class="k">${o.tab}</div>${o.event}</div>
+      <div class="mono">${o.date}${o.occurrence?` #${o.occurrence}`:""}</div>
+      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`Room ${o.control_room}`:"—")}</div>
+      <div class="mono hint">${o.start?o.start.replace("T"," "):""}</div>
+      <div class="hint">${o.ignore?"drop":(o.control_room?"room":"")}${o.start?" · start":""}</div>
+      <button class="rm mini ghost" data-tab="${o.tab}" data-date="${o.date}" data-ev="${encodeURIComponent(o.event)}" data-occ="${o.occurrence||0}">remove</button>
+    </div>`).join("");
+  box.querySelectorAll(".rm").forEach(b => b.onclick = () =>
+    removeOv(b.dataset.tab, b.dataset.date, decodeURIComponent(b.dataset.ev), +b.dataset.occ));
 }
 
 async function loadConfig(){ cfg = await api("GET","/api/config"); fillForm(); }
@@ -303,17 +436,44 @@ async function refreshStatus(){
   $("statusBox").innerHTML = html;
 }
 
+let lastPreview = [];
 function renderPreview(items){
+  lastPreview = items || [];
   if (!items.length){ $("previewBox").innerHTML = "No schedulable events found."; return; }
-  const rows = items.map(i => `<tr>
-    <td><span class="pill ${i.status}">${i.status.replace(/_/g,' ')}</span></td>
-    <td>${i.name}</td><td>${i.pcr}</td>
-    <td class="mono">${new Date(i.start).toLocaleString()}</td>
-    <td class="mono">${new Date(i.end).toLocaleTimeString()}</td>
-    <td class="hint">${i.message}</td></tr>`).join("");
   $("previewBox").innerHTML = `<table><thead><tr>
-    <th>Status</th><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th></th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
+    <th>Status</th><th>Event</th><th>Tab</th><th>Room</th><th>Start</th><th>Fix</th>
+    </tr></thead><tbody></tbody></table>`;
+  const tb = $("previewBox").querySelector("tbody");
+  items.forEach((i, idx) => {
+    const noRoom = !i.pcr;
+    const statusCls = noRoom ? "no_room" : i.status;
+    const statusTxt = noRoom ? "no room" : i.status.replace(/_/g,' ');
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="pill ${statusCls}">${statusTxt}</span></td>
+      <td>${i.event_name}<div class="hint">${i.message||""}</div></td>
+      <td class="hint">${i.source_tab}</td>
+      <td></td>
+      <td class="mono">${new Date(i.start).toLocaleString()}</td>
+      <td></td>`;
+    // Room selector
+    const sel = document.createElement("select");
+    sel.className = "roomsel";
+    sel.innerHTML = `<option value="">— none —</option>` +
+      ROOMS.map(l=>`<option value="${l}" ${i.pcr===l?"selected":""}>Room ${l}</option>`).join("");
+    sel.onchange = () => { upsertOv(i, {control_room: sel.value || null}); toast("Room staged — Save to apply"); };
+    tr.children[3].appendChild(sel);
+    // Ignore toggle
+    const wrap = document.createElement("div"); wrap.className = "inline";
+    const cb = document.createElement("input"); cb.type = "checkbox";
+    const existing = findOv(i.source_tab, i.event_date, i.event_name, i.occurrence||0);
+    cb.checked = !!(existing && existing.ignore);
+    cb.onchange = () => { upsertOv(i, {ignore: cb.checked || null}); toast(cb.checked?"Will be ignored — Save to apply":"Ignore cleared"); };
+    const lbl = document.createElement("span"); lbl.className = "hint"; lbl.textContent = "ignore";
+    wrap.appendChild(cb); wrap.appendChild(lbl);
+    tr.children[5].appendChild(wrap);
+    tb.appendChild(tr);
+  });
 }
 
 async function loadChannels(){
@@ -329,6 +489,7 @@ async function loadChannels(){
 
 // Wire up buttons
 $("btnAddPcr").onclick = () => addPcrRow();
+$("btnRefreshTabs").onclick = () => loadTabs();
 $("btnSave").onclick = async () => {
   const r = await api("POST","/api/config", gather());
   if (r.valid) toast("Saved ✓");
@@ -365,6 +526,7 @@ $("btnRun").onclick = async () => {
   await loadConfig();
   await refreshStatus();
   loadChannels();
+  loadTabs();
   setInterval(refreshStatus, 15000);
 })();
 </script>

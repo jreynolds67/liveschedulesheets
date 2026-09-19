@@ -70,7 +70,7 @@ class SettingsStore:
         merged = copy.deepcopy(current)
 
         for section in ("sheet", "date_parsing", "scheduling", "pcr_channel_map",
-                        "lsp", "runtime"):
+                        "lsp", "runtime", "tab_overrides", "event_overrides"):
             if section in incoming and incoming[section] is not None:
                 merged[section] = incoming[section]
 

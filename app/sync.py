@@ -48,6 +48,8 @@ class PlanItem:
             "message": self.message,
             "source_tab": self.event.source_tab,
             "source_column": self.event.source_column,
+            "event_date": self.event.event_date,
+            "occurrence": self.event.occurrence,
         }
 
 

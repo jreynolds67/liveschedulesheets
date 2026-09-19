@@ -86,6 +86,14 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.get("/api/tabs")
+    @require_auth
+    def tabs():
+        try:
+            return jsonify({"ok": True, "tabs": manager.tabs()})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     @app.post("/api/test")
     @require_auth
     def test():
