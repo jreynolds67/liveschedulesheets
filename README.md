@@ -46,6 +46,9 @@ Once deployed, open **`http://<docker-host>:8080`**. From there an engineer can:
   name): assign/correct the control room, override the start time, or ignore an
   event. They persist in the overrides list until removed.
 - **Run now**, and see the **last-run status**.
+- **Clean up test events** — the *Events created by this tool* card lists every
+  event this tool created and can **delete just those** from LSP in one click.
+  Events already in LSP (or created by hand) are never touched.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
 picks up changes automatically. (Optional: protect the UI with HTTP Basic auth
@@ -154,10 +157,20 @@ docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
 
 Each event is matched by **channel + name + start minute (UTC)**:
 - The local `state.json` (on the `lss_state` volume) records what was created.
+  Events this tool creates are tagged `created_by_tool`; events found already in
+  LSP are tagged `existed` (and are never deleted by the cleanup below).
 - LSP is queried per channel each pass and is the source of truth, so duplicates
   are avoided even if the state file is lost. Editing an event's **name or start
   time** in the sheet creates a *new* LSP event; delete the old one in LSP if
   needed.
+
+### Deleting tool-created events (testing)
+
+The UI's *Events created by this tool* card (and `POST /api/delete-created`)
+removes **only** the events this tool created — read from the `created_by_tool`
+entries in `state.json` and deleted via `DELETE /api/v1/RemoveEvent`. After a
+delete they are forgotten from state, so a later pass will re-create them. This
+lets you iterate during testing without wiping hand-made events in LSP.
 
 ## Configuration reference
 

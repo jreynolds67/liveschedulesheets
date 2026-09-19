@@ -125,6 +125,17 @@ class LspClient:
             )
         return resp.json()
 
+    def remove_event(self, event_id: str) -> None:
+        """Delete a single event by its LSP id (DELETE /api/v1/RemoveEvent)."""
+        resp = self._request(
+            "DELETE", "/api/v1/RemoveEvent", json={"EventId": event_id}
+        )
+        # 200/204 = removed; 404 = already gone, which we treat as success.
+        if resp.status_code not in (200, 202, 204, 404):
+            raise LspError(
+                f"RemoveEvent failed for {event_id} ({resp.status_code}): {resp.text[:300]}"
+            )
+
 
 def _iso(dt: datetime) -> str:
     """RFC3339 / ISO-8601 with offset, e.g. 2026-09-12T15:20:00-04:00."""

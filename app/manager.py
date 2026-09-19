@@ -78,6 +78,16 @@ class SyncManager:
             chans = syncer.lsp.get_all_channels()
         return [{"Id": c.get("Id"), "Name": c.get("Name")} for c in chans]
 
+    def created_events(self) -> list[dict]:
+        with self._lock:
+            _, syncer = self._components()
+            return syncer.created_events()
+
+    def delete_created(self) -> dict:
+        with self._lock:
+            _, syncer = self._components()
+            return syncer.delete_created()
+
     def tabs(self) -> list[dict]:
         """Visible tabs in the sheet with their current UI state."""
         with self._lock:
@@ -110,10 +120,12 @@ class SyncManager:
         cfg_ok, cfg_err = True, None
         interval = None
         dry_run = None
+        created_count = 0
         try:
-            cfg, _ = self._components()
+            cfg, syncer = self._components()
             interval = cfg.runtime.poll_interval_seconds
             dry_run = cfg.runtime.dry_run
+            created_count = len(syncer.state.tool_created())
         except ConfigError as exc:
             cfg_ok, cfg_err = False, str(exc)
         return {
@@ -121,6 +133,7 @@ class SyncManager:
             "config_error": cfg_err,
             "poll_interval_seconds": interval,
             "dry_run": dry_run,
+            "created_count": created_count,
             "loop_running": bool(self._thread and self._thread.is_alive()),
             "last_run": self.last_run,
             "last_error": self.last_error,

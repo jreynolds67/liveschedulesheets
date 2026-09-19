@@ -145,7 +145,9 @@ class Syncer:
                      item.lsp_name, item.event.pcr, item.event.start.isoformat(), event_id)
             self.state.mark(item.event.dedup_key(),
                             {"name": item.lsp_name, "channel_id": item.channel_id,
-                             "event_id": event_id, "created_at": _now_iso()})
+                             "event_id": event_id, "created_at": _now_iso(),
+                             "created_by_tool": True,
+                             "pcr": item.event.pcr, "source_tab": item.event.source_tab})
             summary["created"] += 1
 
         self.state.save()
@@ -154,6 +156,45 @@ class Syncer:
             "out-of-window=%(skipped_window)d no-channel=%(no_channel)d errors=%(errors)d",
             summary,
         )
+        return summary
+
+    # -- cleanup (testing) --------------------------------------------------
+
+    def created_events(self) -> list[dict]:
+        """The events this tool created (from local state), for display."""
+        out = []
+        for _key, info in self.state.tool_created():
+            out.append({
+                "name": info.get("name"),
+                "pcr": info.get("pcr"),
+                "source_tab": info.get("source_tab"),
+                "channel_id": info.get("channel_id"),
+                "event_id": info.get("event_id"),
+                "created_at": info.get("created_at"),
+            })
+        out.sort(key=lambda e: e.get("created_at") or "")
+        return out
+
+    def delete_created(self) -> dict:
+        """Delete from LSP every event this tool created, then forget them.
+
+        Only touches events tagged as tool-created in local state, so events
+        already present in LSP (or made by hand) are never removed.
+        """
+        summary = {"deleted": 0, "failed": 0, "errors": []}
+        for key, info in self.state.tool_created():
+            event_id = info.get("event_id")
+            try:
+                self.lsp.remove_event(event_id)
+                self.state.unmark(key)
+                summary["deleted"] += 1
+                log.info("Deleted tool-created event %r (id=%s)", info.get("name"), event_id)
+            except LspError as exc:
+                summary["failed"] += 1
+                summary["errors"].append(f"{info.get('name')}: {exc}")
+                log.warning("Could not delete event %s: %s", event_id, exc)
+        self.state.save()
+        log.info("Cleanup complete: deleted=%d failed=%d", summary["deleted"], summary["failed"])
         return summary
 
     # -- helpers ------------------------------------------------------------

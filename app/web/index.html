@@ -40,6 +40,7 @@
     padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; }
   button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
   button.good { background:var(--accent2); }
+  button.danger { background:transparent; border:1px solid var(--err); color:var(--err); }
   button:disabled { opacity:.5; cursor:default; }
   .btns { display:flex; gap:10px; flex-wrap:wrap; }
   .hint { font-size:12px; color:var(--muted); }
@@ -196,6 +197,18 @@
   <!-- Status -->
   <section class="card"><h2>Status</h2><div class="body">
     <div id="statusBox" class="hint">…</div>
+  </div></section>
+
+  <!-- Cleanup / testing -->
+  <section class="card"><h2>Events created by this tool</h2><div class="body">
+    <div class="hint">Only events <b>this tool</b> created are listed and deleted here — events
+      already in Live Schedule Pro (or made by hand) are never touched. Useful for cleaning up
+      between test runs.</div>
+    <div id="createdBox" class="hint">…</div>
+    <div class="btns">
+      <button id="btnRefreshCreated" class="ghost">Refresh</button>
+      <button id="btnDeleteCreated" class="danger">Delete tool-created events</button>
+    </div>
   </div></section>
 </main>
 
@@ -427,7 +440,7 @@ async function refreshStatus(){
   else { b.className="badge ok"; b.textContent="running"; }
   let html = "";
   if (s.config_error) html += `<div style="color:var(--err)">⚠ ${s.config_error}</div>`;
-  html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"}</div>`;
+  html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"} · tool-created events tracked: <b>${s.created_count??0}</b></div>`;
   if (s.last_run){ const su=s.last_run.summary;
     html += `<div>Last ${s.last_run.trigger} run ${new Date(s.last_run.time).toLocaleString()}: `
       + `created <b>${su.created}</b>, existing ${su.skipped_existing}, out-of-window ${su.skipped_window}, `
@@ -476,6 +489,21 @@ function renderPreview(items){
   });
 }
 
+async function loadCreated(){
+  const r = await api("GET","/api/created");
+  const box = $("createdBox");
+  if (!r.ok){ box.className="hint"; box.innerHTML = `<span style="color:var(--err)">${r.error||"Could not load"}</span>`; return; }
+  const evs = r.events || [];
+  $("btnDeleteCreated").disabled = evs.length === 0;
+  if (!evs.length){ box.className="hint"; box.textContent = "No events created by this tool yet."; return; }
+  box.className = "";
+  const rows = evs.map(e => `<tr>
+    <td>${e.name||""}</td><td>${e.pcr||""}</td><td class="hint">${e.source_tab||""}</td>
+    <td class="mono hint">${e.created_at?new Date(e.created_at).toLocaleString():""}</td></tr>`).join("");
+  box.innerHTML = `<div class="hint" style="margin-bottom:8px">${evs.length} event(s) tracked as created by this tool:</div>
+    <table><thead><tr><th>Event</th><th>Room</th><th>Tab</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 async function loadChannels(){
   const r = await api("GET","/api/channels");
   if (r.ok){
@@ -490,6 +518,18 @@ async function loadChannels(){
 // Wire up buttons
 $("btnAddPcr").onclick = () => addPcrRow();
 $("btnRefreshTabs").onclick = () => loadTabs();
+$("btnRefreshCreated").onclick = () => loadCreated();
+$("btnDeleteCreated").onclick = async () => {
+  if (!confirm("Delete every event this tool created from Live Schedule Pro?\n\nOnly tool-created events are removed; anything else in LSP is left alone.")) return;
+  $("btnDeleteCreated").disabled = true; $("btnDeleteCreated").textContent = "Deleting…";
+  const r = await api("POST","/api/delete-created");
+  $("btnDeleteCreated").textContent = "Delete tool-created events";
+  if (r.ok){ const s=r.summary;
+    toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}`);
+    if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
+  } else toast("Delete failed: " + r.error, 5000);
+  loadCreated(); refreshStatus();
+};
 $("btnSave").onclick = async () => {
   const r = await api("POST","/api/config", gather());
   if (r.valid) toast("Saved ✓");
@@ -519,7 +559,7 @@ $("btnRun").onclick = async () => {
   $("btnRun").disabled = false; $("btnRun").textContent = "Run now";
   if (r.ok){ const s=r.summary; toast(`Created ${s.created}, skipped ${s.skipped_existing} existing`); }
   else toast("Run failed: " + r.error, 5000);
-  refreshStatus();
+  refreshStatus(); loadCreated();
 };
 
 (async function init(){
@@ -527,6 +567,7 @@ $("btnRun").onclick = async () => {
   await refreshStatus();
   loadChannels();
   loadTabs();
+  loadCreated();
   setInterval(refreshStatus, 15000);
 })();
 </script>

@@ -38,6 +38,25 @@ class State:
     def mark(self, key: str, info: dict) -> None:
         self.created[key] = info
 
+    def unmark(self, key: str) -> None:
+        self.created.pop(key, None)
+
+    def tool_created(self) -> list[tuple[str, dict]]:
+        """(key, info) pairs for events THIS tool actually created in LSP.
+
+        Excludes entries recorded only because they already existed in LSP
+        (marked `existed`), which we must never delete.
+        """
+        out = []
+        for key, info in self.created.items():
+            if not isinstance(info, dict):
+                continue
+            if info.get("existed") and not info.get("created_by_tool"):
+                continue
+            if info.get("event_id"):
+                out.append((key, info))
+        return out
+
     def save(self) -> None:
         directory = os.path.dirname(self.path) or "."
         try:
