@@ -30,9 +30,8 @@ log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-# Canonical control rooms. The sheets use bare letters (A..E) on the current
-# tabs and "CR1".."CR5" / "CR 3" on older ones; both name the same five rooms
-# (A=CR1 ... E=CR5). We normalize everything to the letter.
+# Canonical control rooms. Live tabs use bare letters (A..E) in the CONTROL
+# ROOM row; that is the only accepted form.
 _ROOM_LETTERS = ["A", "B", "C", "D", "E"]
 
 
@@ -52,7 +51,7 @@ class SheetReader:
 
     def read_events(self) -> list[ScheduledEvent]:
         events: list[ScheduledEvent] = []
-        for tab in self.cfg.sheet.tabs:
+        for tab in self._tabs_to_read():
             if not self._tab_enabled(tab):
                 log.info("Tab %r is disabled; skipping", tab)
                 continue
@@ -63,7 +62,49 @@ class SheetReader:
                 log.exception("Failed to read tab %r", tab)
         return events
 
+    def _tabs_to_read(self) -> list[str]:
+        """Which tabs to parse: the visible tabs, minus hidden ones.
+
+        Hidden tabs (COUNT, the stale *RELAYOUT composites) are skipped
+        automatically. If `sheet.tabs` is configured, it is used as an explicit
+        allow-list but hidden tabs are still dropped; if it is empty, every
+        visible tab is read (auto-discovery).
+        """
+        try:
+            visible = self._visible_tabs()
+        except Exception:  # noqa: BLE001 - metadata call is best-effort
+            log.exception("Could not read tab metadata; falling back to configured tabs")
+            return list(self.cfg.sheet.tabs)
+
+        configured = list(self.cfg.sheet.tabs)
+        if not configured:
+            return visible  # auto-discover: all visible tabs
+
+        visible_set = set(visible)
+        result = []
+        for tab in configured:
+            if tab in visible_set:
+                result.append(tab)
+            else:
+                log.info("Tab %r is hidden or missing; skipping", tab)
+        return result
+
     # -- Google fetch -------------------------------------------------------
+
+    def _visible_tabs(self) -> list[str]:
+        resp = (
+            self.service.spreadsheets()
+            .get(
+                spreadsheetId=self.cfg.sheet.spreadsheet_id,
+                fields="sheets.properties(title,hidden,index)",
+            )
+            .execute()
+        )
+        sheets = sorted(
+            (s.get("properties", {}) for s in resp.get("sheets", [])),
+            key=lambda p: p.get("index", 0),
+        )
+        return [p["title"] for p in sheets if p.get("title") and not p.get("hidden")]
 
     def _fetch_grid(self, tab: str) -> list[list[str]]:
         # FORMATTED_VALUE returns the strings as displayed in the sheet, which
@@ -315,19 +356,15 @@ def _parse_naive_with_year_flag(text: str) -> tuple[datetime, bool]:
 def _normalize_room(value: str) -> Optional[str]:
     """Normalize a control-room cell to a canonical letter A..E.
 
-    Accepts 'A', 'PCR A', 'Control Room B', 'CR1', 'CR 3', bare '2', etc.
-    A=CR1 ... E=CR5. Returns None for blanks / 'N/A' / anything unrecognized.
+    Accepts 'A', 'PCR A', 'Control Room B'. Returns None for blanks / 'N/A' /
+    anything unrecognized. Numeric "CR n" forms are intentionally NOT mapped --
+    live tabs use letters, and silently rewriting numbers would hide mistakes.
     """
     if value is None:
         return None
     v = str(value).strip().upper()
     if not v or v in ("N/A", "NA", "TBD", "TBA", "-", "OFF", "NONE"):
         return None
-
-    # "CR3" / "CR 3" / bare "3" -> room number -> letter.
-    num = re.search(r"\bCR\s*([1-5])\b", v) or re.fullmatch(r"([1-5])", v)
-    if num:
-        return _ROOM_LETTERS[int(num.group(1)) - 1]
 
     # Prefer a standalone single-letter token (handles "PCR A", "CONTROL ROOM B").
     for tok in v.replace("-", " ").split():

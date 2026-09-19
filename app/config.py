@@ -164,9 +164,9 @@ def parse_config(raw: dict) -> Config:
     except ZoneInfoNotFoundError as exc:
         raise ConfigError(f"Unknown timezone '{tz_name}'") from exc
 
+    # Empty tabs => auto-discover all VISIBLE tabs at runtime (hidden tabs like
+    # COUNT / the stale *RELAYOUT composites are always skipped).
     tabs = _as_list(sheet_raw.get("tabs"))
-    if not tabs:
-        raise ConfigError("sheet.tabs must list at least one worksheet tab")
 
     sheet = SheetConfig(
         spreadsheet_id=_require(sheet_raw, "spreadsheet_id", "sheet"),
