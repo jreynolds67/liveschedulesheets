@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets & live config (only config.example.yaml is tracked)
+.env
+config.yaml
+*-service-account*.json
+credentials*.json
+
+# Runtime data / state
+/data/
+state.json
+
+# macOS
+.DS_Store

@@ -1,0 +1,30 @@
+# Deploy this stack in Portainer (Stacks -> Add stack).
+# Set secrets as stack environment variables. Most configuration is done in the
+# web UI (http://<host>:8080) and stored on the lss_state volume.
+services:
+  liveschedulesheets:
+    build: .
+    # Or, if you push the image to a registry:
+    # image: your-registry/liveschedulesheets:latest
+    container_name: liveschedulesheets
+    restart: unless-stopped
+    ports:
+      - "8080:8080"            # web UI
+    environment:
+      # Optional: seed the LSP login here, or set it in the web UI instead.
+      LSP_USERNAME: ${LSP_USERNAME:-}
+      LSP_PASSWORD: ${LSP_PASSWORD:-}
+      # Google service-account key path INSIDE the container (see volume below).
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/service-account.json
+      # Optional HTTP Basic auth for the UI (leave unset to disable).
+      UI_USER: ${UI_USER:-}
+      UI_PASSWORD: ${UI_PASSWORD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # Google service-account key (read-only).
+      - ./secrets/service-account.json:/secrets/service-account.json:ro
+      # Persistent config (config.yaml) + de-dup state (state.json).
+      - lss_state:/data
+
+volumes:
+  lss_state:

@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Live Schedule Sheets</title>
+<style>
+  :root {
+    --bg:#0f1420; --panel:#181f2e; --panel2:#1f2838; --line:#2b3648;
+    --text:#e6ebf2; --muted:#93a1b5; --accent:#4f8cff; --accent2:#3bd188;
+    --warn:#f5b544; --err:#ff6b6b; --radius:10px;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:14px 22px;
+    background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:16px; margin:0; font-weight:600; letter-spacing:.2px; }
+  header .spacer { flex:1; }
+  .badge { padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; }
+  .badge.ok { background:rgba(59,209,136,.15); color:var(--accent2); }
+  .badge.bad { background:rgba(255,107,107,.15); color:var(--err); }
+  .badge.warn { background:rgba(245,181,68,.15); color:var(--warn); }
+  main { max-width:960px; margin:0 auto; padding:22px; display:grid; gap:18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
+    margin:0; padding:14px 18px; border-bottom:1px solid var(--line); }
+  .card .body { padding:16px 18px; display:grid; gap:14px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
+  @media (max-width:680px){ .grid2,.grid3{ grid-template-columns:1fr; } }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
+  input[type=text], input[type=number], input[type=password], select {
+    width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:9px 10px; font-size:14px; }
+  input:focus, select:focus { outline:none; border-color:var(--accent); }
+  .row { display:flex; align-items:center; gap:10px; }
+  .switch { display:flex; align-items:center; gap:8px; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:8px;
+    padding:9px 16px; font-size:14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  button.good { background:var(--accent2); }
+  button:disabled { opacity:.5; cursor:default; }
+  .btns { display:flex; gap:10px; flex-wrap:wrap; }
+  .hint { font-size:12px; color:var(--muted); }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px;
+    text-transform:uppercase; letter-spacing:.6px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .pill { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; }
+  .pill.create { background:rgba(79,140,255,.18); color:var(--accent); }
+  .pill.exists { background:rgba(147,161,181,.16); color:var(--muted); }
+  .pill.out_of_window { background:rgba(245,181,68,.16); color:var(--warn); }
+  .pill.no_channel { background:rgba(255,107,107,.16); color:var(--err); }
+  .pcr-row { display:grid; grid-template-columns:70px 1fr 1fr 34px; gap:10px; align-items:end; }
+  .pcr-row .rm { background:transparent; border:1px solid var(--line); color:var(--err);
+    padding:9px 0; border-radius:8px; }
+  #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    background:var(--panel2); border:1px solid var(--line); padding:10px 16px; border-radius:8px;
+    opacity:0; transition:opacity .2s; pointer-events:none; max-width:80vw; }
+  #toast.show { opacity:1; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Live Schedule&nbsp;Sheets</h1>
+  <span id="statusBadge" class="badge warn">loading…</span>
+  <div class="spacer"></div>
+  <div class="btns">
+    <button id="btnTest" class="ghost">Test connection</button>
+    <button id="btnPreview" class="ghost">Preview events</button>
+    <button id="btnRun" class="ghost">Run now</button>
+    <button id="btnSave" class="good">Save</button>
+  </div>
+</header>
+
+<main>
+  <!-- Connection -->
+  <section class="card"><h2>Live Schedule Pro connection</h2><div class="body">
+    <div class="grid2">
+      <div><label>Server base URL</label>
+        <input type="text" id="lsp_base_url" placeholder="https://lsp.example.com" /></div>
+      <div><label>Verify SSL certificate</label>
+        <div class="switch"><input type="checkbox" id="lsp_verify_ssl" /><span class="hint">Uncheck only for self-signed certs</span></div></div>
+    </div>
+    <div class="grid2">
+      <div><label>Username</label><input type="text" id="lsp_username" autocomplete="off" /></div>
+      <div><label>Password <span id="pwSet" class="hint"></span></label>
+        <input type="password" id="lsp_password" autocomplete="new-password" placeholder="•••••• (leave blank to keep)" /></div>
+    </div>
+    <div class="hint" id="testResult"></div>
+  </div></section>
+
+  <!-- Sheet -->
+  <section class="card"><h2>Google Sheet</h2><div class="body">
+    <div><label>Spreadsheet ID</label><input type="text" id="sheet_id" class="mono" /></div>
+    <div class="grid3">
+      <div><label>Composite tab name</label><input type="text" id="sheet_tab" /></div>
+      <div><label>Header column</label><input type="text" id="sheet_header_col" value="A" /></div>
+      <div><label>Timezone (IANA)</label><input type="text" id="sheet_tz" placeholder="America/New_York" /></div>
+    </div>
+    <div class="hint">Google service-account key: <span id="googleSet"></span> (mounted into the container).</div>
+  </div></section>
+
+  <!-- PCR mapping -->
+  <section class="card"><h2>PCR → channel mapping</h2><div class="body">
+    <div class="hint">Map each PCR letter from the sheet to a Live Schedule Pro channel. Use a channel name (matched live) or paste a channel ID.</div>
+    <div id="pcrRows"></div>
+    <div class="row"><button id="btnAddPcr" class="ghost">+ Add PCR</button>
+      <span class="hint" id="channelHint"></span></div>
+    <datalist id="channelNames"></datalist>
+  </div></section>
+
+  <!-- Scheduling -->
+  <section class="card"><h2>Scheduling</h2><div class="body">
+    <div class="grid3">
+      <div><label>Lead-in (minutes before start)</label><input type="number" id="lead_in" min="0" /></div>
+      <div><label>Safety-cap duration (hours)</label><input type="number" id="safety_cap" min="0" step="0.5" /></div>
+      <div><label>Event name prefix</label><input type="text" id="name_prefix" placeholder="(optional)" /></div>
+    </div>
+    <div class="grid2">
+      <div><label>Only schedule within (days ahead)</label><input type="number" id="horizon" min="1" /></div>
+      <div><label>Ignore starts older than (minutes)</label><input type="number" id="past_grace" min="0" /></div>
+    </div>
+  </div></section>
+
+  <!-- Runtime -->
+  <section class="card"><h2>Runtime</h2><div class="body">
+    <div class="grid2">
+      <div><label>Sync interval (seconds)</label><input type="number" id="poll_interval" min="60" /></div>
+      <div><label>Dry run</label>
+        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint">Log what would happen; create nothing</span></div></div>
+    </div>
+    <details><summary>Advanced: labels &amp; date parsing</summary>
+      <div class="body" style="padding:14px 0 0;">
+        <div class="grid2">
+          <div><label>EVENT name label(s)</label><input type="text" id="lbl_event" /></div>
+          <div><label>PCR label(s)</label><input type="text" id="lbl_pcr" /></div>
+        </div>
+        <div class="grid3">
+          <div><label>Combined datetime label(s)</label><input type="text" id="lbl_datetime" /></div>
+          <div><label>Date label(s)</label><input type="text" id="lbl_date" /></div>
+          <div><label>Time label(s)</label><input type="text" id="lbl_time" /></div>
+        </div>
+        <div class="hint">Comma-separated; first match in the tab wins.</div>
+        <div class="grid3">
+          <div><label>Academic year start</label><input type="number" id="dp_year" /></div>
+          <div><label>Rollover month</label><input type="number" id="dp_rollover" min="1" max="12" /></div>
+          <div><label>Skip values</label><input type="text" id="dp_skip" placeholder="TBD, TBA" /></div>
+        </div>
+      </div>
+    </details>
+  </div></section>
+
+  <!-- Preview -->
+  <section class="card"><h2>Preview</h2><div class="body">
+    <div id="previewBox" class="hint">Click “Preview events” to see what the next sync would do (no changes made).</div>
+  </div></section>
+
+  <!-- Status -->
+  <section class="card"><h2>Status</h2><div class="body">
+    <div id="statusBox" class="hint">…</div>
+  </div></section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let cfg = {};
+
+function toast(msg, ms=2600){ const t=$("toast"); t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"), ms); }
+function csv(arr){ return (arr||[]).join(", "); }
+function fromCsv(s){ return (s||"").split(",").map(x=>x.trim()).filter(Boolean); }
+function get(o, path, d){ return path.split(".").reduce((a,k)=> (a&&a[k]!=null)?a[k]:undefined, o) ?? d; }
+
+async function api(method, url, body){
+  const r = await fetch(url, {method, headers:{"Content-Type":"application/json"},
+    body: body?JSON.stringify(body):undefined});
+  return r.json();
+}
+
+function fillForm(){
+  $("lsp_base_url").value = get(cfg,"lsp.base_url","");
+  $("lsp_verify_ssl").checked = get(cfg,"lsp.verify_ssl",true);
+  $("lsp_username").value = get(cfg,"lsp.username","");
+  $("lsp_password").value = "";
+  $("pwSet").textContent = get(cfg,"lsp.password_set",false) ? "(set)" : "(not set)";
+  $("googleSet").textContent = cfg.google_credentials_set ? "configured ✓" : "NOT configured";
+
+  $("sheet_id").value = get(cfg,"sheet.spreadsheet_id","");
+  const tabs = get(cfg,"sheet.tabs",[]); $("sheet_tab").value = tabs[0]||"";
+  $("sheet_header_col").value = get(cfg,"sheet.header_column","A");
+  $("sheet_tz").value = get(cfg,"sheet.timezone","America/New_York");
+
+  $("lead_in").value = get(cfg,"scheduling.lead_in_minutes",10);
+  $("safety_cap").value = get(cfg,"scheduling.safety_cap_hours",6);
+  $("name_prefix").value = get(cfg,"scheduling.event_name_prefix","");
+  $("horizon").value = get(cfg,"scheduling.horizon_days",60);
+  $("past_grace").value = get(cfg,"scheduling.past_grace_minutes",30);
+
+  $("poll_interval").value = get(cfg,"runtime.poll_interval_seconds",900);
+  $("dry_run").checked = get(cfg,"runtime.dry_run",false);
+
+  $("lbl_event").value = csv(get(cfg,"sheet.labels.event_name",["EVENT"]));
+  $("lbl_pcr").value = csv(get(cfg,"sheet.labels.pcr",["PCR"]));
+  $("lbl_datetime").value = csv(get(cfg,"sheet.labels.datetime",[]));
+  $("lbl_date").value = csv(get(cfg,"sheet.labels.date",[]));
+  $("lbl_time").value = csv(get(cfg,"sheet.labels.time",[]));
+  $("dp_year").value = get(cfg,"date_parsing.academic_year_start","");
+  $("dp_rollover").value = get(cfg,"date_parsing.rollover_month",8);
+  $("dp_skip").value = csv(get(cfg,"date_parsing.skip_values",["TBD","TBA"]));
+
+  renderPcr(get(cfg,"pcr_channel_map",{}));
+}
+
+function renderPcr(map){
+  const box = $("pcrRows"); box.innerHTML = "";
+  const letters = Object.keys(map).length ? Object.keys(map) : ["A","B","C","D","E","V"];
+  letters.forEach(letter => addPcrRow(letter, map[letter]||{}));
+}
+function addPcrRow(letter="", ref={}){
+  const div = document.createElement("div"); div.className="pcr-row";
+  div.innerHTML = `
+    <div><label>PCR</label><input type="text" class="pcr-letter" value="${letter}" maxlength="3" /></div>
+    <div><label>Channel name</label><input type="text" class="pcr-name" list="channelNames" value="${ref.channel_name||""}" /></div>
+    <div><label>Channel ID (optional)</label><input type="text" class="pcr-id mono" value="${ref.channel_id||""}" /></div>
+    <button class="rm" title="Remove">✕</button>`;
+  div.querySelector(".rm").onclick = () => div.remove();
+  $("pcrRows").appendChild(div);
+}
+
+function gather(){
+  cfg.lsp = cfg.lsp || {};
+  cfg.lsp.base_url = $("lsp_base_url").value.trim();
+  cfg.lsp.verify_ssl = $("lsp_verify_ssl").checked;
+  cfg.lsp.username = $("lsp_username").value.trim();
+  const pw = $("lsp_password").value;
+  if (pw) cfg.lsp.password = pw;            // only send when changed
+  delete cfg.lsp.password_set;
+
+  cfg.sheet = cfg.sheet || {};
+  cfg.sheet.spreadsheet_id = $("sheet_id").value.trim();
+  cfg.sheet.tabs = [ $("sheet_tab").value.trim() ].filter(Boolean);
+  cfg.sheet.header_column = $("sheet_header_col").value.trim() || "A";
+  cfg.sheet.timezone = $("sheet_tz").value.trim();
+  cfg.sheet.labels = {
+    event_name: fromCsv($("lbl_event").value),
+    pcr: fromCsv($("lbl_pcr").value),
+    datetime: fromCsv($("lbl_datetime").value),
+    date: fromCsv($("lbl_date").value),
+    time: fromCsv($("lbl_time").value),
+  };
+
+  cfg.scheduling = cfg.scheduling || {};
+  cfg.scheduling.lead_in_minutes = +$("lead_in").value;
+  cfg.scheduling.safety_cap_hours = +$("safety_cap").value;
+  cfg.scheduling.event_name_prefix = $("name_prefix").value;
+  cfg.scheduling.horizon_days = +$("horizon").value;
+  cfg.scheduling.past_grace_minutes = +$("past_grace").value;
+
+  cfg.runtime = cfg.runtime || {};
+  cfg.runtime.poll_interval_seconds = +$("poll_interval").value;
+  cfg.runtime.dry_run = $("dry_run").checked;
+
+  cfg.date_parsing = cfg.date_parsing || {};
+  cfg.date_parsing.academic_year_start = +$("dp_year").value || 0;
+  cfg.date_parsing.rollover_month = +$("dp_rollover").value || 8;
+  cfg.date_parsing.skip_values = fromCsv($("dp_skip").value);
+
+  const map = {};
+  document.querySelectorAll(".pcr-row").forEach(r => {
+    const L = r.querySelector(".pcr-letter").value.trim().toUpperCase();
+    if (!L) return;
+    const name = r.querySelector(".pcr-name").value.trim();
+    const id = r.querySelector(".pcr-id").value.trim();
+    map[L] = {}; if (name) map[L].channel_name = name; if (id) map[L].channel_id = id;
+  });
+  cfg.pcr_channel_map = map;
+  delete cfg.google_credentials_set;
+  return cfg;
+}
+
+async function loadConfig(){ cfg = await api("GET","/api/config"); fillForm(); }
+
+async function refreshStatus(){
+  const s = await api("GET","/api/status");
+  const b = $("statusBadge");
+  if (!s.config_ok){ b.className="badge bad"; b.textContent="config incomplete"; }
+  else if (s.dry_run){ b.className="badge warn"; b.textContent="running (dry run)"; }
+  else { b.className="badge ok"; b.textContent="running"; }
+  let html = "";
+  if (s.config_error) html += `<div style="color:var(--err)">⚠ ${s.config_error}</div>`;
+  html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"}</div>`;
+  if (s.last_run){ const su=s.last_run.summary;
+    html += `<div>Last ${s.last_run.trigger} run ${new Date(s.last_run.time).toLocaleString()}: `
+      + `created <b>${su.created}</b>, existing ${su.skipped_existing}, out-of-window ${su.skipped_window}, `
+      + `no-channel ${su.no_channel||0}, errors ${su.errors}</div>`; }
+  if (s.last_error) html += `<div style="color:var(--err)">Last error: ${s.last_error}</div>`;
+  $("statusBox").innerHTML = html;
+}
+
+function renderPreview(items){
+  if (!items.length){ $("previewBox").innerHTML = "No schedulable events found."; return; }
+  const rows = items.map(i => `<tr>
+    <td><span class="pill ${i.status}">${i.status.replace(/_/g,' ')}</span></td>
+    <td>${i.name}</td><td>${i.pcr}</td>
+    <td class="mono">${new Date(i.start).toLocaleString()}</td>
+    <td class="mono">${new Date(i.end).toLocaleTimeString()}</td>
+    <td class="hint">${i.message}</td></tr>`).join("");
+  $("previewBox").innerHTML = `<table><thead><tr>
+    <th>Status</th><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th></th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function loadChannels(){
+  const r = await api("GET","/api/channels");
+  if (r.ok){
+    $("channelNames").innerHTML = r.channels.filter(c=>c.Name)
+      .map(c=>`<option value="${c.Name}">`).join("");
+    $("channelHint").textContent = `${r.channels.length} channel(s) available`;
+  } else {
+    $("channelHint").textContent = "Could not load channels: " + (r.error||"");
+  }
+}
+
+// Wire up buttons
+$("btnAddPcr").onclick = () => addPcrRow();
+$("btnSave").onclick = async () => {
+  const r = await api("POST","/api/config", gather());
+  if (r.valid) toast("Saved ✓");
+  else toast("Saved, but config incomplete: " + r.error, 5000);
+  refreshStatus();
+};
+$("btnTest").onclick = async () => {
+  await api("POST","/api/config", gather());          // save first so test uses current values
+  $("testResult").textContent = "Testing…";
+  const r = await api("POST","/api/test");
+  if (r.ok){ $("testResult").innerHTML = `<span style="color:var(--accent2)">✓ Connected — ${r.channel_count} channel(s): ${r.channels.join(", ")}</span>`;
+    loadChannels(); }
+  else $("testResult").innerHTML = `<span style="color:var(--err)">✗ ${r.error}</span>`;
+};
+$("btnPreview").onclick = async () => {
+  await api("POST","/api/config", gather());
+  $("previewBox").textContent = "Loading preview…";
+  const r = await api("GET","/api/preview");
+  if (r.ok) renderPreview(r.items);
+  else $("previewBox").innerHTML = `<span style="color:var(--err)">${r.error}</span>`;
+};
+$("btnRun").onclick = async () => {
+  if (!confirm("Run a sync now? This will create events unless dry-run is on.")) return;
+  await api("POST","/api/config", gather());
+  $("btnRun").disabled = true; $("btnRun").textContent = "Running…";
+  const r = await api("POST","/api/run");
+  $("btnRun").disabled = false; $("btnRun").textContent = "Run now";
+  if (r.ok){ const s=r.summary; toast(`Created ${s.created}, skipped ${s.skipped_existing} existing`); }
+  else toast("Run failed: " + r.error, 5000);
+  refreshStatus();
+};
+
+(async function init(){
+  await loadConfig();
+  await refreshStatus();
+  loadChannels();
+  setInterval(refreshStatus, 15000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# LiveScheduleSheets configuration
+# Copy to config.yaml and edit for your environment.
+# Secrets (LSP login, Google key path) come from environment variables, NOT
+# this file -- see .env.example.
+# ---------------------------------------------------------------------------
+
+sheet:
+  # Spreadsheet ID from the URL:
+  #   https://docs.google.com/spreadsheets/d/<THIS PART>/edit
+  spreadsheet_id: "1TNVdUIEy1TNRAzBVEWmRnzxO-vwV3AzbYwDzm6GGOSQ"
+
+  # Which worksheet tab(s) to read. Each column is one event; the row headers
+  # live in `header_column`. Use the single composite tab you maintain.
+  tabs:
+    - "Composite"
+
+  # Column holding the row-header labels (the left-hand labels). Usually "A".
+  header_column: "A"
+
+  # For each field, a list of accepted row-header labels (case-insensitive,
+  # surrounding spaces ignored). The FIRST label found in the tab wins.
+  #
+  #   event_name + pcr are required per event. For the start instant, prefer a
+  #   single `datetime` cell holding a full date + time WITH YEAR (recommended:
+  #   no year guessing). Alternatively provide separate `date` + `time` labels.
+  labels:
+    event_name: ["EVENT"]
+    pcr: ["PCR", "CONTROL ROOM"]
+    # RECOMMENDED: one explicit cell, e.g. "2026-09-12 15:30" or "9/12/2026 3:30 PM"
+    datetime: ["START", "GAME START"]
+    # Fallback if you keep date and time in separate rows:
+    date: ["DATE"]
+    time: ["GAME TIME", "START TIME"]
+
+  # IANA timezone the sheet's times are written in.
+  timezone: "America/New_York"
+
+date_parsing:
+  # ONLY used as a fallback when a date has no year (e.g. bare "9/12"). If your
+  # composite START cells include the year (recommended), these are ignored.
+  # Months >= rollover_month belong to `academic_year_start`; earlier months
+  # roll to the next calendar year. e.g. 8/24 -> 2026-08-24, 4/11 -> 2027-04-11.
+  academic_year_start: 2026
+  rollover_month: 8
+  # Values (case-insensitive) that mean "no time yet" -> the column is skipped.
+  skip_values: ["TBD", "TBA", "N/A", "-", "OFF"]
+
+scheduling:
+  # Begin recording this many minutes BEFORE the sheet's start time.
+  lead_in_minutes: 10
+  # LSP requires an End. An engineer normally stops recording manually; if not,
+  # the event auto-stops this many hours after it starts.
+  safety_cap_hours: 6
+  # Only create events whose padded start is within this many days ahead.
+  horizon_days: 60
+  # Skip events whose start is more than this many minutes in the past.
+  past_grace_minutes: 30
+  # Optional prefix for the LSP event name, e.g. "AUTO " -> "AUTO FB vs UCF".
+  event_name_prefix: ""
+
+# PCR letter (from the sheet) -> Live Schedule Pro channel.
+# Use channel_name (matched against GetAllChannels) or channel_id (a UUID,
+# which takes precedence). A letter omitted here is logged and skipped.
+pcr_channel_map:
+  A: { channel_name: "PCR A" }
+  B: { channel_name: "PCR B" }
+  C: { channel_name: "PCR C" }
+  D: { channel_name: "PCR D" }
+  E: { channel_name: "PCR E" }
+  V: { channel_name: "PCR V" }
+
+lsp:
+  base_url: "https://live-schedule-pro.example.com"   # no trailing slash
+  verify_ssl: true                                     # false only for self-signed certs
+
+runtime:
+  poll_interval_seconds: 900   # 15 minutes
+  run_once: false              # true = one pass then exit (testing / cron)
+  dry_run: false               # true = log what would be created, create nothing
+  state_file: "/data/state.json"   # mount a volume so it survives restarts
+  log_level: "INFO"
