@@ -10,28 +10,34 @@ sheet:
   #   https://docs.google.com/spreadsheets/d/<THIS PART>/edit
   spreadsheet_id: "1TNVdUIEy1TNRAzBVEWmRnzxO-vwV3AzbYwDzm6GGOSQ"
 
-  # Which worksheet tab(s) to read. Each column is one event; the row headers
-  # live in `header_column`. Use the single composite tab you maintain.
-  tabs:
-    - "Composite"
+  # Which worksheet tabs to read. Each tab is one sport (Football, Fall
+  # Olympic, ...) in the same transposed layout: row headers down
+  # `header_column`, one event per column.
+  #
+  # LEAVE EMPTY to auto-discover every VISIBLE tab -- hidden tabs (e.g. COUNT
+  # and the old *RELAYOUT composites) are always skipped. Or list specific
+  # tabs as an allow-list (still intersected with the visible tabs).
+  tabs: []
+    # - "Football"
+    # - "Fall Olympic"
 
   # Column holding the row-header labels (the left-hand labels). Usually "A".
   header_column: "A"
 
   # For each field, a list of accepted row-header labels (case-insensitive,
-  # surrounding spaces ignored). The FIRST label found in the tab wins.
+  # surrounding spaces ignored). The FIRST matching row wins -- important for
+  # `pcr`, where a tab may repeat CONTROL ROOM for a secondary block we ignore.
   #
-  #   event_name + pcr are required per event. For the start instant, prefer a
-  #   single `datetime` cell holding a full date + time WITH YEAR (recommended:
-  #   no year guessing). Alternatively provide separate `date` + `time` labels.
+  #   event_name is required. The channel comes from the `pcr` (CONTROL ROOM)
+  #   row. For the start instant, these tabs keep DATE and the game time in
+  #   separate rows; a single combined `datetime` cell is also supported.
   labels:
     event_name: ["EVENT"]
-    pcr: ["PCR", "CONTROL ROOM"]
-    # RECOMMENDED: one explicit cell, e.g. "2026-09-12 15:30" or "9/12/2026 3:30 PM"
-    datetime: ["START", "GAME START"]
-    # Fallback if you keep date and time in separate rows:
+    pcr: ["CONTROL ROOM", "PCR"]
     date: ["DATE"]
-    time: ["GAME TIME", "START TIME"]
+    time: ["GAME START", "GAME TIME", "START TIME"]
+    # Optional: a single cell holding a full date + time WITH YEAR.
+    datetime: []
 
   # IANA timezone the sheet's times are written in.
   timezone: "America/New_York"
@@ -59,7 +65,7 @@ scheduling:
   # Optional prefix for the LSP event name, e.g. "AUTO " -> "AUTO FB vs UCF".
   event_name_prefix: ""
 
-# PCR letter (from the sheet) -> Live Schedule Pro channel.
+# CONTROL ROOM letter (from the sheet) -> Live Schedule Pro channel.
 # Use channel_name (matched against GetAllChannels) or channel_id (a UUID,
 # which takes precedence). A letter omitted here is logged and skipped.
 pcr_channel_map:
@@ -68,7 +74,28 @@ pcr_channel_map:
   C: { channel_name: "PCR C" }
   D: { channel_name: "PCR D" }
   E: { channel_name: "PCR E" }
-  V: { channel_name: "PCR V" }
+
+# Per-tab overrides (normally managed from the web UI).
+#   enabled:              false to skip a whole tab.
+#   default_control_room: room letter to use for tabs with no CONTROL ROOM row
+#                         (e.g. Football).
+tab_overrides: {}
+  # Football:
+  #   enabled: true
+  #   default_control_room: "A"
+
+# Per-event fixes for missing/wrong data (normally managed from the web UI).
+# Matched by date + event name (+ occurrence when a tab has duplicates on the
+# same day, 0-based). Any field you omit is left as parsed.
+#   control_room: assign/override the room letter.
+#   start:        override the start ("YYYY-MM-DD HH:MM", sheet timezone).
+#   ignore:       true to drop this event entirely.
+event_overrides: {}
+  # "Fall Olympic":
+  #   - date: "2026-08-27"
+  #     event: "Opening Spike VB (SET DAY)"
+  #     occurrence: 0
+  #     control_room: "A"
 
 lsp:
   base_url: "https://live-schedule-pro.example.com"   # no trailing slash
