@@ -11,11 +11,17 @@ class ScheduledEvent:
     """One event parsed from a sheet column, ready to become an LSP event."""
 
     name: str            # event name from the sheet (e.g. "FB vs UCF")
-    pcr: str             # normalized PCR letter (A/B/C/D/E/V)
+    pcr: str             # normalized control-room letter (A..E); "" if unassigned
     start: datetime      # timezone-aware; already includes lead-in padding
     end: datetime        # timezone-aware safety-cap end
     source_tab: str      # worksheet tab it came from
     source_column: int   # 1-based column index (for logging)
+    event_date: str = ""  # "YYYY-MM-DD" of the sheet date (override matching)
+    occurrence: int = 0   # 0-based index among same (name, date) in this tab
+
+    def override_key(self) -> tuple[str, str, int]:
+        """Stable identity for UI overrides: (date, name, occurrence)."""
+        return (self.event_date, self.name.strip().lower(), self.occurrence)
 
     def dedup_key(self) -> str:
         """Stable identity used for local-state de-duplication."""

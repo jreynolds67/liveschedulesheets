@@ -7,7 +7,8 @@ variables; the file takes precedence when set, env is the fallback.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -59,6 +60,22 @@ class ChannelRef:
 
 
 @dataclass
+class TabOverride:
+    """Per-tab UI settings: enable/ignore a whole tab, or supply a default room
+    for tabs that have no CONTROL ROOM row (e.g. Football)."""
+    enabled: bool = True
+    default_control_room: Optional[str] = None
+
+
+@dataclass
+class EventOverride:
+    """Per-event UI fix, matched by (date, event-name, occurrence)."""
+    control_room: Optional[str] = None
+    start: Optional[datetime] = None
+    ignore: bool = False
+
+
+@dataclass
 class LspConfig:
     base_url: str
     verify_ssl: bool
@@ -84,6 +101,9 @@ class Config:
     lsp: LspConfig
     runtime: RuntimeConfig
     google_credentials_file: str
+    tab_overrides: dict[str, TabOverride] = field(default_factory=dict)
+    # tab -> {(date, name_lower, occurrence): EventOverride}
+    event_overrides: dict[str, dict[tuple, EventOverride]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -217,6 +237,9 @@ def parse_config(raw: dict) -> Config:
     if not os.path.exists(google_creds):
         raise ConfigError(f"Google credentials file not found: {google_creds}")
 
+    tab_overrides = _parse_tab_overrides(raw.get("tab_overrides", {}) or {})
+    event_overrides = _parse_event_overrides(raw.get("event_overrides", {}) or {}, tz)
+
     return Config(
         sheet=sheet,
         date_parsing=date_parsing,
@@ -225,7 +248,49 @@ def parse_config(raw: dict) -> Config:
         lsp=lsp,
         runtime=runtime,
         google_credentials_file=google_creds,
+        tab_overrides=tab_overrides,
+        event_overrides=event_overrides,
     )
+
+
+def _parse_tab_overrides(raw: dict) -> dict[str, TabOverride]:
+    out: dict[str, TabOverride] = {}
+    for tab, cfg in (raw or {}).items():
+        cfg = cfg or {}
+        out[str(tab)] = TabOverride(
+            enabled=bool(cfg.get("enabled", True)),
+            default_control_room=(cfg.get("default_control_room") or None),
+        )
+    return out
+
+
+def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, dict[tuple, EventOverride]]:
+    """raw: {tab: [ {date, event, occurrence?, control_room?, start?, ignore?}, ... ]}"""
+    out: dict[str, dict[tuple, EventOverride]] = {}
+    for tab, items in (raw or {}).items():
+        bucket: dict[tuple, EventOverride] = {}
+        for item in items or []:
+            item = item or {}
+            date = str(item.get("date", "")).strip()
+            name = str(item.get("event", "")).strip().lower()
+            if not date or not name:
+                continue  # need both to match an event
+            occ = int(item.get("occurrence", 0))
+            start = None
+            start_raw = item.get("start")
+            if start_raw:
+                try:
+                    start = datetime.fromisoformat(str(start_raw)).replace(tzinfo=tz)
+                except ValueError:
+                    pass
+            bucket[(date, name, occ)] = EventOverride(
+                control_room=(item.get("control_room") or None),
+                start=start,
+                ignore=bool(item.get("ignore", False)),
+            )
+        if bucket:
+            out[str(tab)] = bucket
+    return out
 
 
 # --------------------------------------------------------------------------

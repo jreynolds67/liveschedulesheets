@@ -18,3 +18,7 @@ state.json
 
 # macOS
 .DS_Store
+
+# Real crew data (do not commit)
+Crew Lists*.xlsx
+*.xlsx
