@@ -7,6 +7,7 @@ variables; the file takes precedence when set, env is the fallback.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -59,12 +60,31 @@ class ChannelRef:
     channel_id: Optional[str] = None
 
 
+# Fields a tab's rows can be mapped to (keys of LabelMap / TabOverride.rows).
+ROW_FIELDS = ("event_name", "date", "time", "pcr", "datetime")
+
+
+@dataclass
+class RowPick:
+    """An operator's manual choice of which sheet row feeds a field.
+
+    `row` is 1-based as shown in Sheets; `label` is that row's column-A header
+    at pick time, used to follow the row if rows are later inserted/removed.
+    `none` explicitly means "this tab has no such row" (skip auto-detection).
+    """
+    row: Optional[int] = None
+    label: str = ""
+    none: bool = False
+
+
 @dataclass
 class TabOverride:
-    """Per-tab UI settings: enable/ignore a whole tab, or supply a default room
-    for tabs that have no CONTROL ROOM row (e.g. Football)."""
+    """Per-tab UI settings: enable/ignore a whole tab, supply a default room
+    for tabs that have no CONTROL ROOM row (e.g. Football), and pin which row
+    feeds each field when auto-detection gets it wrong."""
     enabled: bool = True
     default_control_room: Optional[str] = None
+    rows: dict[str, RowPick] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,6 +110,18 @@ class RuntimeConfig:
     dry_run: bool
     state_file: str
     log_level: str
+
+
+@dataclass
+class SheetSettings:
+    """The part of Config needed to read and parse the sheet (no LSP). Has the
+    same attribute names as Config, so sheet code accepts either."""
+    sheet: SheetConfig
+    date_parsing: DateParsingConfig
+    scheduling: SchedulingConfig
+    google_credentials_file: str
+    tab_overrides: dict[str, TabOverride] = field(default_factory=dict)
+    event_overrides: dict[str, dict[tuple, EventOverride]] = field(default_factory=dict)
 
 
 @dataclass
@@ -136,8 +168,12 @@ def load_config(path: str = "config.yaml") -> Config:
 # Parsing / validation
 # --------------------------------------------------------------------------
 
-def parse_config(raw: dict) -> Config:
-    """Validate a raw config dict into a Config. Secrets fall back to env."""
+def parse_sheet_settings(raw: dict) -> SheetSettings:
+    """Validate just the sheet-reading half of the config.
+
+    Used on its own by the web UI's sheet preview, which must work before the
+    LSP login is filled in.
+    """
     raw = raw or {}
 
     sheet_raw = _require(raw, "sheet", "root")
@@ -168,8 +204,12 @@ def parse_config(raw: dict) -> Config:
     # COUNT / the stale *RELAYOUT composites are always skipped).
     tabs = _as_list(sheet_raw.get("tabs"))
 
+    spreadsheet_id = extract_spreadsheet_id(str(_require(sheet_raw, "spreadsheet_id", "sheet")))
+    if not spreadsheet_id:
+        raise ConfigError("sheet.spreadsheet_id is not a valid Google Sheets link or ID")
+
     sheet = SheetConfig(
-        spreadsheet_id=_require(sheet_raw, "spreadsheet_id", "sheet"),
+        spreadsheet_id=spreadsheet_id,
         tabs=tabs,
         header_column=str(sheet_raw.get("header_column", "A")).strip().upper(),
         labels=labels,
@@ -191,6 +231,34 @@ def parse_config(raw: dict) -> Config:
         past_grace_minutes=int(sc_raw.get("past_grace_minutes", 30)),
         event_name_prefix=str(sc_raw.get("event_name_prefix", "")),
     )
+
+    google_raw = raw.get("google", {}) or {}
+    google_creds = (
+        google_raw.get("credentials_file")
+        or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    ).strip()
+    if not google_creds:
+        raise ConfigError(
+            "Set the Google service-account key path (GOOGLE_APPLICATION_CREDENTIALS env "
+            "or google.credentials_file in config)"
+        )
+    if not os.path.exists(google_creds):
+        raise ConfigError(f"Google credentials file not found: {google_creds}")
+
+    return SheetSettings(
+        sheet=sheet,
+        date_parsing=date_parsing,
+        scheduling=scheduling,
+        google_credentials_file=google_creds,
+        tab_overrides=_parse_tab_overrides(raw.get("tab_overrides", {}) or {}),
+        event_overrides=_parse_event_overrides(raw.get("event_overrides", {}) or {}, tz),
+    )
+
+
+def parse_config(raw: dict) -> Config:
+    """Validate a raw config dict into a Config. Secrets fall back to env."""
+    raw = raw or {}
+    ss = parse_sheet_settings(raw)
 
     pcr_map_raw = raw.get("pcr_channel_map", {}) or {}
     pcr_channel_map: dict[str, ChannelRef] = {}
@@ -224,32 +292,16 @@ def parse_config(raw: dict) -> Config:
         log_level=os.environ.get("LOG_LEVEL", str(rt_raw.get("log_level", "INFO"))).upper(),
     )
 
-    google_raw = raw.get("google", {}) or {}
-    google_creds = (
-        google_raw.get("credentials_file")
-        or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    ).strip()
-    if not google_creds:
-        raise ConfigError(
-            "Set the Google service-account key path (GOOGLE_APPLICATION_CREDENTIALS env "
-            "or google.credentials_file in config)"
-        )
-    if not os.path.exists(google_creds):
-        raise ConfigError(f"Google credentials file not found: {google_creds}")
-
-    tab_overrides = _parse_tab_overrides(raw.get("tab_overrides", {}) or {})
-    event_overrides = _parse_event_overrides(raw.get("event_overrides", {}) or {}, tz)
-
     return Config(
-        sheet=sheet,
-        date_parsing=date_parsing,
-        scheduling=scheduling,
+        sheet=ss.sheet,
+        date_parsing=ss.date_parsing,
+        scheduling=ss.scheduling,
         pcr_channel_map=pcr_channel_map,
         lsp=lsp,
         runtime=runtime,
-        google_credentials_file=google_creds,
-        tab_overrides=tab_overrides,
-        event_overrides=event_overrides,
+        google_credentials_file=ss.google_credentials_file,
+        tab_overrides=ss.tab_overrides,
+        event_overrides=ss.event_overrides,
     )
 
 
@@ -260,7 +312,26 @@ def _parse_tab_overrides(raw: dict) -> dict[str, TabOverride]:
         out[str(tab)] = TabOverride(
             enabled=bool(cfg.get("enabled", True)),
             default_control_room=(cfg.get("default_control_room") or None),
+            rows=parse_row_picks(cfg.get("rows")),
         )
+    return out
+
+
+def parse_row_picks(raw) -> dict[str, RowPick]:
+    """raw: {field: {row: 7, label: "CONTROL ROOM"} | {none: true}}"""
+    out: dict[str, RowPick] = {}
+    for fld, pick in (raw or {}).items():
+        if fld not in ROW_FIELDS or not isinstance(pick, dict):
+            continue
+        if pick.get("none"):
+            out[fld] = RowPick(none=True)
+            continue
+        try:
+            row = int(pick.get("row"))
+        except (TypeError, ValueError):
+            continue
+        if row >= 1:
+            out[fld] = RowPick(row=row, label=str(pick.get("label") or "").strip())
     return out
 
 
@@ -296,6 +367,22 @@ def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, dict[tuple, Eve
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
+
+_SHEET_URL_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
+_SHEET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+
+
+def extract_spreadsheet_id(text: str) -> str:
+    """Accept a full Google Sheets link or a bare ID; return the ID ('' if neither).
+
+    https://docs.google.com/spreadsheets/d/<ID>/edit#gid=0 -> <ID>
+    """
+    t = (text or "").strip()
+    m = _SHEET_URL_RE.search(t)
+    if m:
+        return m.group(1)
+    return t if _SHEET_ID_RE.match(t) else ""
+
 
 def _require(d: dict, key: str, ctx: str):
     if key not in d or d[key] in (None, ""):

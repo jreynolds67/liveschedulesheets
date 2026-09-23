@@ -1,11 +1,14 @@
 """Runtime manager: owns the background sync loop and the operations the web
-UI calls (preview, run-now, channels, connection test).
+UI calls (preview, run-now, channels, connection test, sheet inspection).
 
 Components (sheet reader, LSP client, syncer) are rebuilt only when the config
-actually changes, so the LSP auth token is reused across passes.
+actually changes, so the LSP auth token is reused across passes. Sheet
+inspection (tab list, row mapping) uses its own reader built from just the
+sheet half of the config, so it works before the LSP login is set up.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -14,14 +17,18 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from .config import Config, ConfigError, parse_config
+from .config import (Config, ConfigError, extract_spreadsheet_id, parse_config,
+                     parse_row_picks, parse_sheet_settings)
 from .lsp_client import LspClient, LspError
 from .settings_store import SettingsStore
-from .sheets import SheetReader
+from .sheets import SheetReader, inspect_grid
 from .state import State
 from .sync import Syncer
 
 log = logging.getLogger(__name__)
+
+# How long a fetched tab is reused while the operator adjusts row picks.
+_GRID_CACHE_SECONDS = 120
 
 
 class ManagerError(Exception):
@@ -41,6 +48,12 @@ class SyncManager:
 
         self.last_run: Optional[dict] = None
         self.last_error: Optional[str] = None
+
+        # Sheet inspection (web UI) -- separate lock so it never waits on a sync.
+        self._sheet_lock = threading.Lock()
+        self._sheet_reader_key: Optional[tuple] = None
+        self._sheet_reader_obj: Optional[SheetReader] = None
+        self._grid_cache: dict[tuple, tuple[float, list]] = {}
 
     # -- component build (cached by config hash) ---------------------------
 
@@ -88,23 +101,78 @@ class SyncManager:
             _, syncer = self._components()
             return syncer.delete_created()
 
-    def tabs(self) -> list[dict]:
-        """Visible tabs in the sheet with their current UI state."""
-        with self._lock:
-            cfg, syncer = self._components()
-            visible = syncer.reader._visible_tabs()
+    # -- sheet inspection (web UI row mapping) -------------------------------
+
+    def _sheet_reader(self, spreadsheet: Optional[str]) -> SheetReader:
+        """Reader for the saved sheet, or for `spreadsheet` (a link or ID the
+        operator just pasted, not yet saved). Caller holds _sheet_lock."""
+        raw = copy.deepcopy(self.store.load())
+        if spreadsheet:
+            sid = extract_spreadsheet_id(spreadsheet)
+            if not sid:
+                raise ConfigError("That doesn't look like a Google Sheets link or ID")
+            raw.setdefault("sheet", {})["spreadsheet_id"] = sid
+        settings = parse_sheet_settings(raw)
+        key = (settings.google_credentials_file, settings.sheet.spreadsheet_id)
+        if key != self._sheet_reader_key or self._sheet_reader_obj is None:
+            self._sheet_reader_obj = SheetReader(settings)
+            self._sheet_reader_key = key
+        else:
+            self._sheet_reader_obj.cfg = settings  # labels/overrides may have changed
+        return self._sheet_reader_obj
+
+    def _grid(self, reader: SheetReader, tab: str, refresh: bool) -> list:
+        key = (reader.cfg.sheet.spreadsheet_id, tab)
+        hit = self._grid_cache.get(key)
+        if hit and not refresh and time.monotonic() - hit[0] < _GRID_CACHE_SECONDS:
+            return hit[1]
+        grid = reader.fetch_grid(tab)
+        self._grid_cache[key] = (time.monotonic(), grid)
+        return grid
+
+    def tabs(self, spreadsheet: Optional[str] = None) -> dict:
+        """The sheet's title and its visible tabs with their current UI state."""
+        with self._sheet_lock:
+            reader = self._sheet_reader(spreadsheet)
+            try:
+                meta = reader.sheet_meta()
+            except Exception as exc:  # noqa: BLE001
+                if any(code in str(exc) for code in ("403", "404")):
+                    raise ManagerError(
+                        "Google can't open that sheet. Check the link, and share the sheet "
+                        f"(Viewer) with {_service_account_email(reader.cfg)}."
+                    ) from exc
+                raise
+            cfg = reader.cfg
         allow = set(cfg.sheet.tabs)
         out = []
-        for name in visible:
+        for t in meta["tabs"]:
+            if t["hidden"]:
+                continue
+            name = t["name"]
             ov = cfg.tab_overrides.get(name)
             out.append({
                 "name": name,
+                "gid": t["gid"],
                 "enabled": (True if ov is None else ov.enabled)
                            and (name in allow if allow else True),
                 "default_control_room": (ov.default_control_room if ov else None),
                 "in_allow_list": (name in allow) if allow else True,
+                "row_picks": len(ov.rows) if ov else 0,
             })
-        return out
+        return {"spreadsheet_id": cfg.sheet.spreadsheet_id, "title": meta["title"], "tabs": out}
+
+    def inspect_tab(self, tab: str, spreadsheet: Optional[str] = None,
+                    rows: Optional[dict] = None, default_room: Optional[str] = None,
+                    refresh: bool = False) -> dict:
+        """Sheet preview + row detection for one tab. `rows` / `default_room`
+        are the operator's unsaved choices (None = use what is saved)."""
+        with self._sheet_lock:
+            reader = self._sheet_reader(spreadsheet)
+            grid = self._grid(reader, tab, refresh)
+            cfg = reader.cfg
+        picks = parse_row_picks(rows) if rows is not None else None
+        return inspect_grid(tab, grid, cfg, picks=picks, default_room=default_room)
 
     def test_connection(self) -> dict:
         try:
@@ -175,6 +243,14 @@ class SyncManager:
             # Interruptible sleep.
             self._stop.wait(timeout=max(5, interval))
         log.info("Background sync loop stopped")
+
+
+def _service_account_email(cfg) -> str:
+    try:
+        with open(cfg.google_credentials_file, encoding="utf-8") as fh:
+            return json.load(fh).get("client_email") or "the service account"
+    except (OSError, ValueError):
+        return "the service account"
 
 
 def _now_iso() -> str:

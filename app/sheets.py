@@ -5,13 +5,16 @@ each subsequent column is a single event. There is no single composite tab --
 the schedule lives across several sport tabs (Football, Fall Olympic, ...),
 each in this same shape, so we read every configured tab and concatenate.
 
-Per tab we anchor on the DATE and EVENT rows to identify event columns, take
-the FIRST `CONTROL ROOM` row as the recording channel (the main broadcast;
-stacked secondary blocks like scoreboard feeds are ignored), and read the
-game-start time from the GAME START / GAME TIME / START TIME row.
+Per tab we find the DATE, EVENT, start-time and CONTROL ROOM rows
+(`locate_rows`): an operator's manual pick from the web UI wins, then an exact
+configured label, then a header keyword, then (dates / room letters only) the
+row's contents. For labels the FIRST match wins, so the main broadcast's
+CONTROL ROOM row is used and stacked secondary blocks (scoreboard feeds) are
+ignored.
 
 The grid -> events step is a pure function (`parse_grid`) so it can be tested
-against a real workbook without hitting the Google API.
+against a real workbook without hitting the Google API; `inspect_grid` builds
+the web UI's sheet preview the same way.
 """
 from __future__ import annotations
 
@@ -19,11 +22,12 @@ import logging
 import re
 from datetime import date as date_cls
 from datetime import datetime, time as time_cls, timedelta
+from dataclasses import dataclass
 from typing import Optional
 
 from dateutil import parser as dateparser
 
-from .config import Config
+from .config import ROW_FIELDS, Config
 from .models import ScheduledEvent
 
 log = logging.getLogger(__name__)
@@ -56,7 +60,7 @@ class SheetReader:
                 log.info("Tab %r is disabled; skipping", tab)
                 continue
             try:
-                grid = self._fetch_grid(tab)
+                grid = self.fetch_grid(tab)
                 events.extend(parse_grid(tab, grid, self.cfg))
             except Exception:  # noqa: BLE001 - one bad tab shouldn't kill the run
                 log.exception("Failed to read tab %r", tab)
@@ -71,7 +75,7 @@ class SheetReader:
         visible tab is read (auto-discovery).
         """
         try:
-            visible = self._visible_tabs()
+            visible = self.visible_tabs()
         except Exception:  # noqa: BLE001 - metadata call is best-effort
             log.exception("Could not read tab metadata; falling back to configured tabs")
             return list(self.cfg.sheet.tabs)
@@ -91,12 +95,15 @@ class SheetReader:
 
     # -- Google fetch -------------------------------------------------------
 
-    def _visible_tabs(self) -> list[str]:
+    def sheet_meta(self) -> dict:
+        """{"title", "tabs": [{"name", "gid", "hidden"}, ...]} with tabs in order.
+        `gid` matches the #gid=... in a Sheets link, so the UI can open the tab
+        a pasted link points at."""
         resp = (
             self.service.spreadsheets()
             .get(
                 spreadsheetId=self.cfg.sheet.spreadsheet_id,
-                fields="sheets.properties(title,hidden,index)",
+                fields="properties.title,sheets.properties(sheetId,title,hidden,index)",
             )
             .execute()
         )
@@ -104,9 +111,18 @@ class SheetReader:
             (s.get("properties", {}) for s in resp.get("sheets", [])),
             key=lambda p: p.get("index", 0),
         )
-        return [p["title"] for p in sheets if p.get("title") and not p.get("hidden")]
+        return {
+            "title": (resp.get("properties") or {}).get("title", ""),
+            "tabs": [
+                {"name": p["title"], "gid": p.get("sheetId"), "hidden": bool(p.get("hidden"))}
+                for p in sheets if p.get("title")
+            ],
+        }
 
-    def _fetch_grid(self, tab: str) -> list[list[str]]:
+    def visible_tabs(self) -> list[str]:
+        return [t["name"] for t in self.sheet_meta()["tabs"] if not t["hidden"]]
+
+    def fetch_grid(self, tab: str) -> list[list[str]]:
         # FORMATTED_VALUE returns the strings as displayed in the sheet, which
         # is the most robust thing to parse (dates/times as the user sees them).
         resp = (
@@ -141,7 +157,14 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
         return []
 
     label_col = _col_letter_to_index(cfg.sheet.header_column)
-    row_of = _locate_label_rows(grid, label_col, cfg)
+    tab_override = cfg.tab_overrides.get(tab)
+    picks = tab_override.rows if tab_override else {}
+    matches = locate_rows(grid, label_col, cfg.sheet.labels, picks)
+    row_of = {fld: m.row for fld, m in matches.items()}
+    for fld, m in matches.items():
+        if m.method in ("keyword", "content", "moved", "stale"):
+            log.info("Tab %r: %s -> row %s (%s)", tab, fld,
+                     "none" if m.row is None else m.row + 1, m.note or m.method)
 
     if row_of["event_name"] is None:
         log.error("Tab %r: no EVENT row found; skipping", tab)
@@ -154,7 +177,6 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
         )
         return []
 
-    tab_override = cfg.tab_overrides.get(tab)
     default_room = tab_override.default_control_room if tab_override else None
     if row_of["pcr"] is None and not default_room:
         log.warning(
@@ -175,33 +197,168 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
     return out
 
 
-def _locate_label_rows(
-    grid: list[list[str]], label_col: int, cfg: Config
-) -> dict[str, Optional[int]]:
-    """Map each field to the first grid row whose col-A header matches an alias.
+# ---------------------------------------------------------------------------
+# Row detection: which row feeds each field.
+#
+# Tried in order, and a row claimed by an earlier step is never reused:
+#   1. manual  - the operator's pick from the web UI (tab_overrides.rows)
+#   2. label   - column-A header exactly matches a configured label
+#   3. keyword - header contains a telling word ("KICKOFF", "Ctrl Room" ...)
+#   4. content - the row's cells look right (dates, or room letters A..E)
+# There is deliberately no content fallback for the start TIME: CREW CALL,
+# AUDIO CHECK and DOORS rows are full of times too, so guessing is unsafe.
+# ---------------------------------------------------------------------------
 
-    The FIRST match wins -- important for CONTROL ROOM, where a tab may repeat
-    the row for a secondary (scoreboard) block we intentionally ignore.
-    """
-    labels = cfg.sheet.labels
-    norm_wanted = {
-        "event_name": [a.strip().lower() for a in labels.event_name],
-        "pcr": [a.strip().lower() for a in labels.pcr],
-        "date": [a.strip().lower() for a in labels.date],
-        "time": [a.strip().lower() for a in labels.time],
-        "datetime": [a.strip().lower() for a in labels.datetime],
-    }
-    found: dict[str, Optional[int]] = {f: None for f in norm_wanted}
-    for r, row in enumerate(grid):
-        if label_col >= len(row):
+@dataclass
+class RowMatch:
+    row: Optional[int]  # 0-based grid row; None = not found
+    method: str = ""    # manual | moved | stale | label | keyword | content | none | ""
+    note: str = ""
+
+    def to_dict(self, grid, label_col) -> dict:
+        return {
+            "row": None if self.row is None else self.row + 1,
+            "label": "" if self.row is None else _cell(grid, self.row, label_col),
+            "method": self.method,
+            "note": self.note,
+        }
+
+
+# field -> (keywords in priority order, words that disqualify a header)
+_KEYWORDS: dict[str, tuple[list[str], list[str]]] = {
+    "event_name": (["event", "matchup", "title"], ["other"]),
+    "date": (["date"], ["update"]),
+    "time": (
+        ["start", "kickoff", "kick off", "game time", "tip", "first pitch",
+         "puck drop", "air time", "time"],
+        ["call", "check", "door", "end", "meal", "run thru", "crew", "arrival"],
+    ),
+    "pcr": (["control room", "pcr", "ctrl room"], ["shadow"]),
+    "datetime": ([], []),
+}
+
+_DATE_RE = re.compile(
+    r"\b\d{1,2}/\d{1,2}\b|\b\d{4}-\d{1,2}-\d{1,2}\b|"
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b",
+    re.IGNORECASE,
+)
+_ROOM_CELL_RE = re.compile(r"^(?:(?:PCR|CONTROL ROOM|CR)\s*)?[A-E]$")
+_CONTENT_CHECKS = {
+    "date": lambda v: bool(_DATE_RE.search(v)),
+    "pcr": lambda v: bool(_ROOM_CELL_RE.match(v.strip().upper())),
+}
+
+
+def locate_rows(
+    grid: list[list[str]], label_col: int, labels, picks: Optional[dict] = None
+) -> dict[str, RowMatch]:
+    """Decide which grid row feeds each field (see the notes above)."""
+    picks = picks or {}
+    headers = [_cell(grid, r, label_col).lower() for r in range(len(grid))]
+    out: dict[str, RowMatch] = {}
+    claimed: set[int] = set()
+
+    def take(fld: str, row: Optional[int], method: str, note: str = "") -> None:
+        out[fld] = RowMatch(row, method, note)
+        if row is not None:
+            claimed.add(row)
+
+    # 1. manual picks
+    for fld in ROW_FIELDS:
+        pick = picks.get(fld)
+        if pick is None:
             continue
-        header = str(row[label_col]).strip().lower()
-        if not header:
+        if pick.none:
+            take(fld, None, "none", "Set to 'no row' by operator")
+        else:
+            take(fld, *_resolve_pick(headers, pick))
+
+    # 2. exact configured labels (FIRST match wins -- important for CONTROL
+    #    ROOM, where a tab may repeat the row for a secondary scoreboard block)
+    for fld in ROW_FIELDS:
+        if fld in out:
             continue
-        for field, aliases in norm_wanted.items():
-            if found[field] is None and header in aliases:
-                found[field] = r
+        aliases = {a.strip().lower() for a in getattr(labels, fld)}
+        for r, h in enumerate(headers):
+            if h and h in aliases and r not in claimed:
+                take(fld, r, "label")
+                break
+
+    # 3. keyword match on the header text. Headers naming only this field win
+    #    over ambiguous ones ("Event Name" beats "Event Date" for the event).
+    hits = {r: _keyword_fields(h) for r, h in enumerate(headers) if h}
+    for strict in (True, False):
+        for fld in ROW_FIELDS:
+            if fld in out:
+                continue
+            best = None
+            for r, found in hits.items():
+                if r in claimed or fld not in found or (strict and len(found) > 1):
+                    continue
+                if best is None or found[fld][0] < best[1]:
+                    best = (r, found[fld][0], found[fld][1])
+            if best is not None:
+                take(fld, best[0], "keyword", f"Header contains '{best[2]}'")
+
+    # 4. content (dates / room letters only)
+    for fld, check in _CONTENT_CHECKS.items():
+        if fld in out:
+            continue
+        best, best_hits = None, 0
+        for r, row in enumerate(grid):
+            if r in claimed:
+                continue
+            vals = [str(v).strip() for c, v in enumerate(row) if c > label_col and str(v).strip()]
+            hits = sum(1 for v in vals if check(v))
+            if hits >= 2 and hits >= 0.7 * len(vals) and hits > best_hits:
+                best, best_hits = r, hits
+        if best is not None:
+            take(fld, best, "content", f"{best_hits} cells look like a {fld.replace('pcr', 'room')}")
+
+    for fld in ROW_FIELDS:
+        out.setdefault(fld, RowMatch(None))
+    return out
+
+
+def _keyword_fields(header: str) -> dict[str, tuple[int, str]]:
+    """{field: (keyword priority, keyword)} for every field this header names."""
+    found = {}
+    for fld, (keywords, excluded) in _KEYWORDS.items():
+        if any(x in header for x in excluded):
+            continue
+        for i, kw in enumerate(keywords):
+            if re.search(rf"\b{re.escape(kw)}\b", header):
+                found[fld] = (i, kw)
+                break
     return found
+
+
+# How far a manual pick will follow its label after rows are inserted/removed.
+# Beyond this, a same-named row is more likely a different block (e.g. the
+# SCOREBOARD section repeats CREW CALL / CONTROL ROOM) than the same row moved.
+_PICK_FOLLOW_ROWS = 15
+
+
+def _resolve_pick(headers: list[str], pick) -> tuple[Optional[int], str, str]:
+    """Follow a manual pick to its current row.
+
+    If the header at the picked row still matches, use it. If rows moved, use
+    the nearest row carrying the same header (within _PICK_FOLLOW_ROWS). If the
+    header is gone, fall back to the row number and flag it as stale.
+    """
+    row = pick.row - 1
+    want = pick.label.strip().lower()
+    here = headers[row] if row < len(headers) else ""
+    if not want or here == want:
+        return (row if row < len(headers) else None), "manual", ""
+    same = [r for r, h in enumerate(headers)
+            if h == want and abs(r - row) <= _PICK_FOLLOW_ROWS]
+    if same:
+        moved = min(same, key=lambda r: abs(r - row))
+        return moved, "moved", f"Row moved from {pick.row} to {moved + 1}"
+    note = f"'{pick.label}' is no longer at or near row {pick.row}; using row {pick.row} as-is"
+    log.warning("Row pick: %s", note)
+    return (row if row < len(headers) else None), "stale", note
 
 
 def _cell(grid, row: Optional[int], col: int) -> str:
@@ -282,6 +439,113 @@ def _parse_datetime_string(text: str, tz, cfg) -> Optional[datetime]:
         year = dp.academic_year_start if dt.month >= dp.rollover_month else dp.academic_year_start + 1
         dt = dt.replace(year=year)
     return dt.replace(tzinfo=tz)
+
+
+# ---------------------------------------------------------------------------
+# Sheet preview for the web UI's row-mapping screen (pure, no I/O).
+# ---------------------------------------------------------------------------
+
+_MAX_PREVIEW_ROWS = 150
+_MAX_PREVIEW_COLS = 60
+_MAX_CELL_CHARS = 80
+
+
+def inspect_grid(
+    tab: str,
+    grid: list[list[str]],
+    cfg,
+    picks: Optional[dict] = None,
+    default_room: Optional[str] = None,
+) -> dict:
+    """Everything the row-mapping screen shows for one tab.
+
+    `picks` / `default_room` let the UI try unsaved choices; when None, the
+    saved tab_overrides are used. Returns the trimmed grid, what auto-detection
+    finds on its own, the rows actually in effect, and what each event column
+    parses to under those rows (start shown WITHOUT the lead-in).
+    """
+    label_col = _col_letter_to_index(cfg.sheet.header_column)
+    ov = cfg.tab_overrides.get(tab)
+    if picks is None:
+        picks = ov.rows if ov else {}
+    if default_room is None:
+        default_room = ov.default_control_room if ov else None
+
+    auto = locate_rows(grid, label_col, cfg.sheet.labels, {})
+    effective = locate_rows(grid, label_col, cfg.sheet.labels, picks)
+    row_of = {fld: m.row for fld, m in effective.items()}
+
+    # Trim trailing blank rows/cols (Football has ~990 mostly-empty rows).
+    last_row = max((r for r, row in enumerate(grid) if any(str(v).strip() for v in row)), default=-1)
+    n_rows = min(last_row + 1, _MAX_PREVIEW_ROWS)
+    n_cols_total = max((len(r) for r in grid[: last_row + 1]), default=0)
+    n_cols = min(n_cols_total, _MAX_PREVIEW_COLS)
+    rows = [
+        {"row": r + 1,
+         "cells": [_cell(grid, r, c)[:_MAX_CELL_CHARS] for c in range(n_cols)]}
+        for r in range(n_rows)
+    ]
+
+    columns = []
+    for col in range(label_col + 1, n_cols):
+        columns.append(_describe_column(grid, row_of, col, cfg, default_room))
+    ready = sum(1 for c in columns if c["status"] == "ok")
+    no_room = sum(1 for c in columns if c["status"] == "no_room")
+    no_start = sum(1 for c in columns if c["status"] == "no_start")
+
+    missing = []
+    if row_of["event_name"] is None:
+        missing.append("event name")
+    if row_of["datetime"] is None and (row_of["date"] is None or row_of["time"] is None):
+        missing.append("start (date + time)")
+
+    return {
+        "tab": tab,
+        "label_col": label_col,
+        "col_letters": [_col_index_to_letter(c) for c in range(n_cols)],
+        "rows": rows,
+        "total_rows": last_row + 1,
+        "total_cols": n_cols_total,
+        "auto": {f: m.to_dict(grid, label_col) for f, m in auto.items()},
+        "effective": {f: m.to_dict(grid, label_col) for f, m in effective.items()},
+        "columns": columns,
+        "summary": {"ready": ready, "no_room": no_room, "no_start": no_start,
+                    "missing": missing},
+        "default_room": default_room,
+    }
+
+
+def _describe_column(grid, row_of, col, cfg, default_room) -> dict:
+    """What one event column yields under the given row mapping."""
+    out = {"col": col + 1, "letter": _col_index_to_letter(col), "name": "",
+           "start": None, "room": "", "room_from": "", "status": "empty", "problem": ""}
+    name = _cell(grid, row_of.get("event_name"), col)
+    if not name:
+        return out
+    out["name"] = name
+
+    start = _parse_start(grid, row_of, col, cfg)
+    sheet_room = _normalize_room(_cell(grid, row_of.get("pcr"), col))
+    room = sheet_room or _normalize_room(default_room or "")
+    out["room"] = room or ""
+    out["room_from"] = "sheet" if sheet_room else ("tab default" if room else "")
+
+    if start is None:
+        if row_of.get("datetime") is not None:
+            raw = _cell(grid, row_of["datetime"], col)
+        else:
+            raw = " ".join(x for x in (_cell(grid, row_of.get("date"), col),
+                                       _cell(grid, row_of.get("time"), col)) if x)
+        out["status"] = "no_start"
+        out["problem"] = f"No usable start ({raw!r})" if raw else "No date/time"
+        return out
+    out["start"] = start.isoformat()
+    if not room:
+        out["status"] = "no_room"
+        out["problem"] = "No control room"
+        return out
+    out["status"] = "ok"
+    return out
 
 
 def _apply_event_overrides(tab, events, cfg) -> list[ScheduledEvent]:
@@ -373,6 +637,16 @@ def _normalize_room(value: str) -> Optional[str]:
     # Last resort: a trailing A..E letter.
     letters = [c for c in v if c in _ROOM_LETTERS]
     return letters[-1] if letters else None
+
+
+def _col_index_to_letter(idx: int) -> str:
+    """0 -> 'A', 25 -> 'Z', 26 -> 'AA' ..."""
+    out = ""
+    idx += 1
+    while idx:
+        idx, rem = divmod(idx - 1, 26)
+        out = chr(ord("A") + rem) + out
+    return out
 
 
 def _col_letter_to_index(letter: str) -> int:

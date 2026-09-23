@@ -31,11 +31,22 @@ be toggled off entirely.
 Once deployed, open **`http://<docker-host>:8080`**. From there an engineer can:
 
 - Set the **LSP server URL and login**, and **Test connection**.
+- **Paste the Google Sheet link.** The sheet is read right away (no Save
+  needed): its title and visible tabs are shown, and the tab the link points at
+  (`#gid=…`) opens in the row-mapping preview. If Google can't open it, the UI
+  names the service-account email to share the sheet with.
 - Edit the **control room → channel mapping** (`A`–`E`; channel names
   auto-complete from the live channel list after a successful connection test).
 - Manage **Sheet tabs** — every visible tab is listed with an on/off toggle and
   a **default control room** selector (used for tabs without a `CONTROL ROOM`
-  row, e.g. Football).
+  row, e.g. Football), plus a **Rows…** button that opens it in the preview.
+- **Check and choose rows** in *Sheet preview & row mapping*. Each tab is shown as
+  a grid, with the detected Event / Date / Start / Room rows highlighted and a
+  **Parses as** line above every column showing the resulting start and room (or
+  why that column won't schedule). To correct a row, use its dropdown (Auto,
+  No row, or any labelled row), or click a row in the grid and choose what it is
+  for. Rows detected by guesswork, rather than an exact label, are flagged
+  **please confirm**.
 - Adjust **lead-in**, **safety-cap hours**, the active window, and the event
   name prefix.
 - Toggle **Dry run** and the **sync interval**.
@@ -59,7 +70,26 @@ by setting `UI_USER` / `UI_PASSWORD`.)
 ## How events are read
 
 Each sport tab is **transposed**: labels live in column A, and **each event is a
-column**. The service finds these label rows (editable under *Advanced* in the UI):
+column**. For each tab the service works out which row holds each field, in this
+order (a row used by an earlier step is never reused):
+
+1. **Your pick** from the row-mapping preview (stored as `tab_overrides.<tab>.rows`).
+2. **Exact label**: column-A text matches one of the labels below (editable
+   under *Advanced* in the UI).
+3. **Header keyword**: e.g. `KICKOFF` or `Tip` for the start time, `Ctrl Room` for
+   the room, `Event Name` / `Event Date`. Headers containing `CALL`, `CHECK`,
+   `DOORS`, `END`, `MEAL` or `CREW` are never taken as the start time.
+4. **Cell contents**: dates only (a row that is mostly `9/5`-style dates), and
+   control rooms only (a row that is mostly `A`–`E`). The start **time** is never
+   guessed from contents, because `CREW CALL`, `AUDIO CHECK` and `DOORS` rows hold
+   times too.
+
+A pick is stored with the row number *and* its column-A label, so it survives
+rows being inserted or deleted above it. It follows the label to the nearest
+row with that label within 15 rows. If the label is gone, it keeps the row
+number and is flagged in the UI and the log.
+
+The default labels:
 
 | Field        | Default label(s)                    | Required | Notes |
 |--------------|-------------------------------------|----------|-------|
@@ -179,7 +209,7 @@ The UI covers everything; `config.example.yaml` documents every field inline
 `scheduling.safety_cap_hours`, `scheduling.horizon_days` / `past_grace_minutes`,
 `runtime.poll_interval_seconds`, `runtime.dry_run`. Multi-tab settings:
 `sheet.tabs` (empty = auto-discover visible tabs), `tab_overrides`
-(enable/disable a tab, `default_control_room`), and `event_overrides` (per-event
+(enable/disable a tab, `default_control_room`, pinned `rows`), and `event_overrides` (per-event
 `control_room` / `start` / `ignore`, matched by tab + date + event name).
 
 ## Keeping docs current
@@ -205,7 +235,7 @@ app/
   main.py        # headless runner (RUN_ONCE / cron)
   config.py      # config model, parse/validate, load/save
   settings_store.py # live config on /data, seeded from the example
-  sheets.py      # Google fetch + pure parse_grid() (multi-tab, hidden-skip)
+  sheets.py      # Google fetch + pure parse_grid() / locate_rows() / inspect_grid()
   lsp_client.py  # Live Schedule Pro API client (auth, channels, events)
   sync.py        # plan() (read-only) + run_once() (creates)
   state.py       # local created-event cache

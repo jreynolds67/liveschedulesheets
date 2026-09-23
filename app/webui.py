@@ -89,8 +89,30 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     @app.get("/api/tabs")
     @require_auth
     def tabs():
+        # ?spreadsheet=<link or ID> reads a just-pasted sheet before it is saved.
         try:
-            return jsonify({"ok": True, "tabs": manager.tabs()})
+            return jsonify({"ok": True, **manager.tabs(request.args.get("spreadsheet"))})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
+    @app.post("/api/sheet/inspect")
+    @require_auth
+    def sheet_inspect():
+        """Grid preview + row detection for one tab (row-mapping screen).
+        Body: {tab, spreadsheet?, rows?, default_room?, refresh?}"""
+        body = request.get_json(force=True, silent=True) or {}
+        tab = body.get("tab")
+        if not tab:
+            return jsonify({"ok": False, "error": "tab is required"})
+        try:
+            result = manager.inspect_tab(
+                tab,
+                spreadsheet=body.get("spreadsheet"),
+                rows=body.get("rows"),
+                default_room=body.get("default_room"),
+                refresh=bool(body.get("refresh")),
+            )
+            return jsonify({"ok": True, **result})
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 

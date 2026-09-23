@@ -6,8 +6,9 @@
 # ---------------------------------------------------------------------------
 
 sheet:
-  # Spreadsheet ID from the URL:
+  # The sheet's link, or just its ID (the part after /d/):
   #   https://docs.google.com/spreadsheets/d/<THIS PART>/edit
+  # Normally set by pasting the link in the web UI (stored as the bare ID).
   spreadsheet_id: "1TNVdUIEy1TNRAzBVEWmRnzxO-vwV3AzbYwDzm6GGOSQ"
 
   # Which worksheet tabs to read. Each tab is one sport (Football, Fall
@@ -27,6 +28,9 @@ sheet:
   # For each field, a list of accepted row-header labels (case-insensitive,
   # surrounding spaces ignored). The FIRST matching row wins -- important for
   # `pcr`, where a tab may repeat CONTROL ROOM for a secondary block we ignore.
+  # If no label matches, a header keyword (KICKOFF, Ctrl Room, ...) and then
+  # the row's contents (dates / A-E letters only) are tried; per-tab picks in
+  # tab_overrides.<tab>.rows beat all of this.
   #
   #   event_name is required. The channel comes from the `pcr` (CONTROL ROOM)
   #   row. For the start instant, these tabs keep DATE and the game time in
@@ -79,10 +83,19 @@ pcr_channel_map:
 #   enabled:              false to skip a whole tab.
 #   default_control_room: room letter to use for tabs with no CONTROL ROOM row
 #                         (e.g. Football).
+#   rows:                 pin which row feeds a field when auto-detection is
+#                         wrong (set from the UI's row-mapping preview). Fields:
+#                         event_name, date, time, pcr, datetime. Each is
+#                         {row: <1-based row>, label: <its column-A text>} --
+#                         the label lets the pick follow the row if rows are
+#                         inserted above it -- or {none: true} for "no such row".
 tab_overrides: {}
   # Football:
   #   enabled: true
   #   default_control_room: "A"
+  # "Special Events":
+  #   rows:
+  #     time: { row: 4, label: "START TIME" }
 
 # Per-event fixes for missing/wrong data (normally managed from the web UI).
 # Matched by date + event name (+ occurrence when a tab has duplicates on the
