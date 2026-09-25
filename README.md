@@ -54,7 +54,11 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   **please confirm**.
 - Adjust **lead-in**, **safety-cap hours**, the active window, and the event
   name prefix.
-- Toggle **Dry run** and the **sync interval**.
+- Toggle **Dry run** and the **sync interval**. The Portainer stack ships with
+  `DRY_RUN=true`, which locks dry run on (the UI shows a *DRY RUN* badge and
+  the toggle is disabled): passes and **Run now** only report what they *would*
+  create, and nothing is created in or deleted from LSP. To go live, set
+  `DRY_RUN=false` on the stack and redeploy.
 - **Preview events** — see exactly what the next sync would create/skip, with no
   changes made. Each row has an inline **room selector** and an **Ignore**
   checkbox for fixing individual events.
@@ -208,8 +212,9 @@ docker run --rm -p 8080:8080 \
 # open http://localhost:8080, configure, hit "Preview events" (creates nothing)
 ```
 
-Turn on **Dry run** in the UI (or `-e DRY_RUN=true`) to log what would be created
-without touching LSP. Headless single pass (cron/testing):
+Turn on **Dry run** in the UI (or `-e DRY_RUN=true`, which overrides the UI) to
+log what would be created without touching LSP — no events are created or
+deleted, even by the cleanup button. Headless single pass (cron/testing):
 
 ```bash
 docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
@@ -220,6 +225,8 @@ docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
 
 ## How de-duplication works
 
+At the start of every pass (and every preview) the tool fetches LSP's current
+channel list and resolves each room's channels, before anything is created.
 An event is booked separately on each channel its room matches, and each
 booking is matched by **channel + name + start minute (UTC)** — so if a new
 channel appears, the next pass adds just the missing bookings:

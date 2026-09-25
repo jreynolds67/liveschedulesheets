@@ -26,8 +26,10 @@ class LspError(Exception):
 
 
 class LspClient:
-    def __init__(self, cfg: LspConfig, timeout: int = 30):
+    def __init__(self, cfg: LspConfig, timeout: int = 30, read_only: bool = False):
         self.cfg = cfg
+        # Dry run: refuse anything that would change LSP, as a last line of defence.
+        self.read_only = read_only
         self.timeout = timeout
         self.session = requests.Session()
         self.session.verify = cfg.verify_ssl
@@ -145,7 +147,12 @@ class LspClient:
             )
         return resp.json()
 
+    def _check_writable(self, action: str) -> None:
+        if self.read_only:
+            raise LspError(f"Dry run is on: refusing to {action} in LSP")
+
     def add_event(self, ev: ScheduledEvent, channel_id: str, name: str) -> dict:
+        self._check_writable(f"create event {name!r}")
         body = {
             "Name": name,
             "Start": _iso(ev.start),
@@ -161,6 +168,7 @@ class LspClient:
 
     def remove_event(self, event_id: str) -> None:
         """Delete a single event by its LSP id (DELETE /api/v1/RemoveEvent)."""
+        self._check_writable(f"delete event {event_id}")
         resp = self._request(
             "DELETE", "/api/v1/RemoveEvent", json={"EventId": event_id}
         )

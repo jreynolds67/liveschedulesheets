@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -69,7 +70,7 @@ class SyncManager:
                 reader = SheetReader(cfg)
             except Exception as exc:  # noqa: BLE001 -- e.g. a malformed key file
                 raise ConfigError(f"Could not load the Google service-account key: {exc}") from exc
-            lsp = LspClient(cfg.lsp)
+            lsp = LspClient(cfg.lsp, read_only=cfg.runtime.dry_run)
             state = State(cfg.runtime.state_file)
             self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state)
             self._cache_hash = h
@@ -94,7 +95,8 @@ class SyncManager:
                 raise full_exc from None
             h = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
             if h != self._lsp_hash or self._lsp_only is None:
-                self._lsp_only = Syncer(ls, None, LspClient(ls.lsp), State(ls.runtime.state_file))
+                self._lsp_only = Syncer(ls, None, LspClient(ls.lsp, read_only=ls.runtime.dry_run),
+                                        State(ls.runtime.state_file))
                 self._lsp_hash = h
             return self._lsp_only
 
@@ -234,7 +236,9 @@ class SyncManager:
         except ConfigError as exc:
             cfg_ok, cfg_err = False, str(exc)
             try:
-                created_count = len(self._lsp_syncer().state.tool_created())
+                syncer = self._lsp_syncer()
+                created_count = len(syncer.state.tool_created())
+                dry_run = syncer.cfg.runtime.dry_run
             except ConfigError:
                 pass
         return {
@@ -242,6 +246,8 @@ class SyncManager:
             "config_error": cfg_err,
             "poll_interval_seconds": interval,
             "dry_run": dry_run,
+            # Set on the stack (DRY_RUN env), which overrides the UI toggle.
+            "dry_run_locked": os.environ.get("DRY_RUN") is not None,
             "created_count": created_count,
             "loop_running": bool(self._thread and self._thread.is_alive()),
             "last_run": self.last_run,

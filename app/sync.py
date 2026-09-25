@@ -130,7 +130,8 @@ class Syncer:
         """Execute the plan. Counts are per channel, except `parsed` / window /
         no-channel, which count sheet events."""
         summary = {"parsed": 0, "created": 0, "skipped_existing": 0,
-                   "skipped_window": 0, "no_channel": 0, "errors": 0}
+                   "skipped_window": 0, "no_channel": 0, "errors": 0,
+                   "dry_run": self.cfg.runtime.dry_run}
         try:
             items = self.plan()
         except LspError:
@@ -258,7 +259,11 @@ class Syncer:
         Only touches events tagged as tool-created in local state, so events
         already present in LSP (or made by hand) are never removed.
         """
-        summary = {"deleted": 0, "failed": 0, "errors": []}
+        summary = {"deleted": 0, "failed": 0, "errors": [], "dry_run": self.cfg.runtime.dry_run}
+        if self.cfg.runtime.dry_run:
+            summary["would_delete"] = len(self.state.tool_created())
+            log.info("[DRY RUN] would delete %d tool-created event(s)", summary["would_delete"])
+            return summary
         for key, info in self.state.tool_created():
             event_id = info.get("event_id")
             try:

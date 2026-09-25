@@ -130,6 +130,7 @@
 <header>
   <h1>Live Schedule&nbsp;Sheets</h1>
   <span id="statusBadge" class="badge warn">loading…</span>
+  <span id="dryBadge" class="badge warn" style="display:none" title="Nothing is created in or deleted from Live Schedule Pro">DRY RUN — LSP is not changed</span>
   <div class="spacer"></div>
   <div class="btns">
     <button id="btnTest" class="ghost">Test connection</button>
@@ -218,7 +219,7 @@
     <div class="grid2">
       <div><label>Sync interval (seconds)</label><input type="number" id="poll_interval" min="60" /></div>
       <div><label>Dry run</label>
-        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint">Log what would happen; create nothing</span></div></div>
+        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">Log what would happen; nothing is created in or deleted from LSP</span></div></div>
     </div>
     <details><summary>Advanced: labels &amp; date parsing</summary>
       <div class="body" style="padding:14px 0 0;">
@@ -797,12 +798,18 @@ async function refreshStatus(){
   if (!s.config_ok){ b.className="badge bad"; b.textContent="config incomplete"; }
   else if (s.dry_run){ b.className="badge warn"; b.textContent="running (dry run)"; }
   else { b.className="badge ok"; b.textContent="running"; }
+  $("dryBadge").style.display = s.dry_run ? "" : "none";
+  if (s.dry_run_locked){
+    $("dry_run").checked = !!s.dry_run; $("dry_run").disabled = true;
+    $("dryHint").textContent = `Set to ${s.dry_run?"ON":"OFF"} by DRY_RUN on the Portainer stack — change it there and redeploy`;
+  }
+  if (s.dry_run) $("btnDeleteCreated").disabled = true;
   let html = "";
   if (s.config_error) html += `<div style="color:var(--err)">⚠ ${s.config_error}</div>`;
   html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"} · tool-created events tracked: <b>${s.created_count??0}</b></div>`;
   if (s.last_run){ const su=s.last_run.summary;
     html += `<div>Last ${s.last_run.trigger} run ${new Date(s.last_run.time).toLocaleString()}: `
-      + `created <b>${su.created}</b>, existing ${su.skipped_existing}, out-of-window ${su.skipped_window}, `
+      + `${su.dry_run?"would create":"created"} <b>${su.created}</b>, existing ${su.skipped_existing}, out-of-window ${su.skipped_window}, `
       + `no-channel ${su.no_channel||0}, errors ${su.errors}</div>`; }
   if (s.last_error) html += `<div style="color:var(--err)">Last error: ${s.last_error}</div>`;
   $("statusBox").innerHTML = html;
@@ -862,7 +869,8 @@ function renderScheduled(){
   if (!r) return;
   const toolCount = r.events.filter(e => e.by_tool).length;
   // Delete covers everything tool-created that is tracked, not just what's shown.
-  $("btnDeleteCreated").disabled = !(lastStatus?.created_count || toolCount || r.missing.length);
+  $("btnDeleteCreated").disabled = !!lastStatus?.dry_run
+    || !(lastStatus?.created_count || toolCount || r.missing.length);
   // One row per event: the same name + start + room across its channels.
   const groups = new Map();
   for (const e of r.events){
@@ -913,7 +921,8 @@ $("btnDeleteCreated").onclick = async () => {
   $("btnDeleteCreated").disabled = true; $("btnDeleteCreated").textContent = "Deleting…";
   const r = await api("POST","/api/delete-created");
   $("btnDeleteCreated").textContent = "Delete tool-created events";
-  if (r.ok){ const s=r.summary;
+  if (r.ok && r.summary.dry_run) toast(`Dry run: would delete ${r.summary.would_delete} — nothing removed from LSP`, 4000);
+  else if (r.ok){ const s=r.summary;
     toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}`);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);
@@ -943,12 +952,16 @@ $("btnPreview").onclick = async () => {
   else $("previewBox").innerHTML = `<span style="color:var(--err)">${r.error}</span>`;
 };
 $("btnRun").onclick = async () => {
-  if (!confirm("Run a sync now? This will create events unless dry-run is on.")) return;
+  const dry = lastStatus?.dry_run;
+  if (!confirm(dry ? "Run a sync now? Dry run is ON — nothing will be created in LSP."
+                   : "Run a sync now? Dry run is OFF — this WILL create events in LSP.")) return;
   await api("POST","/api/config", gather());
   $("btnRun").disabled = true; $("btnRun").textContent = "Running…";
   const r = await api("POST","/api/run");
   $("btnRun").disabled = false; $("btnRun").textContent = "Run now";
-  if (r.ok){ const s=r.summary; toast(`Created ${s.created}, skipped ${s.skipped_existing} existing`); }
+  if (r.ok){ const s=r.summary;
+    toast(s.dry_run ? `Dry run: would create ${s.created}, ${s.skipped_existing} already exist — nothing sent to LSP`
+                    : `Created ${s.created}, skipped ${s.skipped_existing} existing`, 4000); }
   else toast("Run failed: " + r.error, 5000);
   refreshStatus(); loadScheduled();
 };
