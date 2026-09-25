@@ -28,7 +28,7 @@ be toggled off entirely.
 
 ## The web UI
 
-Once deployed, open **`http://10.10.71.33:8080`** (the container's own IP —
+Once deployed, open **`http://10.10.251.95:8080`** (the container's own IP —
 see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
 
 - Set the **LSP server URL and login**, and **Test connection**.
@@ -146,14 +146,16 @@ container is running. You can optionally pre-seed the LSP login with the
 4. Ensure the Google key is available at the mounted path
    (`secrets/service-account.json` in the checkout, or an absolute host path you
    set in the compose volume). **Never commit a real key to a shared repo.**
-5. Deploy, then open `http://10.10.71.33:8080` and finish configuration in the UI.
+5. Deploy, then open `http://10.10.251.95:8080` and finish configuration in the UI.
 
-**Networking:** the stack puts the container directly on the LAN with an
-`ipvlan` network (parent `eth0`, subnet `10.10.71.0/24`, gateway `10.10.71.1`)
-at a fixed IP of **10.10.71.33** — no host port mapping. Change `parent`,
-`subnet`, `gateway`, or `ipv4_address` in `docker-compose.yml` if your host's
-NIC or VLAN differs. With ipvlan, the Docker host itself usually can't reach the
-container's IP; use another machine on the LAN.
+**Networking:** the container joins the existing **Companion** `ipvlan`
+network (parent `eth0`, subnet `10.10.251.0/24`) as an external network, at a
+fixed IP of **10.10.251.95** — no host port mapping. Docker allows only one
+ipvlan network per parent interface, so this stack can't create its own. Set the
+`COMPANION_NETWORK` stack env var to that network's full Docker name (see
+`docker network ls`) if it isn't `companion_companion_net`. With ipvlan, the
+Docker host itself usually can't reach the container's IP; use another machine
+on the LAN.
 
 **Option B — Build & push an image:**
 

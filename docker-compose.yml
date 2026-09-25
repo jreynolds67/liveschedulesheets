@@ -1,6 +1,6 @@
 # Deploy this stack in Portainer (Stacks -> Add stack).
 # Set secrets as stack environment variables. Most configuration is done in the
-# web UI (http://10.10.71.33:8080) and stored on the lss_state volume.
+# web UI (http://10.10.251.95:8080) and stored on the lss_state volume.
 services:
   liveschedulesheets:
     build: .
@@ -20,9 +20,10 @@ services:
       UI_PASSWORD: ${UI_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     networks:
-      # The container gets its own LAN IP; the web UI is on port 8080 there.
-      lss_net:
-        ipv4_address: 10.10.71.33
+      # Joins the existing Companion ipvlan network (only one ipvlan network
+      # can use eth0). The web UI is on port 8080 at this IP.
+      companion_net:
+        ipv4_address: 10.10.251.95
     volumes:
       # Google service-account key (read-only).
       - ./secrets/service-account.json:/secrets/service-account.json:ro
@@ -30,14 +31,11 @@ services:
       - lss_state:/data
 
 networks:
-  lss_net:
-    driver: ipvlan
-    driver_opts:
-      parent: eth0
-    ipam:
-      config:
-        - subnet: 10.10.71.0/24
-          gateway: 10.10.71.1
+  companion_net:
+    # Created by the Companion stack (ipvlan, parent eth0, 10.10.251.0/24).
+    # Set COMPANION_NETWORK to its full Docker name if it differs.
+    external: true
+    name: ${COMPANION_NETWORK:-companion_companion_net}
 
 volumes:
   lss_state: {}
