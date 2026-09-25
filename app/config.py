@@ -242,7 +242,13 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
             "Set the Google service-account key path (GOOGLE_APPLICATION_CREDENTIALS env "
             "or google.credentials_file in config)"
         )
-    if not os.path.exists(google_creds):
+    if os.path.isdir(google_creds):
+        # Docker creates an empty directory when a bind-mounted file is missing on the host.
+        raise ConfigError(
+            f"Google credentials path {google_creds} is a directory, not a key file -- "
+            "the key file probably isn't at the host path mounted in docker-compose.yml"
+        )
+    if not os.path.isfile(google_creds):
         raise ConfigError(f"Google credentials file not found: {google_creds}")
 
     return SheetSettings(
