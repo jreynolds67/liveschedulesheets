@@ -22,3 +22,7 @@ state.json
 # Real crew data (do not commit)
 Crew Lists*.xlsx
 *.xlsx
+
+# Google user sign-in written by tools/google_login.py
+*credentials*.json
+client_secret*.json

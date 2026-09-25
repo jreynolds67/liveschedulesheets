@@ -19,7 +19,9 @@ log = logging.getLogger(__name__)
 # Keys under lsp that are secret and must never be sent to the browser as-is.
 _SECRET_LSP_KEYS = ("password",)
 
-# Google service-account key uploaded from the web UI, stored next to config.yaml.
+# Google credentials uploaded from the web UI, stored next to config.yaml: a
+# service-account key, or a user sign-in ("authorized_user") from
+# tools/google_login.py. (Filename kept for existing deployments.)
 GOOGLE_KEY_FILENAME = "google-service-account.json"
 _MAX_KEY_BYTES = 64 * 1024
 
@@ -72,26 +74,35 @@ class SettingsStore:
         raw.pop("google", None)
         return raw
 
-    # -- Google service-account key -------------------------------------------
+    # -- Google credentials (service-account key or user sign-in) --------------
 
     @property
     def google_key_path(self) -> str:
         return os.path.join(os.path.dirname(self.path) or ".", GOOGLE_KEY_FILENAME)
 
     def save_google_key(self, data: bytes) -> dict:
-        """Validate and store an uploaded service-account key (owner-only
-        permissions), and point the config at it. Returns key_info()."""
+        """Validate and store uploaded Google credentials (owner-only
+        permissions), and point the config at them. Returns key_info()."""
         if len(data) > _MAX_KEY_BYTES:
-            raise GoogleKeyError("That file is too large to be a service-account key")
+            raise GoogleKeyError("That file is too large to be a Google credentials file")
         try:
             key = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise GoogleKeyError("That file isn't valid JSON") from exc
-        if not isinstance(key, dict) or key.get("type") != "service_account":
-            raise GoogleKeyError("That isn't a Google service-account key (expected \"type\": \"service_account\")")
-        missing = [f for f in ("client_email", "private_key", "token_uri") if not key.get(f)]
+        kind = key.get("type") if isinstance(key, dict) else None
+        if kind == "service_account":
+            required = ("client_email", "private_key", "token_uri")
+        elif kind == "authorized_user":
+            required = ("client_id", "client_secret", "refresh_token")
+        elif isinstance(key, dict) and ("installed" in key or "web" in key):
+            raise GoogleKeyError("That's an OAuth client file, not a sign-in -- run "
+                                 "tools/google_login.py with it and upload the file it writes")
+        else:
+            raise GoogleKeyError("That isn't a Google service-account key or user sign-in "
+                                 "(expected \"type\": \"service_account\" or \"authorized_user\")")
+        missing = [f for f in required if not key.get(f)]
         if missing:
-            raise GoogleKeyError(f"The key is missing {', '.join(missing)}")
+            raise GoogleKeyError(f"The file is missing {', '.join(missing)}")
 
         path = self.google_key_path
         tmp = path + ".tmp"
@@ -103,16 +114,18 @@ class SettingsStore:
         raw = self.load()
         raw["google"] = {**(raw.get("google") or {}), "credentials_file": path}
         self.save(raw)
-        log.info("Stored uploaded Google service-account key for %s", key["client_email"])
+        log.info("Stored uploaded Google %s credentials for %s", kind,
+                 key.get("client_email") or key.get("account") or "an unnamed account")
         return self.key_info()
 
     def key_info(self) -> dict:
-        """Which Google key is in use and its service-account email (never the key)."""
+        """Which Google credentials are in use and their account email (never
+        the secret). kind is "service_account" or "authorized_user"."""
         raw = self.load()
         path = ((raw.get("google") or {}).get("credentials_file")
                 or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""))
         info = {"installed": False, "uploaded": path == self.google_key_path,
-                "client_email": None, "error": None}
+                "client_email": None, "kind": None, "error": None}
         if not path:
             info["error"] = "No key set"
             return info
@@ -122,8 +135,10 @@ class SettingsStore:
         try:
             with open(path, encoding="utf-8") as fh:
                 key = json.load(fh)
-            info["client_email"] = key.get("client_email")
-            info["installed"] = bool(info["client_email"])
+            info["kind"] = key.get("type")
+            info["client_email"] = key.get("client_email") or key.get("account")
+            info["installed"] = (bool(key.get("client_email")) if info["kind"] == "service_account"
+                                 else bool(key.get("refresh_token")))
         except (OSError, ValueError) as exc:
             info["error"] = f"Key file unreadable: {exc}"
         return info

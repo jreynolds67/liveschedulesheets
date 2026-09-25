@@ -69,7 +69,7 @@ class SyncManager:
             try:
                 reader = SheetReader(cfg)
             except Exception as exc:  # noqa: BLE001 -- e.g. a malformed key file
-                raise ConfigError(f"Could not load the Google service-account key: {exc}") from exc
+                raise ConfigError(f"Could not load the Google credentials: {exc}") from exc
             lsp = LspClient(cfg.lsp, read_only=cfg.runtime.dry_run)
             state = State(cfg.runtime.state_file)
             self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state)
@@ -295,7 +295,8 @@ class SyncManager:
 def _service_account_email(cfg) -> str:
     try:
         with open(cfg.google_credentials_file, encoding="utf-8") as fh:
-            return json.load(fh).get("client_email") or "the service account"
+            key = json.load(fh)
+            return key.get("client_email") or key.get("account") or "the signed-in Google account"
     except (OSError, ValueError):
         return "the service account"
 

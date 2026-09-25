@@ -43,11 +43,14 @@ class SheetReader:
     def __init__(self, cfg: Config):
         # Imported lazily so the pure parser (parse_grid) is usable without the
         # Google client libraries installed (e.g. in tests).
-        from google.oauth2.service_account import Credentials
+        import google.auth
         from googleapiclient.discovery import build
 
         self.cfg = cfg
-        creds = Credentials.from_service_account_file(
+        # Either a service-account key or a signed-in user's refresh token
+        # ("authorized_user", made by tools/google_login.py) -- the latter for
+        # orgs whose policy blocks service-account key creation.
+        creds, _ = google.auth.load_credentials_from_file(
             cfg.google_credentials_file, scopes=SCOPES
         )
         # cache_discovery=False avoids a noisy warning and a file-cache dependency.

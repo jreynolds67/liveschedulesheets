@@ -169,7 +169,7 @@
       <div><label>Header column</label><input type="text" id="sheet_header_col" value="A" /></div>
       <div><label>Timezone (IANA)</label><input type="text" id="sheet_tz" placeholder="America/New_York" /></div>
     </div>
-    <div><label>Google service-account key</label>
+    <div><label>Google credentials (service-account key or user sign-in)</label>
       <div class="row">
         <label class="ghost filebtn">Upload key (.json)<input type="file" id="googleKeyFile" accept=".json,application/json" hidden /></label>
         <span class="hint" id="googleSet">…</span>
@@ -902,12 +902,15 @@ function renderScheduled(){
 async function loadGoogleKey(){
   const r = await api("GET","/api/google-key");
   const el = $("googleSet");
-  if (r.installed){
+  if (r.installed && r.kind === "authorized_user"){
+    el.innerHTML = `<span style="color:var(--accent2)">✓ Signed in${r.uploaded?" (uploaded)":""}</span> — reading as
+      <b class="mono">${esc(r.client_email || "a Google user")}</b>, which needs (at least Viewer) access to the sheet.`;
+  } else if (r.installed){
     el.innerHTML = `<span style="color:var(--accent2)">✓ Installed${r.uploaded?" (uploaded)":""}</span> — share the sheet (Viewer) with
       <b class="mono">${esc(r.client_email)}</b> <button class="ghost" id="btnCopyEmail" style="padding:2px 8px;font-size:11px">Copy</button>`;
     $("btnCopyEmail").onclick = () => navigator.clipboard.writeText(r.client_email).then(() => toast("Copied"));
   } else {
-    el.innerHTML = `<span style="color:var(--warn)">Not installed</span> — upload the service account's JSON key to read the sheet.`;
+    el.innerHTML = `<span style="color:var(--warn)">Not installed</span> — upload a service-account JSON key, or a sign-in file from <span class="mono">tools/google_login.py</span>, to read the sheet.`;
   }
 }
 $("googleKeyFile").onchange = async (e) => {
@@ -916,7 +919,7 @@ $("googleKeyFile").onchange = async (e) => {
   const r = await fetch("/api/google-key", {method:"POST", headers:{"Content-Type":"application/json"}, body: await f.text()})
     .then(x => x.json()).catch(err => ({ok:false, error:String(err)}));
   if (!r.ok){ toast("Key rejected: " + r.error, 5000); return; }
-  toast("Google key installed ✓");
+  toast("Google credentials installed ✓");
   loadGoogleKey(); refreshStatus(); loadTabs();
 };
 
