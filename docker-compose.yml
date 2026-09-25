@@ -1,6 +1,6 @@
 # Deploy this stack in Portainer (Stacks -> Add stack).
 # Set secrets as stack environment variables. Most configuration is done in the
-# web UI (http://10.10.251.95:8080) and stored on the lss_state volume.
+# web UI (http://10.10.251.95) and stored on the lss_state volume.
 services:
   liveschedulesheets:
     build: .
@@ -10,6 +10,8 @@ services:
     restart: unless-stopped
     environment:
       TZ: America/New_York
+      # Serve the UI on port 80 so the URL needs no port.
+      WEB_PORT: "80"
       # Optional: seed the LSP login here, or set it in the web UI instead.
       LSP_USERNAME: ${LSP_USERNAME:-}
       LSP_PASSWORD: ${LSP_PASSWORD:-}
@@ -19,9 +21,12 @@ services:
       UI_USER: ${UI_USER:-}
       UI_PASSWORD: ${UI_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    sysctls:
+      # Let the non-root app user bind port 80.
+      net.ipv4.ip_unprivileged_port_start: 0
     networks:
       # Joins the existing Companion ipvlan network (only one ipvlan network
-      # can use eth0). The web UI is on port 8080 at this IP.
+      # can use eth0). The web UI is on port 80 at this IP.
       companion_net:
         ipv4_address: 10.10.251.95
     volumes:

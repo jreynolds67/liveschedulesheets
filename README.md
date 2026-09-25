@@ -28,7 +28,7 @@ be toggled off entirely.
 
 ## The web UI
 
-Once deployed, open **`http://10.10.251.95:8080`** (the container's own IP —
+Once deployed, open **`http://10.10.251.95`** (the container's own IP —
 see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
 
 - Set the **LSP server URL and login**, and **Test connection**.
@@ -146,11 +146,12 @@ container is running. You can optionally pre-seed the LSP login with the
 4. Ensure the Google key is available at the mounted path
    (`secrets/service-account.json` in the checkout, or an absolute host path you
    set in the compose volume). **Never commit a real key to a shared repo.**
-5. Deploy, then open `http://10.10.251.95:8080` and finish configuration in the UI.
+5. Deploy, then open `http://10.10.251.95` and finish configuration in the UI.
 
 **Networking:** the container joins the existing **Companion** `ipvlan`
 network (parent `eth0`, subnet `10.10.251.0/24`) as an external network, at a
-fixed IP of **10.10.251.95** — no host port mapping. Docker allows only one
+fixed IP of **10.10.251.95** — no host port mapping. The stack sets
+`WEB_PORT=80` so the UI URL needs no port (the image default is 8080). Docker allows only one
 ipvlan network per parent interface, so this stack can't create its own. Set the
 `COMPANION_NETWORK` stack env var to that network's full Docker name (see
 `docker network ls`) if it isn't `companion_companion_net`. With ipvlan, the
