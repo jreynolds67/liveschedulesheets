@@ -23,9 +23,11 @@ class ScheduledEvent:
         """Stable identity for UI overrides: (date, name, occurrence)."""
         return (self.event_date, self.name.strip().lower(), self.occurrence)
 
-    def dedup_key(self) -> str:
-        """Stable identity used for local-state de-duplication."""
+    def dedup_key(self, channel_id: str = "") -> str:
+        """Stable identity used for local-state de-duplication (per channel)."""
         raw = f"{self.pcr}|{self.name.strip().lower()}|{self.start.astimezone().isoformat()}"
+        if channel_id:
+            raw += f"|{channel_id}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     def lsp_name(self, prefix: str = "") -> str:

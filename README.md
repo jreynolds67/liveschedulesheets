@@ -36,8 +36,12 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   needed): its title and visible tabs are shown, and the tab the link points at
   (`#gid=…`) opens in the row-mapping preview. If Google can't open it, the UI
   names the service-account email to share the sheet with.
-- Edit the **control room → channel mapping** (`A`–`E`; channel names
-  auto-complete from the live channel list after a successful connection test).
+- Edit the **control room → channel mapping**. Each room (`A`–`E`) records on
+  **every** LSP channel whose name contains its match text as a whole word
+  (default `PCR A`, …), so a `PCR A` event is booked on `01 - PCR A PGM
+  (x264)`, `01 - PCR A PGM (ProRes422)`, `02 - PCR A CLEAN (x264)`, etc.
+  Channels are looked up live every pass, so added or renamed channels are
+  picked up automatically; the UI lists which channels each room matches.
 - Manage **Sheet tabs** — every visible tab is listed with an on/off toggle and
   a **default control room** selector (used for tabs without a `CONTROL ROOM`
   row, e.g. Football), plus a **Rows…** button that opens it in the preview.
@@ -216,7 +220,9 @@ docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
 
 ## How de-duplication works
 
-Each event is matched by **channel + name + start minute (UTC)**:
+An event is booked separately on each channel its room matches, and each
+booking is matched by **channel + name + start minute (UTC)** — so if a new
+channel appears, the next pass adds just the missing bookings:
 - The local `state.json` (on the `lss_state` volume) records what was created.
   Events this tool creates are tagged `created_by_tool`; events found already in
   LSP are tagged `existed` (and are never deleted by the cleanup below).

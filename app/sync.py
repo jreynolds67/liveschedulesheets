@@ -29,11 +29,22 @@ NO_CHANNEL = "no_channel"
 
 
 @dataclass
+class Target:
+    """One LSP channel an event goes on, and what a pass would do there."""
+    channel_id: str
+    channel_name: str
+    status: str              # CREATE or EXISTS
+    message: str = ""
+
+
+@dataclass
 class PlanItem:
+    """One sheet event. Its control room maps to every matching LSP channel;
+    `targets` says what happens on each. `status` summarizes them."""
     event: ScheduledEvent
     lsp_name: str
     status: str
-    channel_id: Optional[str] = None
+    targets: list[Target] = field(default_factory=list)
     message: str = ""
 
     def to_dict(self) -> dict:
@@ -43,9 +54,10 @@ class PlanItem:
             "pcr": self.event.pcr,
             "start": self.event.start.isoformat(),
             "end": self.event.end.isoformat(),
-            "channel_id": self.channel_id,
             "status": self.status,
             "message": self.message,
+            "channels": [{"id": t.channel_id, "name": t.channel_name, "status": t.status}
+                         for t in self.targets],
             "source_tab": self.event.source_tab,
             "source_column": self.event.source_column,
             "event_date": self.event.event_date,
@@ -69,41 +81,54 @@ class Syncer:
         if not events:
             return []
 
-        channel_by_pcr = self._resolve_channels()
+        channels_by_pcr = self._resolve_channels()
         existing_cache: dict[str, set[tuple[str, str]]] = {}
-        planned_keys: set[tuple[str, str]] = set()
+        planned_keys: set[tuple[str, str, str]] = set()
         items: list[PlanItem] = []
 
         for ev in events:
             name = ev.lsp_name(self.cfg.scheduling.event_name_prefix)
-            channel_id = channel_by_pcr.get(ev.pcr)
-            if not channel_id:
-                items.append(PlanItem(ev, name, NO_CHANNEL, message=f"PCR {ev.pcr} has no resolvable channel"))
+            channels = channels_by_pcr.get(ev.pcr) or []
+            if not channels:
+                items.append(PlanItem(ev, name, NO_CHANNEL,
+                                      message=f"No LSP channels match PCR {ev.pcr or '(none)'}"))
                 continue
 
             if not self._within_window(ev):
-                items.append(PlanItem(ev, name, OUT_OF_WINDOW, channel_id,
+                items.append(PlanItem(ev, name, OUT_OF_WINDOW,
+                                      [Target(cid, cname, OUT_OF_WINDOW) for cid, cname in channels],
                                       message="Start is outside the active window"))
                 continue
 
             key = (name.strip().lower(), _minute_key(ev.start))
-            if self.state.has(ev.dedup_key()) or key in planned_keys:
-                items.append(PlanItem(ev, name, EXISTS, channel_id, message="Already created"))
-                continue
+            targets = []
+            for cid, cname in channels:
+                if self.state.has(ev.dedup_key(cid)) or (cid, *key) in planned_keys:
+                    targets.append(Target(cid, cname, EXISTS, "Already created"))
+                    continue
+                if cid not in existing_cache:
+                    existing_cache[cid] = self._existing_keys(cid)
+                if key in existing_cache[cid]:
+                    targets.append(Target(cid, cname, EXISTS, "Already exists in LSP"))
+                    continue
+                planned_keys.add((cid, *key))
+                targets.append(Target(cid, cname, CREATE, "Will be created"))
 
-            if channel_id not in existing_cache:
-                existing_cache[channel_id] = self._existing_keys(channel_id)
-            if key in existing_cache[channel_id]:
-                items.append(PlanItem(ev, name, EXISTS, channel_id, message="Already exists in LSP"))
-                continue
-
-            planned_keys.add(key)
-            items.append(PlanItem(ev, name, CREATE, channel_id, message="Will be created"))
+            to_create = sum(t.status == CREATE for t in targets)
+            if to_create:
+                msg = (f"Will be created on all {len(targets)} channels" if to_create == len(targets)
+                       else f"Will be created on {to_create} of {len(targets)} channels")
+                items.append(PlanItem(ev, name, CREATE, targets, message=msg))
+            else:
+                items.append(PlanItem(ev, name, EXISTS, targets,
+                                      message=f"Already on all {len(targets)} channels"))
         return items
 
     # -- execution ----------------------------------------------------------
 
     def run_once(self) -> dict:
+        """Execute the plan. Counts are per channel, except `parsed` / window /
+        no-channel, which count sheet events."""
         summary = {"parsed": 0, "created": 0, "skipped_existing": 0,
                    "skipped_window": 0, "no_channel": 0, "errors": 0}
         try:
@@ -115,12 +140,6 @@ class Syncer:
 
         summary["parsed"] = len(items)
         for item in items:
-            if item.status == EXISTS:
-                summary["skipped_existing"] += 1
-                if not self.state.has(item.event.dedup_key()):
-                    self.state.mark(item.event.dedup_key(),
-                                    {"name": item.lsp_name, "channel_id": item.channel_id, "existed": True})
-                continue
             if item.status == OUT_OF_WINDOW:
                 summary["skipped_window"] += 1
                 continue
@@ -129,28 +148,37 @@ class Syncer:
                 log.warning("%s", item.message)
                 continue
 
-            # status == CREATE
-            if self.cfg.runtime.dry_run:
-                log.info("[DRY RUN] would create %r on PCR %s %s -> %s",
-                         item.lsp_name, item.event.pcr, item.event.start.isoformat(),
-                         item.event.end.isoformat())
+            for t in item.targets:
+                key = item.event.dedup_key(t.channel_id)
+                if t.status == EXISTS:
+                    summary["skipped_existing"] += 1
+                    if not self.state.has(key):
+                        self.state.mark(key, {"name": item.lsp_name, "channel_id": t.channel_id,
+                                              "existed": True})
+                    continue
+
+                # t.status == CREATE
+                if self.cfg.runtime.dry_run:
+                    log.info("[DRY RUN] would create %r on %s (PCR %s) %s -> %s",
+                             item.lsp_name, t.channel_name, item.event.pcr,
+                             item.event.start.isoformat(), item.event.end.isoformat())
+                    summary["created"] += 1
+                    continue
+                try:
+                    result = self.lsp.add_event(item.event, t.channel_id, item.lsp_name)
+                except LspError:
+                    log.exception("Failed to create event %r on %s", item.lsp_name, t.channel_name)
+                    summary["errors"] += 1
+                    continue
+                event_id = result.get("Id") if isinstance(result, dict) else None
+                log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
+                         item.event.pcr, item.event.start.isoformat(), event_id)
+                self.state.mark(key, {"name": item.lsp_name, "channel_id": t.channel_id,
+                                      "channel_name": t.channel_name,
+                                      "event_id": event_id, "created_at": _now_iso(),
+                                      "created_by_tool": True,
+                                      "pcr": item.event.pcr, "source_tab": item.event.source_tab})
                 summary["created"] += 1
-                continue
-            try:
-                result = self.lsp.add_event(item.event, item.channel_id, item.lsp_name)
-            except LspError:
-                log.exception("Failed to create event %r", item.lsp_name)
-                summary["errors"] += 1
-                continue
-            event_id = result.get("Id") if isinstance(result, dict) else None
-            log.info("Created %r on PCR %s @ %s (id=%s)",
-                     item.lsp_name, item.event.pcr, item.event.start.isoformat(), event_id)
-            self.state.mark(item.event.dedup_key(),
-                            {"name": item.lsp_name, "channel_id": item.channel_id,
-                             "event_id": event_id, "created_at": _now_iso(),
-                             "created_by_tool": True,
-                             "pcr": item.event.pcr, "source_tab": item.event.source_tab})
-            summary["created"] += 1
 
         self.state.save()
         log.info(
@@ -185,17 +213,17 @@ class Syncer:
         longer found in LSP (deleted or moved by hand).
         """
         channels = self.lsp.get_all_channels()
-        channel_by_pcr = self._resolve_channels(channels)
-        names = {c.get("Id"): c.get("Name") for c in channels}
+        pcrs_by_channel: dict[str, list[str]] = {}
+        names: dict[str, str] = {}
+        for pcr, found in self._resolve_channels(channels).items():
+            for cid, cname in found:
+                pcrs_by_channel.setdefault(cid, []).append(pcr)
+                names[cid] = cname
         tool_ids = {info["event_id"]: info for _k, info in self.state.tool_created()}
         cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, past_days))
 
-        events, seen, all_ids = [], set(), set()
-        for channel_id in channel_by_pcr.values():
-            if channel_id in seen:
-                continue
-            seen.add(channel_id)
-            pcrs = [p for p, c in channel_by_pcr.items() if c == channel_id]
+        events, all_ids = [], set()
+        for channel_id, pcrs in pcrs_by_channel.items():
             for e in self.lsp.get_events_for_channel(channel_id):
                 all_ids.add(e.get("Id"))
                 end = _parse_utc(e.get("End") or e.get("Start"))
@@ -205,7 +233,7 @@ class Syncer:
                     "id": e.get("Id"),
                     "name": e.get("Name"),
                     "pcr": "/".join(sorted(pcrs)),
-                    "channel": names.get(channel_id) or channel_id,
+                    "channel": names[channel_id],
                     "start": e.get("Start"),
                     "end": e.get("End"),
                     "status": e.get("Status"),
@@ -222,7 +250,7 @@ class Syncer:
                 continue
             missing.append({"id": event_id, "name": info.get("name"),
                             "pcr": info.get("pcr"), "source_tab": info.get("source_tab")})
-        return {"events": events, "missing": missing, "channels": len(seen)}
+        return {"events": events, "missing": missing, "channels": len(pcrs_by_channel)}
 
     def delete_created(self) -> dict:
         """Delete from LSP every event this tool created, then forget them.
@@ -248,30 +276,21 @@ class Syncer:
 
     # -- helpers ------------------------------------------------------------
 
-    def _resolve_channels(self, channels: Optional[list[dict]] = None) -> dict[str, str]:
+    def _resolve_channels(self, channels: Optional[list[dict]] = None) -> dict[str, list[tuple[str, str]]]:
+        """PCR letter -> [(channel_id, channel_name)] for every LSP channel that
+        matches it, looked up live so added/renamed channels are picked up."""
         if channels is None:
             channels = self.lsp.get_all_channels()
-        by_name = {}
-        by_id = set()
-        for ch in channels:
-            if ch.get("Name"):
-                by_name[ch["Name"].strip().lower()] = ch["Id"]
-            if ch.get("Id"):
-                by_id.add(ch["Id"])
-
-        resolved: dict[str, str] = {}
+        resolved: dict[str, list[tuple[str, str]]] = {}
         for pcr, ref in self.cfg.pcr_channel_map.items():
-            if ref.channel_id:
-                if ref.channel_id in by_id:
-                    resolved[pcr] = ref.channel_id
-                else:
-                    log.warning("PCR %s: channel_id %s not found on server", pcr, ref.channel_id)
-            elif ref.channel_name:
-                cid = by_name.get(ref.channel_name.strip().lower())
-                if cid:
-                    resolved[pcr] = cid
-                else:
-                    log.warning("PCR %s: channel named %r not found", pcr, ref.channel_name)
+            found = [(c["Id"], c.get("Name") or c["Id"]) for c in channels
+                     if c.get("Id") and (c["Id"] == ref.channel_id or ref.matches(c.get("Name") or ""))]
+            if ref.channel_id and not any(cid == ref.channel_id for cid, _ in found):
+                log.warning("PCR %s: channel_id %s not found on server", pcr, ref.channel_id)
+            if found:
+                resolved[pcr] = sorted(found, key=lambda f: f[1].lower())
+            else:
+                log.warning("PCR %s: no LSP channels match %r", pcr, ref.match)
         return resolved
 
     def _existing_keys(self, channel_id: str) -> set[tuple[str, str]]:

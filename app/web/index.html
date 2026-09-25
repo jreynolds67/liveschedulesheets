@@ -53,7 +53,8 @@
   .pill.exists { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.out_of_window { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.no_channel { background:rgba(255,107,107,.16); color:var(--err); }
-  .pcr-row { display:grid; grid-template-columns:70px 1fr 1fr 34px; gap:10px; align-items:end; }
+  .pcr-row { display:grid; grid-template-columns:70px 1fr 34px; gap:10px; align-items:end; margin-bottom:10px; }
+  .pcr-row .pcr-hits { grid-column:1 / -1; margin-top:-4px; }
   .pcr-row .rm { background:transparent; border:1px solid var(--line); color:var(--err);
     padding:9px 0; border-radius:8px; }
   .pill.no_room { background:rgba(245,181,68,.16); color:var(--warn); }
@@ -190,11 +191,13 @@
 
   <!-- PCR mapping -->
   <section class="card"><h2>PCR → channel mapping</h2><div class="body">
-    <div class="hint">Map each PCR letter from the sheet to a Live Schedule Pro channel. Use a channel name (matched live) or paste a channel ID.</div>
+    <div class="hint">Each PCR letter from the sheet records on <b>every</b> LSP channel whose name contains
+      the match text as a whole word — e.g. “PCR A” matches “01 - PCR A PGM (x264)” and
+      “02 - PCR A CLEAN (ProRes422)”, but not “PCR AB”. Channels are looked up live on every pass, so
+      added or renamed channels are picked up automatically.</div>
     <div id="pcrRows"></div>
     <div class="row"><button id="btnAddPcr" class="ghost">+ Add PCR</button>
       <span class="hint" id="channelHint"></span></div>
-    <datalist id="channelNames"></datalist>
   </div></section>
 
   <!-- Scheduling -->
@@ -349,11 +352,32 @@ function addPcrRow(letter="", ref={}){
   const div = document.createElement("div"); div.className="pcr-row";
   div.innerHTML = `
     <div><label>PCR</label><input type="text" class="pcr-letter" value="${letter}" maxlength="3" /></div>
-    <div><label>Channel name</label><input type="text" class="pcr-name" list="channelNames" value="${ref.channel_name||""}" /></div>
-    <div><label>Channel ID (optional)</label><input type="text" class="pcr-id mono" value="${ref.channel_id||""}" /></div>
-    <button class="rm" title="Remove">✕</button>`;
+    <div><label>Match channels containing</label><input type="text" class="pcr-name" value="${esc(ref.channel_match||ref.channel_name||(letter?`PCR ${letter}`:""))}" /></div>
+    <button class="rm" title="Remove">✕</button>
+    <div class="pcr-hits hint"></div>`;
+  div.dataset.channelId = ref.channel_id || "";   // pinned ID from an older config, kept as-is
   div.querySelector(".rm").onclick = () => div.remove();
+  div.querySelector(".pcr-name").addEventListener("input", () => renderPcrHits(div));
+  div.querySelector(".pcr-letter").addEventListener("input", () => renderPcrHits(div));
   $("pcrRows").appendChild(div);
+  renderPcrHits(div);
+}
+// Mirrors channel_name_matches() in app/config.py.
+function channelMatches(match, name){
+  const words = (match||"").trim().split(/\s+/).filter(Boolean)
+    .map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!words.length) return false;
+  return new RegExp("(?<![A-Za-z0-9])" + words.join("\\s*") + "(?![A-Za-z0-9])", "i").test(name||"");
+}
+function renderPcrHits(div){
+  const box = div.querySelector(".pcr-hits");
+  if (!lspChannels){ box.textContent = ""; return; }
+  const match = div.querySelector(".pcr-name").value;
+  const hits = lspChannels.filter(c => c.Name && (channelMatches(match, c.Name) || c.Id === div.dataset.channelId))
+    .map(c => c.Name).sort((a,b) => a.localeCompare(b));
+  box.innerHTML = hits.length
+    ? `Matches ${hits.length} channel(s): ${hits.map(esc).join(" · ")}`
+    : `<span style="color:var(--warn)">No LSP channels match</span>`;
 }
 
 function gather(){
@@ -398,9 +422,9 @@ function gather(){
   document.querySelectorAll(".pcr-row").forEach(r => {
     const L = r.querySelector(".pcr-letter").value.trim().toUpperCase();
     if (!L) return;
-    const name = r.querySelector(".pcr-name").value.trim();
-    const id = r.querySelector(".pcr-id").value.trim();
-    map[L] = {}; if (name) map[L].channel_name = name; if (id) map[L].channel_id = id;
+    const match = r.querySelector(".pcr-name").value.trim();
+    map[L] = {}; if (match) map[L].channel_match = match;
+    if (r.dataset.channelId) map[L].channel_id = r.dataset.channelId;
   });
   cfg.pcr_channel_map = map;
 
@@ -799,7 +823,7 @@ function renderPreview(items){
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><span class="pill ${statusCls}">${statusTxt}</span></td>
-      <td>${i.event_name}<div class="hint">${i.message||""}</div></td>
+      <td>${esc(i.event_name)}<div class="hint" title="${esc((i.channels||[]).map(c=>`${c.name} — ${c.status.replace(/_/g,' ')}`).join("\n"))}">${esc(i.message||"")}</div></td>
       <td class="hint">${i.source_tab}</td>
       <td></td>
       <td class="mono">${new Date(i.start).toLocaleString()}</td>
@@ -839,28 +863,39 @@ function renderScheduled(){
   const toolCount = r.events.filter(e => e.by_tool).length;
   // Delete covers everything tool-created that is tracked, not just what's shown.
   $("btnDeleteCreated").disabled = !(lastStatus?.created_count || toolCount || r.missing.length);
-  const evs = $("schedToolOnly").checked ? r.events.filter(e => e.by_tool) : r.events;
+  // One row per event: the same name + start + room across its channels.
+  const groups = new Map();
+  for (const e of r.events){
+    const k = [e.name, e.start, e.end, e.pcr].join("|");
+    if (!groups.has(k)) groups.set(k, {...e, channels: [], statuses: new Set(), creators: new Set(), tool: 0});
+    const g = groups.get(k);
+    g.channels.push(e.channel); if (e.status) g.statuses.add(e.status);
+    if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++;
+  }
+  let rows = [...groups.values()];
+  if ($("schedToolOnly").checked) rows = rows.filter(g => g.tool);
   const fmt = (iso) => iso ? new Date(iso).toLocaleString([], {weekday:"short", month:"short", day:"numeric", hour:"numeric", minute:"2-digit"}) : "";
-  let html = `<div class="hint" style="margin-bottom:8px">${r.events.length} event(s) on ${r.channels} mapped channel(s) · <b>${toolCount}</b> created by this tool</div>`;
-  if (!r.channels) html = `<div class="hint">No PCR channels resolved — set up the PCR → channel mapping above.</div>`;
-  else if (!evs.length) html += `<div class="hint">No events to show.</div>`;
+  let html = `<div class="hint" style="margin-bottom:8px">${groups.size} event(s) across ${r.channels} mapped channel(s) · <b>${toolCount}</b> channel booking(s) created by this tool</div>`;
+  if (!r.channels) html = `<div class="hint">No LSP channels match any PCR — check the PCR → channel mapping above.</div>`;
+  else if (!rows.length) html += `<div class="hint">No events to show.</div>`;
   else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>Room</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th></tr></thead><tbody>`
-    + evs.map(e => `<tr>
-      <td>${esc(e.name)}${e.by_tool?` <span class="pill tool">this tool</span>`:""}</td>
-      <td>${esc(e.pcr)}<div class="hint">${esc(e.channel)}</div></td>
-      <td class="mono">${fmt(e.start)}</td><td class="mono">${fmt(e.end)}</td>
-      <td class="hint">${esc(e.status)}</td><td class="hint">${esc(e.created_by)}</td></tr>`).join("")
+    + rows.map(g => `<tr>
+      <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}</td>
+      <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
+      <td class="mono">${fmt(g.start)}</td><td class="mono">${fmt(g.end)}</td>
+      <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td></tr>`).join("")
     + `</tbody></table></div>`;
-  if (r.missing.length) html += `<div class="hint" style="margin-top:10px;color:var(--warn)">⚠ ${r.missing.length} event(s) this tool created are no longer on any mapped channel in LSP (deleted or moved by hand): ${r.missing.map(m=>esc(m.name)).join(", ")}</div>`;
+  if (r.missing.length) html += `<div class="hint" style="margin-top:10px;color:var(--warn)">⚠ ${r.missing.length} channel booking(s) this tool created are no longer on any mapped channel in LSP (deleted or moved by hand): ${[...new Set(r.missing.map(m=>m.name))].map(esc).join(", ")}</div>`;
   box.className = ""; box.innerHTML = html;
 }
 
+let lspChannels = null;
 async function loadChannels(){
   const r = await api("GET","/api/channels");
   if (r.ok){
-    $("channelNames").innerHTML = r.channels.filter(c=>c.Name)
-      .map(c=>`<option value="${c.Name}">`).join("");
-    $("channelHint").textContent = `${r.channels.length} channel(s) available`;
+    lspChannels = r.channels;
+    document.querySelectorAll(".pcr-row").forEach(renderPcrHits);
+    $("channelHint").textContent = `${r.channels.length} channel(s) in LSP`;
   } else {
     $("channelHint").textContent = "Could not load channels: " + (r.error||"");
   }

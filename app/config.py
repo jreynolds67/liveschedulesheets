@@ -56,8 +56,24 @@ class SchedulingConfig:
 
 @dataclass
 class ChannelRef:
-    channel_name: Optional[str] = None
+    """Which LSP channels a control room records on: every channel whose name
+    contains `match` as a whole word (case-insensitive), resolved live each
+    pass, plus `channel_id` if pinned."""
+    match: Optional[str] = None
     channel_id: Optional[str] = None
+
+    def matches(self, channel_name: str) -> bool:
+        return bool(self.match) and channel_name_matches(self.match, channel_name)
+
+
+def channel_name_matches(match: str, channel_name: str) -> bool:
+    """True if `match` appears in `channel_name` as whole words, ignoring case
+    and spacing: "PCR A" matches "01 - PCR A PGM (x264)" but not "PCR AB"."""
+    words = [re.escape(w) for w in match.split()]
+    if not words:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + r"\s*".join(words) + r"(?![A-Za-z0-9])"
+    return re.search(pattern, channel_name or "", re.IGNORECASE) is not None
 
 
 # Fields a tab's rows can be mapped to (keys of LabelMap / TabOverride.rows).
@@ -298,12 +314,14 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
     pcr_channel_map: dict[str, ChannelRef] = {}
     for letter, ref in pcr_map_raw.items():
         ref = ref or {}
-        pcr_channel_map[str(letter).strip().upper()] = ChannelRef(
-            channel_name=(ref.get("channel_name") or None),
+        letter = str(letter).strip().upper()
+        pcr_channel_map[letter] = ChannelRef(
+            # channel_name is the older name for this field.
+            match=(ref.get("channel_match") or ref.get("channel_name") or None),
             channel_id=(ref.get("channel_id") or None),
         )
     if not pcr_channel_map:
-        raise ConfigError("pcr_channel_map must map at least one PCR letter to a channel")
+        raise ConfigError("pcr_channel_map must map at least one PCR letter to channels")
 
     lsp_raw = _require(raw, "lsp", "root")
     username = (lsp_raw.get("username") or os.environ.get("LSP_USERNAME", "")).strip()
