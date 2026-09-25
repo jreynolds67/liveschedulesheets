@@ -195,23 +195,21 @@ class SyncManager:
                 "gid": t["gid"],
                 "enabled": (True if ov is None else ov.enabled)
                            and (name in allow if allow else True),
-                "default_control_room": (ov.default_control_room if ov else None),
                 "in_allow_list": (name in allow) if allow else True,
                 "row_picks": len(ov.rows) if ov else 0,
             })
         return {"spreadsheet_id": cfg.sheet.spreadsheet_id, "title": meta["title"], "tabs": out}
 
     def inspect_tab(self, tab: str, spreadsheet: Optional[str] = None,
-                    rows: Optional[dict] = None, default_room: Optional[str] = None,
-                    refresh: bool = False) -> dict:
-        """Sheet preview + row detection for one tab. `rows` / `default_room`
-        are the operator's unsaved choices (None = use what is saved)."""
+                    rows: Optional[dict] = None, refresh: bool = False) -> dict:
+        """Sheet preview + row detection for one tab. `rows` are the
+        operator's unsaved row picks (None = use what is saved)."""
         with self._sheet_lock:
             reader = self._sheet_reader(spreadsheet)
             grid = self._grid(reader, tab, refresh)
             cfg = reader.cfg
         picks = parse_row_picks(rows) if rows is not None else None
-        return inspect_grid(tab, grid, cfg, picks=picks, default_room=default_room)
+        return inspect_grid(tab, grid, cfg, picks=picks)
 
     def test_connection(self) -> dict:
         try:

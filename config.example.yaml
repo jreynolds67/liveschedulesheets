@@ -32,16 +32,14 @@ sheet:
   # the row's contents (dates / A-E letters only) are tried; per-tab picks in
   # tab_overrides.<tab>.rows beat all of this.
   #
-  #   event_name is required. The channel comes from the `pcr` (CONTROL ROOM)
-  #   row. For the start instant, these tabs keep DATE and the game time in
-  #   separate rows; a single combined `datetime` cell is also supported.
+  #   event_name, date and time are required; DATE and the start time are
+  #   always separate rows. The channel comes from the `pcr` (PCR / CONTROL
+  #   ROOM) row, whose cells hold "A" or "PCR A".
   labels:
     event_name: ["EVENT"]
     pcr: ["CONTROL ROOM", "PCR"]
     date: ["DATE"]
     time: ["GAME START", "GAME TIME", "START TIME"]
-    # Optional: a single cell holding a full date + time WITH YEAR.
-    datetime: []
 
   # IANA timezone the sheet's times are written in.
   timezone: "America/New_York"
@@ -65,7 +63,7 @@ scheduling:
   # Optional prefix for the LSP event name, e.g. "AUTO " -> "AUTO FB vs UCF".
   event_name_prefix: ""
 
-# CONTROL ROOM letter (from the sheet) -> Live Schedule Pro channels.
+# PCR letter (from the sheet) -> Live Schedule Pro channels.
 # Each event is booked on EVERY channel whose name contains channel_match as a
 # whole word, ignoring case -- "PCR A" matches "01 - PCR A PGM (x264)" and
 # "02 - PCR A CLEAN (ProRes422)" but not "PCR AB". Channels are looked up live
@@ -79,19 +77,15 @@ pcr_channel_map:
   E: { channel_match: "PCR E" }
 
 # Per-tab overrides (normally managed from the web UI).
-#   enabled:              false to skip a whole tab.
-#   default_control_room: room letter to use for tabs with no CONTROL ROOM row
-#                         (e.g. Football).
-#   rows:                 pin which row feeds a field when auto-detection is
-#                         wrong (set from the UI's row-mapping preview). Fields:
-#                         event_name, date, time, pcr, datetime. Each is
-#                         {row: <1-based row>, label: <its column-A text>} --
-#                         the label lets the pick follow the row if rows are
-#                         inserted above it -- or {none: true} for "no such row".
+#   enabled: false to skip a whole tab.
+#   rows:    pin which row feeds a field when auto-detection is wrong (set
+#            from the UI's row-mapping preview). Fields: event_name, date,
+#            time, pcr. Each is {row: <1-based row>, label: <its column-A
+#            text>} -- the label lets the pick follow the row if rows are
+#            inserted above it -- or {none: true} for "no such row".
 tab_overrides: {}
   # Football:
-  #   enabled: true
-  #   default_control_room: "A"
+  #   enabled: false
   # "Special Events":
   #   rows:
   #     time: { row: 4, label: "START TIME" }
@@ -99,7 +93,7 @@ tab_overrides: {}
 # Per-event fixes for missing/wrong data (normally managed from the web UI).
 # Matched by date + event name (+ occurrence when a tab has duplicates on the
 # same day, 0-based). Any field you omit is left as parsed.
-#   control_room: assign/override the room letter.
+#   control_room: assign/override the PCR letter.
 #   start:        override the start ("YYYY-MM-DD HH:MM", sheet timezone).
 #   ignore:       true to drop this event entirely.
 event_overrides: {}

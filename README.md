@@ -11,8 +11,9 @@ Every `poll_interval` (default 15 min) it:
    Basketball, Special Events) — each transposed, one event per column, row
    headers down column A. **Hidden tabs are skipped automatically** (so the
    `COUNT` tab and the old `*RELAYOUT` composites are ignored with no config).
-2. For each event column, reads the **event name**, **start time**, and the
-   **`CONTROL ROOM`** letter (`A`–`E`), mapping that room to an LSP channel.
+2. For each event column, reads the **event name**, **date**, **start time**,
+   and the **PCR** (`CONTROL ROOM` / `PCR` row: `A`–`E` or `PCR A`–`PCR E`),
+   mapping that PCR to LSP channels. Hidden columns are read like any other.
 3. Creates an LSP recording event starting `lead_in_minutes` before the sheet's
    start time, ending after a `safety_cap_hours` cap (an engineer normally stops
    it manually in LSP first).
@@ -20,9 +21,9 @@ Every `poll_interval` (default 15 min) it:
    so it is safe to run repeatedly.
 
 There is **no composite tab** — the schedule lives across the per-sport tabs and
-the service assembles it. Tabs with no `CONTROL ROOM` row (e.g. **Football**) get
-their channel from a per-tab **default control room** set in the UI, or they can
-be toggled off entirely.
+the service assembles it. Events on a tab with no PCR row (e.g. **Football**)
+show in Preview as **no PCR** until one is assigned per event, or the tab can be
+left out entirely.
 
 ---
 
@@ -36,18 +37,17 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   needed): its title and visible tabs are shown, and the tab the link points at
   (`#gid=…`) opens in the row-mapping preview. If Google can't open it, the UI
   names the service-account email to share the sheet with.
-- Edit the **control room → channel mapping**. Each room (`A`–`E`) records on
+- Edit the **PCR → channel mapping**. Each PCR (`A`–`E`) records on
   **every** LSP channel whose name contains its match text as a whole word
   (default `PCR A`, …), so a `PCR A` event is booked on `01 - PCR A PGM
   (x264)`, `01 - PCR A PGM (ProRes422)`, `02 - PCR A CLEAN (x264)`, etc.
   Channels are looked up live every pass, so added or renamed channels are
-  picked up automatically; the UI lists which channels each room matches.
-- Manage **Sheet tabs** — every visible tab is listed with an on/off toggle and
-  a **default control room** selector (used for tabs without a `CONTROL ROOM`
-  row, e.g. Football), plus a **Rows…** button that opens it in the preview.
-- **Check and choose rows** in *Sheet preview & row mapping*. Each tab is shown as
-  a grid, with the detected Event / Date / Start / Room rows highlighted and a
-  **Parses as** line above every column showing the resulting start and room (or
+  picked up automatically; the UI lists which channels each PCR matches.
+- Pick tabs and **check and choose rows** in *Sheet tabs & row mapping*. Every
+  visible tab has a button; the selected one has an **Include this tab**
+  toggle and is shown as a grid, with the detected Event / Date / Start / PCR
+  rows highlighted and a **Parses as** line above every column showing the
+  resulting PCR and start (or
   why that column won't schedule). To correct a row, use its dropdown (Auto,
   No row, or any labelled row), or click a row in the grid and choose what it is
   for. Rows detected by guesswork, rather than an exact label, are flagged
@@ -61,12 +61,12 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   nothing is created in or deleted from LSP. It's stored as `runtime.live`
   (default `false`); a `DRY_RUN` env var, if set, overrides the toggle.
 - **Preview events** — see exactly what the next sync would create/skip, with no
-  changes made. Each row has an inline **room selector** and an **Ignore**
+  changes made. Each row has an inline **PCR selector** and an **Ignore**
   checkbox for fixing individual events.
 - Stage **Manual overrides** — per-event fixes (matched by tab + date + event
-  name): assign/correct the control room, override the start time, or ignore an
+  name): assign/correct the PCR, override the start time, or ignore an
   event. They persist in the overrides list until removed.
-- **Run now**, and see the **last-run status**.
+- **Run now**, and see the **last-run status** (the *Status* card at the top).
 - **See what's scheduled in LSP** — the *Scheduled in Live Schedule Pro* card
   lists, live from LSP, the upcoming and in-progress events on the mapped PCR
   channels (optionally the last 24 h / 7 days too). Events this tool created are
@@ -92,10 +92,10 @@ order (a row used by an earlier step is never reused):
 2. **Exact label**: column-A text matches one of the labels below (editable
    under *Advanced* in the UI).
 3. **Header keyword**: e.g. `KICKOFF` or `Tip` for the start time, `Ctrl Room` for
-   the room, `Event Name` / `Event Date`. Headers containing `CALL`, `CHECK`,
+   the PCR, `Event Name` / `Event Date`. Headers containing `CALL`, `CHECK`,
    `DOORS`, `END`, `MEAL` or `CREW` are never taken as the start time.
 4. **Cell contents**: dates only (a row that is mostly `9/5`-style dates), and
-   control rooms only (a row that is mostly `A`–`E`). The start **time** is never
+   PCRs only (a row that is mostly `A`–`E` / `PCR A`–`PCR E`). The start **time** is never
    guessed from contents, because `CREW CALL`, `AUDIO CHECK` and `DOORS` rows hold
    times too.
 
@@ -109,24 +109,25 @@ The default labels:
 | Field        | Default label(s)                    | Required | Notes |
 |--------------|-------------------------------------|----------|-------|
 | Event name   | `EVENT`                             | yes      | Used as the LSP event name |
-| Control room | `CONTROL ROOM`, `PCR`               | for a channel | Letters `A`–`E` (also accepts `PCR A`, `Control Room B`). The **first** matching row wins — a repeated block lower down (e.g. a scoreboard feed) is ignored. |
-| Date + Time  | `DATE` + `GAME START`/`GAME TIME`/`START TIME` | one of | These tabs keep date and time in separate rows |
-| Start        | *(combined)* `datetime`             | one of   | Optional: a single cell with full date + time including year |
+| PCR          | `CONTROL ROOM`, `PCR`               | for a channel | `A`–`E` or `PCR A`–`PCR E` (also accepts `Control Room B`). The **first** matching row wins — a repeated block lower down (e.g. a scoreboard feed) is ignored. |
+| Date         | `DATE`                              | yes      | Must include the year |
+| Start time   | `GAME START`, `GAME TIME`, `START TIME` | yes   | Date and time are always separate rows |
 
 A column becomes a recording once it has an **event name** and a **valid start**
 (`DATE` + a game time). **Dates must include the year** (e.g. `9/12/2026`) —
 a date without one is skipped and flagged “Date has no year” in the sheet
 preview. Blank cells or `TBD`/`TBA` are skipped. If its
-`CONTROL ROOM` is blank the event still shows in Preview flagged **no room**, so
+PCR is blank the event still shows in Preview flagged **no PCR**, so
 an engineer can assign one via the inline selector or a manual override.
 
-**Control rooms are letters `A`–`E` only.** A stray value that isn't a letter
+**PCRs are letters `A`–`E` only** (bare or as `PCR A`). A stray value that isn't a letter
 (e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
 or with a manual override.
 
 **Which tabs are read:** all **visible** tabs by default (hidden tabs skipped).
 Leave `sheet.tabs` empty to auto-discover, or list specific tabs as an
-allow-list. Turn individual tabs off in the UI (**Sheet tabs** card).
+allow-list. Turn individual tabs off in the UI (**Include this tab** in the
+*Sheet tabs & row mapping* card).
 
 ---
 

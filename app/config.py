@@ -26,7 +26,6 @@ class LabelMap:
     pcr: list[str]
     date: list[str]
     time: list[str]
-    datetime: list[str]
 
 
 @dataclass
@@ -75,7 +74,7 @@ def channel_name_matches(match: str, channel_name: str) -> bool:
 
 
 # Fields a tab's rows can be mapped to (keys of LabelMap / TabOverride.rows).
-ROW_FIELDS = ("event_name", "date", "time", "pcr", "datetime")
+ROW_FIELDS = ("event_name", "date", "time", "pcr")
 
 
 @dataclass
@@ -93,11 +92,9 @@ class RowPick:
 
 @dataclass
 class TabOverride:
-    """Per-tab UI settings: enable/ignore a whole tab, supply a default room
-    for tabs that have no CONTROL ROOM row (e.g. Football), and pin which row
+    """Per-tab UI settings: enable/ignore a whole tab, and pin which row
     feeds each field when auto-detection gets it wrong."""
     enabled: bool = True
-    default_control_room: Optional[str] = None
     rows: dict[str, RowPick] = field(default_factory=dict)
 
 
@@ -206,16 +203,13 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
         pcr=_as_list(labels_raw.get("pcr")),
         date=_as_list(labels_raw.get("date")),
         time=_as_list(labels_raw.get("time")),
-        datetime=_as_list(labels_raw.get("datetime")),
     )
     if not labels.event_name:
         raise ConfigError("sheet.labels.event_name must list at least one label")
     if not labels.pcr:
         raise ConfigError("sheet.labels.pcr must list at least one label")
-    if not labels.datetime and not (labels.date and labels.time):
-        raise ConfigError(
-            "Provide sheet.labels.datetime, OR both sheet.labels.date and sheet.labels.time"
-        )
+    if not (labels.date and labels.time):
+        raise ConfigError("sheet.labels.date and sheet.labels.time must each list at least one label")
 
     tz_name = sheet_raw.get("timezone", "UTC")
     try:
@@ -352,7 +346,6 @@ def _parse_tab_overrides(raw: dict) -> dict[str, TabOverride]:
         cfg = cfg or {}
         out[str(tab)] = TabOverride(
             enabled=bool(cfg.get("enabled", True)),
-            default_control_room=(cfg.get("default_control_room") or None),
             rows=parse_row_picks(cfg.get("rows")),
         )
     return out

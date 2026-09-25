@@ -63,16 +63,10 @@
   .pill.tool { background:rgba(59,209,136,.15); color:var(--accent2); }
   .schedbar { display:flex; gap:14px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
   .schedbar label { display:flex; gap:6px; align-items:center; }
-  .tab-row { display:grid; grid-template-columns:1fr auto 210px; gap:12px; align-items:center;
-    padding:9px 0; border-bottom:1px solid var(--line); }
-  .tab-row:last-child { border-bottom:none; }
-  .tab-row .tname { font-weight:600; }
-  .tab-row.off .tname { color:var(--muted); text-decoration:line-through; }
-  .tab-row select { padding:6px 8px; flex:1; min-width:0; }
   .mini { padding:4px 8px; font-size:12px; }
   .roomsel { background:var(--panel2); color:var(--text); border:1px solid var(--line);
     border-radius:6px; padding:4px 6px; font-size:12px; }
-  td .inline, .tab-row .inline { display:flex; gap:6px; align-items:center; }
+  td .inline { display:flex; gap:6px; align-items:center; }
   .ov-row { display:grid; grid-template-columns:1fr 1fr 90px 70px auto auto; gap:10px;
     align-items:center; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; }
   .ov-row:last-child { border-bottom:none; }
@@ -91,6 +85,8 @@
   .tabpill.on { border-color:var(--accent); background:rgba(79,140,255,.18); }
   .tabpill.off { color:var(--muted); text-decoration:line-through; }
   .tabpill .dot { color:var(--warn); margin-left:4px; }
+  .tabbar { display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
+  .tabon { display:flex; align-items:center; gap:8px; font-size:13px; }
   .fieldgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
   .sw { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px; }
   .fpick .how { font-size:11px; margin-top:4px; color:var(--muted); min-height:16px; }
@@ -123,8 +119,7 @@
   #rowMenu .btns { margin-top:8px; gap:6px; }
 
   @media (max-width:680px){ .grid2,.grid3{ grid-template-columns:1fr; }
-    header { flex-wrap:wrap; }
-    .tab-row { grid-template-columns:minmax(0,1fr) auto; } .tab-row .inline { grid-column:1 / -1; } }
+    header { flex-wrap:wrap; } }
 </style>
 </head>
 <body>
@@ -142,6 +137,11 @@
 </header>
 
 <main>
+  <!-- Status -->
+  <section class="card"><h2>Status</h2><div class="body">
+    <div id="statusBox" class="hint">…</div>
+  </div></section>
+
   <!-- Connection -->
   <section class="card"><h2>Live Schedule Pro connection</h2><div class="body">
     <div class="grid2">
@@ -176,22 +176,17 @@
       </div></div>
   </div></section>
 
-  <!-- Tabs -->
-  <section class="card"><h2>Sheet tabs</h2><div class="body">
-    <div class="hint">Every <b>visible</b> tab is read automatically (hidden tabs like COUNT and the
-      old composites are skipped). Turn a tab off to exclude it, or set a default control room for
-      tabs that have no CONTROL ROOM row (e.g. Football).</div>
-    <div id="tabsBox" class="hint">Loading tabs…</div>
-    <div class="row"><button id="btnRefreshTabs" class="ghost">Refresh tabs</button></div>
-  </div></section>
-
-  <!-- Sheet preview & row mapping -->
-  <section class="card" id="mapCard"><h2>Sheet preview &amp; row mapping</h2><div class="body">
-    <div class="hint">Rows are detected automatically for each tab. Check the highlighted rows and the
-      <b>Parses as</b> line. If a row is wrong, choose the right one from the dropdowns, or click a
-      row in the sheet. Your choices stick to that row even if rows are inserted above it.
-      Click <b>Save</b> to apply.</div>
-    <div id="mapTabs" class="tabpills"></div>
+  <!-- Sheet tabs, preview & row mapping -->
+  <section class="card" id="mapCard"><h2>Sheet tabs &amp; row mapping</h2><div class="body">
+    <div class="hint">Every <b>visible</b> tab is read (hidden tabs like COUNT are skipped). Pick a tab
+      to preview it, and untick <b>Include this tab</b> to leave it out. Rows are detected
+      automatically; check the highlighted rows and the <b>Parses as</b> line. If a row is wrong,
+      choose the right one from the dropdowns, or click a row in the sheet. Your choices stick to that
+      row even if rows are inserted above it. Click <b>Save</b> to apply.</div>
+    <div class="tabbar">
+      <div id="mapTabs" class="tabpills"></div>
+      <button id="btnRefreshTabs" class="mini ghost">Refresh tabs</button>
+    </div>
     <div id="mapBox" class="hint">Paste a sheet link above to preview it.</div>
   </div></section>
 
@@ -232,10 +227,9 @@
           <div><label>EVENT name label(s)</label><input type="text" id="lbl_event" /></div>
           <div><label>PCR label(s)</label><input type="text" id="lbl_pcr" /></div>
         </div>
-        <div class="grid3">
-          <div><label>Combined datetime label(s)</label><input type="text" id="lbl_datetime" /></div>
+        <div class="grid2">
           <div><label>Date label(s)</label><input type="text" id="lbl_date" /></div>
-          <div><label>Time label(s)</label><input type="text" id="lbl_time" /></div>
+          <div><label>Start time label(s)</label><input type="text" id="lbl_time" /></div>
         </div>
         <div class="hint">Comma-separated; first match in the tab wins.</div>
         <div class="grid3">
@@ -248,8 +242,8 @@
 
   <!-- Preview -->
   <section class="card"><h2>Preview</h2><div class="body">
-    <div class="hint">What the next sync would do (no changes made). Use the room selector to
-      assign a missing/wrong control room, or Ignore to drop an event. Staged fixes appear below
+    <div class="hint">What the next sync would do (no changes made). Use the PCR selector to
+      assign a missing/wrong PCR, or Ignore to drop an event. Staged fixes appear below
       under “Manual overrides” — click <b>Save</b> to apply them.</div>
     <div id="previewBox" class="hint">Click “Preview events” to see the plan.</div>
   </div></section>
@@ -259,11 +253,6 @@
     <div class="hint">Per-event fixes, matched by tab + date + event name. These override what the
       sheet says (or fill in what it is missing).</div>
     <div id="overridesBox" class="hint">No overrides staged.</div>
-  </div></section>
-
-  <!-- Status -->
-  <section class="card"><h2>Status</h2><div class="body">
-    <div id="statusBox" class="hint">…</div>
   </div></section>
 
   <!-- Cleanup / testing -->
@@ -334,7 +323,6 @@ function fillForm(){
 
   $("lbl_event").value = csv(get(cfg,"sheet.labels.event_name",["EVENT"]));
   $("lbl_pcr").value = csv(get(cfg,"sheet.labels.pcr",["PCR"]));
-  $("lbl_datetime").value = csv(get(cfg,"sheet.labels.datetime",[]));
   $("lbl_date").value = csv(get(cfg,"sheet.labels.date",[]));
   $("lbl_time").value = csv(get(cfg,"sheet.labels.time",[]));
   $("dp_skip").value = csv(get(cfg,"date_parsing.skip_values",["TBD","TBA"]));
@@ -343,7 +331,7 @@ function fillForm(){
   renderOverrides();
 }
 
-// Canonical control rooms.
+// Canonical PCRs.
 const ROOMS = ["A","B","C","D","E"];
 
 function renderPcr(map){
@@ -400,7 +388,6 @@ function gather(){
   cfg.sheet.labels = {
     event_name: fromCsv($("lbl_event").value),
     pcr: fromCsv($("lbl_pcr").value),
-    datetime: fromCsv($("lbl_datetime").value),
     date: fromCsv($("lbl_date").value),
     time: fromCsv($("lbl_time").value),
   };
@@ -442,13 +429,11 @@ let tabsList = [];
 
 async function loadTabs(openGid=null){
   const sid = currentSheet();
-  $("tabsBox").textContent = "Loading tabs…";
   $("sheetInfo").textContent = sid ? "Reading sheet…" : "";
   const r = await api("GET","/api/tabs" + (sid ? `?spreadsheet=${encodeURIComponent(sid)}` : ""));
   if (!r.ok){
     loadedSheetId = null;  // so re-entering a good link reloads everything
-    const msg = `<span style="color:var(--err)">Could not read the sheet: ${esc(r.error||"")}</span>`;
-    $("tabsBox").innerHTML = msg; $("sheetInfo").innerHTML = msg;
+    $("sheetInfo").innerHTML = `<span style="color:var(--err)">Could not read the sheet: ${esc(r.error||"")}</span>`;
     $("mapTabs").innerHTML = ""; $("mapBox").className = "hint";
     $("mapBox").textContent = "Fix the sheet link / access above to preview it.";
     return;
@@ -457,61 +442,35 @@ async function loadTabs(openGid=null){
   loadedSheetId = r.spreadsheet_id;
   $("sheetInfo").innerHTML = `<span style="color:var(--accent2)">✓</span> <b>${esc(r.title||"Untitled sheet")}</b>
     · ${tabsList.length} visible tab(s) · <a href="${sheetUrl(r.spreadsheet_id)}" target="_blank" rel="noopener">open in Google Sheets ↗</a>`;
-  renderTabs();
   // Open the tab the link pointed at (#gid=…), else stay put, else the first enabled tab.
   let tab = openGid != null ? (tabsList.find(t => t.gid === openGid) || {}).name : null;
   if (!tab && insp.tab && tabsList.some(t => t.name === insp.tab)) tab = insp.tab;
-  if (!tab) tab = (tabsList.find(t => t.enabled) || tabsList[0] || {}).name;
-  if (tab) inspectTab(tab); else renderTabPills();
+  if (!tab) tab = (tabsList.find(t => tabEnabled(t.name)) || tabsList[0] || {}).name;
+  if (tab) inspectTab(tab);
+  else { renderTabPills(); $("mapBox").className = "hint"; $("mapBox").textContent = "No visible tabs found."; }
 }
 
-function renderTabs(){
-  if (!tabsList.length){ $("tabsBox").textContent = "No visible tabs found."; return; }
-  const box = $("tabsBox"); box.className = ""; box.innerHTML = "";
-  tabsList.forEach(t => {
-    const ov = cfg.tab_overrides[t.name] || {};
-    const enabled = ov.enabled !== undefined ? ov.enabled : t.enabled;
-    const room = ("default_control_room" in ov ? ov.default_control_room : t.default_control_room) || "";
-    const row = document.createElement("div");
-    row.className = "tab-row" + (enabled ? "" : " off");
-    row.innerHTML = `
-      <span class="tname">${t.name}</span>
-      <label class="switch" style="margin:0"><input type="checkbox" class="tab-en" ${enabled?"checked":""}/> <span class="hint">enabled</span></label>
-      <div class="inline"><select class="roomsel tab-room"><option value="">default room…</option>
-        ${ROOMS.map(l=>`<option value="${l}" ${room===l?"selected":""}>Room ${l}</option>`).join("")}</select>
-        <button class="mini ghost tab-map" title="Preview this tab and choose its rows">Rows…</button></div>`;
-    row.dataset.tab = t.name;
-    // Mirror edits into cfg so re-rendering the list (e.g. reloading the sheet) keeps them.
-    const tabOv = () => (cfg.tab_overrides[t.name] = cfg.tab_overrides[t.name] || {});
-    row.querySelector(".tab-en").onchange = (e)=> {
-      tabOv().enabled = e.target.checked;
-      row.classList.toggle("off", !e.target.checked); renderTabPills(); };
-    row.querySelector(".tab-room").onchange = (e) => {
-      tabOv().default_control_room = e.target.value;
-      if (insp.tab === t.name) inspectTab(t.name); };
-    row.querySelector(".tab-map").onclick = () => {
-      inspectTab(t.name); $("mapCard").scrollIntoView({behavior:"smooth", block:"start"}); };
-    box.appendChild(row);
-  });
+// Edits live in cfg.tab_overrides; the server's value is the fallback.
+function tabEnabled(name){
+  const ov = cfg.tab_overrides[name] || {};
+  if (ov.enabled !== undefined) return ov.enabled;
+  const t = tabsList.find(t => t.name === name);
+  return t ? t.enabled : true;
+}
+function setTabEnabled(name, on){
+  (cfg.tab_overrides[name] = cfg.tab_overrides[name] || {}).enabled = on;
+  setDirty(true); renderTabPills();
 }
 
 function gatherTabs(){
-  // Start from what is stored so tabs not listed right now (e.g. the tab list
-  // failed to load) keep their settings instead of being wiped on Save.
+  // Only record a tab that deviates from the default (enabled, auto rows).
   const out = {};
-  for (const [name, ov] of Object.entries(cfg.tab_overrides || {})) out[name] = {...ov};
-  document.querySelectorAll(".tab-row").forEach(r => {
-    const o = out[r.dataset.tab] = out[r.dataset.tab] || {};
-    o.enabled = r.querySelector(".tab-en").checked;
-    const room = r.querySelector(".tab-room").value;
-    if (room) o.default_control_room = room; else delete o.default_control_room;
-  });
-  // Only record a tab that deviates from the default (enabled, no room, auto rows).
-  for (const [name, o] of Object.entries(out)){
+  for (const [name, ov] of Object.entries(cfg.tab_overrides || {})){
+    const o = {...ov};
+    delete o.default_control_room;
     if (o.enabled !== false) delete o.enabled;
-    if (!o.default_control_room) delete o.default_control_room;
     if (!o.rows || !Object.keys(o.rows).length) delete o.rows;
-    if (!Object.keys(o).length) delete out[name];
+    if (Object.keys(o).length) out[name] = o;
   }
   return out;
 }
@@ -521,8 +480,7 @@ const FIELDS = [
   {key:"event_name", name:"Event name",   tag:"EVENT", color:"#4f8cff", fill:"rgba(79,140,255,.20)"},
   {key:"date",       name:"Date",         tag:"DATE",  color:"#b58cff", fill:"rgba(181,140,255,.20)"},
   {key:"time",       name:"Start time",   tag:"START", color:"#3bd188", fill:"rgba(59,209,136,.18)"},
-  {key:"pcr",        name:"Control room", tag:"ROOM",  color:"#f5b544", fill:"rgba(245,181,68,.18)"},
-  {key:"datetime",   name:"Date + time (one cell)", tag:"DATE+TIME", color:"#3cc9d6", fill:"rgba(60,201,214,.18)"},
+  {key:"pcr",        name:"PCR",          tag:"PCR",   color:"#f5b544", fill:"rgba(245,181,68,.18)"},
 ];
 const METHOD_TXT = {label:"matched by label", keyword:"guessed from header — please confirm",
   content:"guessed from cell contents — please confirm", manual:"chosen by you",
@@ -547,10 +505,6 @@ function tabPicks(tab){
   const ov = cfg.tab_overrides[tab] = cfg.tab_overrides[tab] || {};
   return (ov.rows = ov.rows || {});
 }
-function tabDefaultRoom(tab){
-  const row = [...document.querySelectorAll(".tab-row")].find(r => r.dataset.tab === tab);
-  return row ? row.querySelector(".tab-room").value : ((cfg.tab_overrides[tab]||{}).default_control_room || "");
-}
 function setDirty(v){ rowsDirty = v; const d = $("mapDirty"); if (d) d.style.display = v ? "" : "none"; }
 
 // Pasting a link: recognise it, load that sheet's tabs and open the linked tab.
@@ -572,13 +526,11 @@ function onLinkChange(){
 function renderTabPills(){
   const box = $("mapTabs");
   if (!tabsList.length){ box.innerHTML = ""; return; }
-  const enabled = {};
-  document.querySelectorAll(".tab-row").forEach(r => enabled[r.dataset.tab] = r.querySelector(".tab-en").checked);
   box.innerHTML = tabsList.map(t => {
     const picks = Object.keys(((cfg.tab_overrides[t.name]||{}).rows)||{}).length;
-    const off = enabled[t.name] === false;
+    const off = !tabEnabled(t.name);
     return `<button class="tabpill ${t.name===insp.tab?"on":""} ${off?"off":""}" data-tab="${esc(t.name)}"
-      title="${off?"Tab is turned off":""}">${esc(t.name)}${picks?`<span class="dot" title="${picks} row(s) chosen by hand">●</span>`:""}</button>`;
+      title="${off?"Tab is left out":""}">${esc(t.name)}${picks?`<span class="dot" title="${picks} row(s) chosen by hand">●</span>`:""}</button>`;
   }).join("");
   box.querySelectorAll(".tabpill").forEach(b => b.onclick = () => inspectTab(b.dataset.tab));
 }
@@ -590,7 +542,7 @@ async function inspectTab(tab, refresh=false){
   const box = $("mapBox");
   if (!insp.data || insp.data.tab !== tab){ box.className = "hint"; box.textContent = `Reading “${tab}”…`; }
   const r = await api("POST","/api/sheet/inspect", {tab, spreadsheet: currentSheet() || undefined,
-    rows: tabPicks(tab), default_room: tabDefaultRoom(tab), refresh});
+    rows: tabPicks(tab), refresh});
   if (seq !== inspSeq) return;  // superseded by a newer request
   if (!r.ok){ box.className = "hint"; box.innerHTML = `<span style="color:var(--err)">Could not read “${esc(tab)}”: ${esc(r.error)}</span>`; return; }
   insp.data = r;
@@ -599,24 +551,17 @@ async function inspectTab(tab, refresh=false){
 
 function fieldStatus(f, d){
   const e = d.effective[f.key];
-  const eff = d.effective;
   if (e.row){
     if (e.method === "stale") return ["warn", `Row ${e.row} · ${e.note}`];
     const txt = `Row ${e.row} · ${METHOD_TXT[e.method] || ""}`;
     if (e.method === "moved") return ["", `${txt} (${e.note.toLowerCase()})`];
     return [(e.method === "keyword" || e.method === "content") ? "warn" : "", txt];
   }
-  const usingCombined = !!eff.datetime.row;
   switch (f.key){
     case "event_name": return ["err", "Not found — choose the row with event names"];
-    case "date": case "time":
-      return usingCombined ? ["", "Not needed (using the date + time cell)"]
-                           : ["err", "Not found — choose a row (or a combined date + time row)"];
-    case "pcr": {
-      const room = d.default_room;
-      return ["warn", room ? `No row — every event uses the tab's default room ${room}`
-                           : "No row — set a default room for this tab, or events need a room assigned"];
-    }
+    case "date": return ["err", "Not found — choose the row with dates"];
+    case "time": return ["err", "Not found — choose the row with start times"];
+    case "pcr": return ["warn", "No row — events need a PCR assigned in Preview"];
     default: return ["", e.method === "none" ? "Set to no row" : "Not used"];
   }
 }
@@ -646,7 +591,7 @@ function renderMapper(){
   // Summary
   const s = d.summary;
   let sum = `<b>${s.ready}</b> event(s) ready`;
-  if (s.no_room) sum += ` · <span class="ps-warn">${s.no_room} without a room</span>`;
+  if (s.no_room) sum += ` · <span class="ps-warn">${s.no_room} without a PCR</span>`;
   if (s.no_start) sum += ` · <span class="ps-warn">${s.no_start} without a usable start</span>`;
   if (s.missing.length) sum = `<span class="err">Missing: ${s.missing.join(", ")} — nothing on this tab will be scheduled.</span>`;
 
@@ -664,8 +609,8 @@ function renderMapper(){
     if (!ci || ci.status === "empty") return `<th></th>`;
     if (ci.status === "no_start") return `<th class="ps-err" title="${esc(ci.name)}: ${esc(ci.problem)}">✗ no start</th>`;
     const when = shortWhen(ci.start);
-    if (ci.status === "no_room") return `<th class="ps-warn" title="${esc(ci.name)} — ${esc(when)}, no control room">⚠ ${esc(when)} · no room</th>`;
-    return `<th class="ps-ok" title="${esc(ci.name)} — ${esc(when)}, room ${ci.room} (${ci.room_from})">✓ ${esc(when)} · ${ci.room}</th>`;
+    if (ci.status === "no_room") return `<th class="ps-warn" title="${esc(ci.name)} — ${esc(when)}, no PCR">⚠ no PCR · ${esc(when)}</th>`;
+    return `<th class="ps-ok" title="${esc(ci.name)} — ${esc(when)}, PCR ${ci.room}">✓ PCR ${ci.room} · ${esc(when)}</th>`;
   }).join("") + `</tr>`;
   const body = d.rows.map(r => {
     const fs = byRow[r.row] || [];
@@ -683,12 +628,15 @@ function renderMapper(){
 
   const box = $("mapBox");
   box.className = "";
+  const on = tabEnabled(tab);
   box.innerHTML = `
+    <label class="tabon"><input type="checkbox" id="tabOn" ${on?"checked":""}/> Include this tab
+      <span class="hint">${on ? "" : "— left out: nothing on it will be scheduled"}</span></label>
     <div class="fieldgrid">${pickers}</div>
     <div class="row" style="justify-content:space-between;flex-wrap:wrap;margin:14px 0 10px">
       <div class="mapsum">${sum}</div>
       <div class="btns">
-        <span id="mapDirty" class="dirty" style="display:none;align-self:center">Unsaved row changes. Click Save.</span>
+        <span id="mapDirty" class="dirty" style="display:none;align-self:center">Unsaved tab changes. Click Save.</span>
         <button class="mini ghost" id="btnMapReset" ${Object.keys(picks).length?"":"disabled"}>Reset tab to auto</button>
         <button class="mini ghost" id="btnMapReload">Reload from Google</button>
       </div>
@@ -703,6 +651,7 @@ function renderMapper(){
   });
   $("btnMapReset").onclick = () => { delete cfg.tab_overrides[tab].rows; setDirty(true); inspectTab(tab); };
   $("btnMapReload").onclick = () => inspectTab(tab, true);
+  $("tabOn").onchange = (e) => { setTabEnabled(tab, e.target.checked); renderMapper(); };
   box.querySelectorAll("tr.srow").forEach(tr => tr.onclick = (e) => showRowMenu(e, +tr.dataset.row));
 }
 
@@ -782,9 +731,9 @@ function renderOverrides(){
     <div class="ov-row" data-i="${i}">
       <div><div class="k">${o.tab}</div>${o.event}</div>
       <div class="mono">${o.date}${o.occurrence?` #${o.occurrence}`:""}</div>
-      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`Room ${o.control_room}`:"—")}</div>
+      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`PCR ${o.control_room}`:"—")}</div>
       <div class="mono hint">${o.start?o.start.replace("T"," "):""}</div>
-      <div class="hint">${o.ignore?"drop":(o.control_room?"room":"")}${o.start?" · start":""}</div>
+      <div class="hint">${o.ignore?"drop":(o.control_room?"PCR":"")}${o.start?" · start":""}</div>
       <button class="rm mini ghost" data-tab="${o.tab}" data-date="${o.date}" data-ev="${encodeURIComponent(o.event)}" data-occ="${o.occurrence||0}">remove</button>
     </div>`).join("");
   box.querySelectorAll(".rm").forEach(b => b.onclick = () =>
@@ -822,13 +771,13 @@ function renderPreview(items){
   lastPreview = items || [];
   if (!items.length){ $("previewBox").innerHTML = "No schedulable events found."; return; }
   $("previewBox").innerHTML = `<table><thead><tr>
-    <th>Status</th><th>Event</th><th>Tab</th><th>Room</th><th>Start</th><th>Fix</th>
+    <th>Status</th><th>Event</th><th>Tab</th><th>PCR</th><th>Start</th><th>Fix</th>
     </tr></thead><tbody></tbody></table>`;
   const tb = $("previewBox").querySelector("tbody");
   items.forEach((i, idx) => {
     const noRoom = !i.pcr;
     const statusCls = noRoom ? "no_room" : i.status;
-    const statusTxt = noRoom ? "no room" : i.status.replace(/_/g,' ');
+    const statusTxt = noRoom ? "no PCR" : i.status.replace(/_/g,' ');
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><span class="pill ${statusCls}">${statusTxt}</span></td>
@@ -841,8 +790,8 @@ function renderPreview(items){
     const sel = document.createElement("select");
     sel.className = "roomsel";
     sel.innerHTML = `<option value="">— none —</option>` +
-      ROOMS.map(l=>`<option value="${l}" ${i.pcr===l?"selected":""}>Room ${l}</option>`).join("");
-    sel.onchange = () => { upsertOv(i, {control_room: sel.value || null}); toast("Room staged — Save to apply"); };
+      ROOMS.map(l=>`<option value="${l}" ${i.pcr===l?"selected":""}>PCR ${l}</option>`).join("");
+    sel.onchange = () => { upsertOv(i, {control_room: sel.value || null}); toast("PCR staged — Save to apply"); };
     tr.children[3].appendChild(sel);
     // Ignore toggle
     const wrap = document.createElement("div"); wrap.className = "inline";
@@ -888,7 +837,7 @@ function renderScheduled(){
   let html = `<div class="hint" style="margin-bottom:8px">${groups.size} event(s) across ${r.channels} mapped channel(s) · <b>${toolCount}</b> channel booking(s) created by this tool</div>`;
   if (!r.channels) html = `<div class="hint">No LSP channels match any PCR — check the PCR → channel mapping above.</div>`;
   else if (!rows.length) html += `<div class="hint">No events to show.</div>`;
-  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>Room</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th></tr></thead><tbody>`
+  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th></tr></thead><tbody>`
     + rows.map(g => `<tr>
       <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}</td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>

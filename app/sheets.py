@@ -5,7 +5,7 @@ each subsequent column is a single event. There is no single composite tab --
 the schedule lives across several sport tabs (Football, Fall Olympic, ...),
 each in this same shape, so we read every configured tab and concatenate.
 
-Per tab we find the DATE, EVENT, start-time and CONTROL ROOM rows
+Per tab we find the DATE, EVENT, start-time and PCR (CONTROL ROOM) rows
 (`locate_rows`): an operator's manual pick from the web UI wins, then an exact
 configured label, then a header keyword, then (dates / room letters only) the
 row's contents. For labels the FIRST match wins, so the main broadcast's
@@ -34,8 +34,8 @@ log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-# Canonical control rooms. Live tabs use bare letters (A..E) in the CONTROL
-# ROOM row; that is the only accepted form.
+# Canonical control rooms (PCRs). The PCR / CONTROL ROOM row holds a letter,
+# bare ("A") or prefixed ("PCR A").
 _ROOM_LETTERS = ["A", "B", "C", "D", "E"]
 
 
@@ -169,26 +169,18 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
     if row_of["event_name"] is None:
         log.error("Tab %r: no EVENT row found; skipping", tab)
         return []
-    if row_of["datetime"] is None and (
-        row_of["date"] is None or row_of["time"] is None
-    ):
-        log.error(
-            "Tab %r: no start time row (need a datetime row, or both date and time)", tab
-        )
+    if row_of["date"] is None or row_of["time"] is None:
+        log.error("Tab %r: no DATE and start-time rows found; skipping", tab)
         return []
 
-    default_room = tab_override.default_control_room if tab_override else None
-    if row_of["pcr"] is None and not default_room:
-        log.warning(
-            "Tab %r: no CONTROL ROOM row and no default_control_room; "
-            "events will need a manual room assignment", tab
-        )
+    if row_of["pcr"] is None:
+        log.warning("Tab %r: no PCR row; events will need a PCR assigned", tab)
 
     n_cols = max(len(r) for r in grid)
     out: list[ScheduledEvent] = []
     seen: dict[tuple, int] = {}  # (name, date) -> count, for override disambiguation
     for col in range(label_col + 1, n_cols):
-        ev = _parse_column(tab, grid, row_of, col, cfg, default_room, seen)
+        ev = _parse_column(tab, grid, row_of, col, cfg, seen)
         if ev is not None:
             out.append(ev)
 
@@ -234,7 +226,6 @@ _KEYWORDS: dict[str, tuple[list[str], list[str]]] = {
         ["call", "check", "door", "end", "meal", "run thru", "crew", "arrival"],
     ),
     "pcr": (["control room", "pcr", "ctrl room"], ["shadow"]),
-    "datetime": ([], []),
 }
 
 _DATE_RE = re.compile(
@@ -367,9 +358,7 @@ def _cell(grid, row: Optional[int], col: int) -> str:
     return str(grid[row][col]).strip()
 
 
-def _parse_column(
-    tab, grid, row_of, col, cfg, default_room, seen
-) -> Optional[ScheduledEvent]:
+def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]:
     name = _cell(grid, row_of.get("event_name"), col)
     if not name:
         return None  # empty column, not an event
@@ -379,8 +368,7 @@ def _parse_column(
         log.debug("Tab %r col %d (%s): no usable start time; skipping", tab, col + 1, name)
         return None
 
-    room_raw = _cell(grid, row_of.get("pcr"), col) or (default_room or "")
-    pcr = _normalize_room(room_raw)  # may be None -> unassigned (fix in UI)
+    pcr = _normalize_room(_cell(grid, row_of.get("pcr"), col))  # None -> unassigned (fix in UI)
 
     # A stable-ish source date string for override matching.
     date_str = _event_date_key(start)
@@ -406,14 +394,7 @@ def _parse_start(grid, row_of, col, cfg) -> Optional[datetime]:
     skip = cfg.date_parsing.skip_values
     tz = cfg.sheet.timezone
 
-    # Preferred: a single explicit datetime cell.
-    dt_val = _cell(grid, row_of.get("datetime"), col)
-    if dt_val:
-        if dt_val.upper() in skip:
-            return None
-        return _parse_datetime_string(dt_val, tz, cfg)
-
-    # Otherwise: separate date + time cells.
+    # Date and start time always live in separate rows.
     date_val = _cell(grid, row_of.get("date"), col)
     time_val = _cell(grid, row_of.get("time"), col)
     if not date_val or not time_val:
@@ -456,12 +437,11 @@ def inspect_grid(
     grid: list[list[str]],
     cfg,
     picks: Optional[dict] = None,
-    default_room: Optional[str] = None,
 ) -> dict:
     """Everything the row-mapping screen shows for one tab.
 
-    `picks` / `default_room` let the UI try unsaved choices; when None, the
-    saved tab_overrides are used. Returns the trimmed grid, what auto-detection
+    `picks` lets the UI try unsaved choices; when None, the saved
+    tab_overrides are used. Returns the trimmed grid, what auto-detection
     finds on its own, the rows actually in effect, and what each event column
     parses to under those rows (start shown WITHOUT the lead-in).
     """
@@ -469,8 +449,6 @@ def inspect_grid(
     ov = cfg.tab_overrides.get(tab)
     if picks is None:
         picks = ov.rows if ov else {}
-    if default_room is None:
-        default_room = ov.default_control_room if ov else None
 
     auto = locate_rows(grid, label_col, cfg.sheet.labels, {})
     effective = locate_rows(grid, label_col, cfg.sheet.labels, picks)
@@ -487,9 +465,7 @@ def inspect_grid(
         for r in range(n_rows)
     ]
 
-    columns = []
-    for col in range(label_col + 1, n_cols):
-        columns.append(_describe_column(grid, row_of, col, cfg, default_room))
+    columns = [_describe_column(grid, row_of, col, cfg) for col in range(label_col + 1, n_cols)]
     ready = sum(1 for c in columns if c["status"] == "ok")
     no_room = sum(1 for c in columns if c["status"] == "no_room")
     no_start = sum(1 for c in columns if c["status"] == "no_start")
@@ -497,8 +473,10 @@ def inspect_grid(
     missing = []
     if row_of["event_name"] is None:
         missing.append("event name")
-    if row_of["datetime"] is None and (row_of["date"] is None or row_of["time"] is None):
-        missing.append("start (date + time)")
+    if row_of["date"] is None:
+        missing.append("date")
+    if row_of["time"] is None:
+        missing.append("start time")
 
     return {
         "tab": tab,
@@ -512,31 +490,25 @@ def inspect_grid(
         "columns": columns,
         "summary": {"ready": ready, "no_room": no_room, "no_start": no_start,
                     "missing": missing},
-        "default_room": default_room,
     }
 
 
-def _describe_column(grid, row_of, col, cfg, default_room) -> dict:
+def _describe_column(grid, row_of, col, cfg) -> dict:
     """What one event column yields under the given row mapping."""
     out = {"col": col + 1, "letter": _col_index_to_letter(col), "name": "",
-           "start": None, "room": "", "room_from": "", "status": "empty", "problem": ""}
+           "start": None, "room": "", "status": "empty", "problem": ""}
     name = _cell(grid, row_of.get("event_name"), col)
     if not name:
         return out
     out["name"] = name
 
     start = _parse_start(grid, row_of, col, cfg)
-    sheet_room = _normalize_room(_cell(grid, row_of.get("pcr"), col))
-    room = sheet_room or _normalize_room(default_room or "")
+    room = _normalize_room(_cell(grid, row_of.get("pcr"), col))
     out["room"] = room or ""
-    out["room_from"] = "sheet" if sheet_room else ("tab default" if room else "")
 
     if start is None:
-        if row_of.get("datetime") is not None:
-            raw = _cell(grid, row_of["datetime"], col)
-        else:
-            raw = " ".join(x for x in (_cell(grid, row_of.get("date"), col),
-                                       _cell(grid, row_of.get("time"), col)) if x)
+        raw = " ".join(x for x in (_cell(grid, row_of.get("date"), col),
+                                   _cell(grid, row_of.get("time"), col)) if x)
         out["status"] = "no_start"
         out["problem"] = (f"Date has no year ({raw!r}) — add the year in the sheet" if _lacks_year(raw)
                           else f"No usable start ({raw!r})" if raw else "No date/time")
@@ -544,7 +516,7 @@ def _describe_column(grid, row_of, col, cfg, default_room) -> dict:
     out["start"] = start.isoformat()
     if not room:
         out["status"] = "no_room"
-        out["problem"] = "No control room"
+        out["problem"] = "No PCR"
         return out
     out["status"] = "ok"
     return out

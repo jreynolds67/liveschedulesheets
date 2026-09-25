@@ -114,7 +114,7 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     @require_auth
     def sheet_inspect():
         """Grid preview + row detection for one tab (row-mapping screen).
-        Body: {tab, spreadsheet?, rows?, default_room?, refresh?}"""
+        Body: {tab, spreadsheet?, rows?, refresh?}"""
         body = request.get_json(force=True, silent=True) or {}
         tab = body.get("tab")
         if not tab:
@@ -124,7 +124,6 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
                 tab,
                 spreadsheet=body.get("spreadsheet"),
                 rows=body.get("rows"),
-                default_room=body.get("default_room"),
                 refresh=bool(body.get("refresh")),
             )
             return jsonify({"ok": True, **result})
