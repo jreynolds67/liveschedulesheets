@@ -53,6 +53,7 @@
   .pill.exists { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.out_of_window { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.no_channel { background:rgba(255,107,107,.16); color:var(--err); }
+  .filebtn { display:inline-block; cursor:pointer; padding:7px 14px; border-radius:8px; border:1px solid var(--line); font-size:13px; font-weight:600; margin:0; }
   .pcr-row { display:grid; grid-template-columns:70px 1fr 34px; gap:10px; align-items:end; margin-bottom:10px; }
   .pcr-row .pcr-hits { grid-column:1 / -1; margin-top:-4px; }
   .pcr-row .rm { background:transparent; border:1px solid var(--line); color:var(--err);
@@ -168,7 +169,11 @@
       <div><label>Header column</label><input type="text" id="sheet_header_col" value="A" /></div>
       <div><label>Timezone (IANA)</label><input type="text" id="sheet_tz" placeholder="America/New_York" /></div>
     </div>
-    <div class="hint">Google service-account key: <span id="googleSet"></span> (mounted into the container).</div>
+    <div><label>Google service-account key</label>
+      <div class="row">
+        <label class="ghost filebtn">Upload key (.json)<input type="file" id="googleKeyFile" accept=".json,application/json" hidden /></label>
+        <span class="hint" id="googleSet">…</span>
+      </div></div>
   </div></section>
 
   <!-- Tabs -->
@@ -309,7 +314,7 @@ function fillForm(){
   $("lsp_username").value = get(cfg,"lsp.username","");
   $("lsp_password").value = "";
   $("pwSet").textContent = get(cfg,"lsp.password_set",false) ? "(set)" : "(not set)";
-  $("googleSet").textContent = cfg.google_credentials_set ? "configured ✓" : "NOT configured";
+  loadGoogleKey();
 
   const sid = get(cfg,"sheet.spreadsheet_id","");
   $("sheet_id").value = sid ? sheetUrl(sid) : "";
@@ -897,6 +902,27 @@ function renderScheduled(){
   if (r.missing.length) html += `<div class="hint" style="margin-top:10px;color:var(--warn)">⚠ ${r.missing.length} channel booking(s) this tool created are no longer on any mapped channel in LSP (deleted or moved by hand): ${[...new Set(r.missing.map(m=>m.name))].map(esc).join(", ")}</div>`;
   box.className = ""; box.innerHTML = html;
 }
+
+async function loadGoogleKey(){
+  const r = await api("GET","/api/google-key");
+  const el = $("googleSet");
+  if (r.installed){
+    el.innerHTML = `<span style="color:var(--accent2)">✓ Installed${r.uploaded?" (uploaded)":""}</span> — share the sheet (Viewer) with
+      <b class="mono">${esc(r.client_email)}</b> <button class="ghost" id="btnCopyEmail" style="padding:2px 8px;font-size:11px">Copy</button>`;
+    $("btnCopyEmail").onclick = () => navigator.clipboard.writeText(r.client_email).then(() => toast("Copied"));
+  } else {
+    el.innerHTML = `<span style="color:var(--warn)">Not installed</span> — upload the service account's JSON key to read the sheet.`;
+  }
+}
+$("googleKeyFile").onchange = async (e) => {
+  const f = e.target.files[0]; e.target.value = "";
+  if (!f) return;
+  const r = await fetch("/api/google-key", {method:"POST", headers:{"Content-Type":"application/json"}, body: await f.text()})
+    .then(x => x.json()).catch(err => ({ok:false, error:String(err)}));
+  if (!r.ok){ toast("Key rejected: " + r.error, 5000); return; }
+  toast("Google key installed ✓");
+  loadGoogleKey(); refreshStatus(); loadTabs();
+};
 
 let lspChannels = null;
 async function loadChannels(){

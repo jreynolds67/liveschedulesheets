@@ -136,11 +136,12 @@ allow-list. Turn individual tabs off in the UI (**Sheet tabs** card).
    a project and **enable the Google Sheets API**.
 2. **APIs & Services → Credentials → Create credentials → Service account.**
 3. Open it → **Keys → Add key → JSON**. Download the file.
-4. Copy it onto the **Docker host** as
-   `/opt/liveschedulesheets/service-account.json` (or into another folder, and
-   set the `GOOGLE_KEY_DIR` stack env var to that folder). The container picks
-   it up without a redeploy. For local `docker run` testing,
-   `secrets/service-account.json` in this project works too.
+4. In the web UI's **Google Sheet** card, click **Upload key (.json)** and pick
+   the file. It's checked, saved on the `lss_state` volume (owner-only
+   permissions) and used straight away; the card then shows the service
+   account's email. *(Alternative: put it on the Docker host as
+   `/opt/liveschedulesheets/service-account.json`, or in the folder named by
+   the `GOOGLE_KEY_DIR` stack env var. An uploaded key takes precedence.)*
 5. Copy the service account's email (`…@….iam.gserviceaccount.com`) and **share
    the Google Sheet with that email as a Viewer**.
 
@@ -167,14 +168,14 @@ which one worked.
 2. Portainer → **Stacks → Add stack → Repository**, pointing at `docker-compose.yml`.
 3. Under **Environment variables**, optionally set `LSP_USERNAME` / `LSP_PASSWORD`
    and `UI_USER` / `UI_PASSWORD`.
-4. Put the Google key on the Docker host at
-   `/opt/liveschedulesheets/service-account.json`, or set `GOOGLE_KEY_DIR` to
-   the absolute host folder that holds `service-account.json`. It can be added
-   after deploying — until then the sheet features report the key is missing,
-   but the LSP side (Test connection, channels, the *Scheduled in Live Schedule
-   Pro* card, cleanup) still works. A relative path like `./secrets` doesn't
-   work for Git stacks, because Portainer checks out the repo in its own data
-   folder. **Never commit a real key to a shared repo.**
+4. Deploy, then upload the Google key from the UI (**Google Sheet → Upload
+   key**). Until then the sheet features report the key is missing, but the LSP
+   side (Test connection, channels, the *Scheduled in Live Schedule Pro* card,
+   cleanup) still works. To mount it from the host instead, put it at
+   `/opt/liveschedulesheets/service-account.json` or set `GOOGLE_KEY_DIR`; a
+   relative path like `./secrets` doesn't work for Git stacks, because
+   Portainer checks out the repo in its own data folder. **Never commit a real
+   key to a shared repo.**
 5. Deploy, then open `http://10.10.251.95` and finish configuration in the UI.
 
 **Networking:** the container joins the existing **Companion** `ipvlan`
@@ -196,8 +197,8 @@ docker push your-registry/liveschedulesheets:latest
 
 Then set `image:` in `docker-compose.yml` and deploy the stack.
 
-The `lss_state` named volume persists **both** the live `config.yaml` and the
-de-dup `state.json` across restarts.
+The `lss_state` named volume persists the live `config.yaml`, the de-dup
+`state.json`, and an uploaded Google key across restarts and redeploys.
 
 ---
 

@@ -13,7 +13,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .config import ConfigError, parse_config
 from .manager import SyncManager
-from .settings_store import SettingsStore
+from .settings_store import GoogleKeyError, SettingsStore
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ def require_auth(fn):
 
 def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # bounds uploads (Google key)
 
     @app.get("/")
     @require_auth
@@ -72,6 +73,20 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
             result["valid"] = False
             result["error"] = str(exc)
         return jsonify(result)
+
+    @app.get("/api/google-key")
+    @require_auth
+    def google_key():
+        return jsonify({"ok": True, **store.key_info()})
+
+    @app.post("/api/google-key")
+    @require_auth
+    def upload_google_key():
+        """Body: the service-account JSON file's contents."""
+        try:
+            return jsonify({"ok": True, **store.save_google_key(request.get_data())})
+        except GoogleKeyError as exc:
+            return jsonify({"ok": False, "error": str(exc)})
 
     @app.get("/api/status")
     @require_auth
