@@ -28,7 +28,8 @@ be toggled off entirely.
 
 ## The web UI
 
-Once deployed, open **`http://<docker-host>:8080`**. From there an engineer can:
+Once deployed, open **`http://10.10.71.33:8080`** (the container's own IP —
+see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
 
 - Set the **LSP server URL and login**, and **Test connection**.
 - **Paste the Google Sheet link.** The sheet is read right away (no Save
@@ -145,7 +146,14 @@ container is running. You can optionally pre-seed the LSP login with the
 4. Ensure the Google key is available at the mounted path
    (`secrets/service-account.json` in the checkout, or an absolute host path you
    set in the compose volume). **Never commit a real key to a shared repo.**
-5. Deploy, then open `http://<host>:8080` and finish configuration in the UI.
+5. Deploy, then open `http://10.10.71.33:8080` and finish configuration in the UI.
+
+**Networking:** the stack puts the container directly on the LAN with an
+`ipvlan` network (parent `eth0`, subnet `10.10.71.0/24`, gateway `10.10.71.1`)
+at a fixed IP of **10.10.71.33** — no host port mapping. Change `parent`,
+`subnet`, `gateway`, or `ipv4_address` in `docker-compose.yml` if your host's
+NIC or VLAN differs. With ipvlan, the Docker host itself usually can't reach the
+container's IP; use another machine on the LAN.
 
 **Option B — Build & push an image:**
 
