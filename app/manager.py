@@ -96,6 +96,11 @@ class SyncManager:
             _, syncer = self._components()
             return syncer.created_events()
 
+    def scheduled_events(self, past_days: int = 0) -> dict:
+        with self._lock:
+            _, syncer = self._components()
+            return syncer.scheduled_events(past_days)
+
     def delete_created(self) -> dict:
         with self._lock:
             _, syncer = self._components()

@@ -175,6 +175,53 @@ class Syncer:
         out.sort(key=lambda e: e.get("created_at") or "")
         return out
 
+    def scheduled_events(self, past_days: int = 0) -> dict:
+        """Live view of events in LSP on the mapped PCR channels.
+
+        Returns events whose end is after now - past_days, each flagged with
+        whether this tool created it, plus any tool-created events that are no
+        longer found in LSP (deleted or moved by hand).
+        """
+        channels = self.lsp.get_all_channels()
+        channel_by_pcr = self._resolve_channels(channels)
+        names = {c.get("Id"): c.get("Name") for c in channels}
+        tool_ids = {info["event_id"]: info for _k, info in self.state.tool_created()}
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, past_days))
+
+        events, seen, all_ids = [], set(), set()
+        for channel_id in channel_by_pcr.values():
+            if channel_id in seen:
+                continue
+            seen.add(channel_id)
+            pcrs = [p for p, c in channel_by_pcr.items() if c == channel_id]
+            for e in self.lsp.get_events_for_channel(channel_id):
+                all_ids.add(e.get("Id"))
+                end = _parse_utc(e.get("End") or e.get("Start"))
+                if end is None or end < cutoff:
+                    continue
+                events.append({
+                    "id": e.get("Id"),
+                    "name": e.get("Name"),
+                    "pcr": "/".join(sorted(pcrs)),
+                    "channel": names.get(channel_id) or channel_id,
+                    "start": e.get("Start"),
+                    "end": e.get("End"),
+                    "status": e.get("Status"),
+                    "created_by": e.get("CreatedByDisplayName"),
+                    "by_tool": e.get("Id") in tool_ids,
+                })
+        events.sort(key=lambda ev: _parse_utc(ev["start"]) or cutoff)
+
+        # Tool-created events not found on any mapped channel (deleted or
+        # moved by hand in LSP, or their PCR is no longer mapped).
+        missing = []
+        for event_id, info in tool_ids.items():
+            if event_id in all_ids:
+                continue
+            missing.append({"id": event_id, "name": info.get("name"),
+                            "pcr": info.get("pcr"), "source_tab": info.get("source_tab")})
+        return {"events": events, "missing": missing, "channels": len(seen)}
+
     def delete_created(self) -> dict:
         """Delete from LSP every event this tool created, then forget them.
 
@@ -199,8 +246,9 @@ class Syncer:
 
     # -- helpers ------------------------------------------------------------
 
-    def _resolve_channels(self) -> dict[str, str]:
-        channels = self.lsp.get_all_channels()
+    def _resolve_channels(self, channels: Optional[list[dict]] = None) -> dict[str, str]:
+        if channels is None:
+            channels = self.lsp.get_all_channels()
         by_name = {}
         by_id = set()
         for ch in channels:
@@ -253,6 +301,14 @@ class Syncer:
 
 def _minute_key(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+
+
+def _parse_utc(value) -> Optional[datetime]:
+    try:
+        dt = dateparser.isoparse(value)
+    except (ValueError, TypeError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _now_iso() -> str:

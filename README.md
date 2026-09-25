@@ -58,9 +58,14 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   name): assign/correct the control room, override the start time, or ignore an
   event. They persist in the overrides list until removed.
 - **Run now**, and see the **last-run status**.
-- **Clean up test events** — the *Events created by this tool* card lists every
-  event this tool created and can **delete just those** from LSP in one click.
-  Events already in LSP (or created by hand) are never touched.
+- **See what's scheduled in LSP** — the *Scheduled in Live Schedule Pro* card
+  lists, live from LSP, the upcoming and in-progress events on the mapped PCR
+  channels (optionally the last 24 h / 7 days too). Events this tool created are
+  tagged, with a filter to show only those, and it warns about tool-created
+  events that have disappeared from LSP.
+- **Clean up test events** — the same card can **delete just the events this
+  tool created** from LSP in one click. Events already in LSP (or created by
+  hand) are never touched.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
 picks up changes automatically. (Optional: protect the UI with HTTP Basic auth
@@ -207,11 +212,16 @@ Each event is matched by **channel + name + start minute (UTC)**:
 
 ### Deleting tool-created events (testing)
 
-The UI's *Events created by this tool* card (and `POST /api/delete-created`)
+The *Delete tool-created events* button on the UI's *Scheduled in Live Schedule
+Pro* card (and `POST /api/delete-created`)
 removes **only** the events this tool created — read from the `created_by_tool`
 entries in `state.json` and deleted via `DELETE /api/v1/RemoveEvent`. After a
 delete they are forgotten from state, so a later pass will re-create them. This
 lets you iterate during testing without wiping hand-made events in LSP.
+
+The card's event list comes from `GET /api/scheduled?past_days=N`, which calls
+`GetEvents` for each mapped PCR channel and marks events whose id matches a
+tool-created entry in `state.json`.
 
 ## Configuration reference
 

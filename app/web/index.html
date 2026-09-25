@@ -58,6 +58,9 @@
     padding:9px 0; border-radius:8px; }
   .pill.no_room { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.ignore { background:rgba(147,161,181,.16); color:var(--muted); }
+  .pill.tool { background:rgba(59,209,136,.15); color:var(--accent2); }
+  .schedbar { display:flex; gap:14px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .schedbar label { display:flex; gap:6px; align-items:center; }
   .tab-row { display:grid; grid-template-columns:1fr auto 210px; gap:12px; align-items:center;
     padding:9px 0; border-bottom:1px solid var(--line); }
   .tab-row:last-child { border-bottom:none; }
@@ -254,10 +257,19 @@
   </div></section>
 
   <!-- Cleanup / testing -->
-  <section class="card"><h2>Events created by this tool</h2><div class="body">
-    <div class="hint">Only events <b>this tool</b> created are listed and deleted here — events
-      already in Live Schedule Pro (or made by hand) are never touched. Useful for cleaning up
-      between test runs.</div>
+  <section class="card"><h2>Scheduled in Live Schedule Pro</h2><div class="body">
+    <div class="hint">Live from LSP: events on the mapped PCR channels. Events tagged
+      <span class="pill tool">this tool</span> were created by this tool. <b>Delete</b> removes only
+      those — events already in Live Schedule Pro (or made by hand) are never touched. Useful for
+      cleaning up between test runs.</div>
+    <div class="schedbar hint">
+      <label><input type="checkbox" id="schedToolOnly"> Only events created by this tool</label>
+      <label>Show <select id="schedPast">
+        <option value="0">upcoming &amp; in progress</option>
+        <option value="1">+ ended in last 24 hours</option>
+        <option value="7">+ ended in last 7 days</option>
+      </select></label>
+    </div>
     <div id="createdBox" class="hint">…</div>
     <div class="btns">
       <button id="btnRefreshCreated" class="ghost">Refresh</button>
@@ -752,8 +764,9 @@ function renderOverrides(){
 
 async function loadConfig(){ cfg = await api("GET","/api/config"); fillForm(); }
 
+let lastStatus = null;
 async function refreshStatus(){
-  const s = await api("GET","/api/status");
+  const s = lastStatus = await api("GET","/api/status");
   const b = $("statusBadge");
   if (!s.config_ok){ b.className="badge bad"; b.textContent="config incomplete"; }
   else if (s.dry_run){ b.className="badge warn"; b.textContent="running (dry run)"; }
@@ -809,19 +822,35 @@ function renderPreview(items){
   });
 }
 
-async function loadCreated(){
-  const r = await api("GET","/api/created");
+let schedData = null;
+async function loadScheduled(){
   const box = $("createdBox");
-  if (!r.ok){ box.className="hint"; box.innerHTML = `<span style="color:var(--err)">${r.error||"Could not load"}</span>`; return; }
-  const evs = r.events || [];
-  $("btnDeleteCreated").disabled = evs.length === 0;
-  if (!evs.length){ box.className="hint"; box.textContent = "No events created by this tool yet."; return; }
-  box.className = "";
-  const rows = evs.map(e => `<tr>
-    <td>${e.name||""}</td><td>${e.pcr||""}</td><td class="hint">${e.source_tab||""}</td>
-    <td class="mono hint">${e.created_at?new Date(e.created_at).toLocaleString():""}</td></tr>`).join("");
-  box.innerHTML = `<div class="hint" style="margin-bottom:8px">${evs.length} event(s) tracked as created by this tool:</div>
-    <table><thead><tr><th>Event</th><th>Room</th><th>Tab</th><th>Created</th></tr></thead><tbody>${rows}</tbody></table>`;
+  box.className = "hint"; box.textContent = "Loading from Live Schedule Pro…";
+  const r = await api("GET", `/api/scheduled?past_days=${$("schedPast").value}`);
+  if (!r.ok){ schedData = null; box.innerHTML = `<span style="color:var(--err)">${esc(r.error||"Could not load")}</span>`;
+    $("btnDeleteCreated").disabled = true; return; }
+  schedData = r; renderScheduled();
+}
+function renderScheduled(){
+  const box = $("createdBox"), r = schedData;
+  if (!r) return;
+  const toolCount = r.events.filter(e => e.by_tool).length;
+  // Delete covers everything tool-created that is tracked, not just what's shown.
+  $("btnDeleteCreated").disabled = !(lastStatus?.created_count || toolCount || r.missing.length);
+  const evs = $("schedToolOnly").checked ? r.events.filter(e => e.by_tool) : r.events;
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString([], {weekday:"short", month:"short", day:"numeric", hour:"numeric", minute:"2-digit"}) : "";
+  let html = `<div class="hint" style="margin-bottom:8px">${r.events.length} event(s) on ${r.channels} mapped channel(s) · <b>${toolCount}</b> created by this tool</div>`;
+  if (!r.channels) html = `<div class="hint">No PCR channels resolved — set up the PCR → channel mapping above.</div>`;
+  else if (!evs.length) html += `<div class="hint">No events to show.</div>`;
+  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>Room</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th></tr></thead><tbody>`
+    + evs.map(e => `<tr>
+      <td>${esc(e.name)}${e.by_tool?` <span class="pill tool">this tool</span>`:""}</td>
+      <td>${esc(e.pcr)}<div class="hint">${esc(e.channel)}</div></td>
+      <td class="mono">${fmt(e.start)}</td><td class="mono">${fmt(e.end)}</td>
+      <td class="hint">${esc(e.status)}</td><td class="hint">${esc(e.created_by)}</td></tr>`).join("")
+    + `</tbody></table></div>`;
+  if (r.missing.length) html += `<div class="hint" style="margin-top:10px;color:var(--warn)">⚠ ${r.missing.length} event(s) this tool created are no longer on any mapped channel in LSP (deleted or moved by hand): ${r.missing.map(m=>esc(m.name)).join(", ")}</div>`;
+  box.className = ""; box.innerHTML = html;
 }
 
 async function loadChannels(){
@@ -839,7 +868,9 @@ async function loadChannels(){
 $("btnAddPcr").onclick = () => addPcrRow();
 $("btnRefreshTabs").onclick = () => loadTabs();
 $("sheet_id").addEventListener("input", () => { clearTimeout(linkTimer); linkTimer = setTimeout(onLinkChange, 400); });
-$("btnRefreshCreated").onclick = () => loadCreated();
+$("btnRefreshCreated").onclick = () => loadScheduled();
+$("schedPast").onchange = () => loadScheduled();
+$("schedToolOnly").onchange = () => renderScheduled();
 $("btnDeleteCreated").onclick = async () => {
   if (!confirm("Delete every event this tool created from Live Schedule Pro?\n\nOnly tool-created events are removed; anything else in LSP is left alone.")) return;
   $("btnDeleteCreated").disabled = true; $("btnDeleteCreated").textContent = "Deleting…";
@@ -849,7 +880,7 @@ $("btnDeleteCreated").onclick = async () => {
     toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}`);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);
-  loadCreated(); refreshStatus();
+  loadScheduled(); refreshStatus();
 };
 $("btnSave").onclick = async () => {
   const r = await api("POST","/api/config", gather());
@@ -881,7 +912,7 @@ $("btnRun").onclick = async () => {
   $("btnRun").disabled = false; $("btnRun").textContent = "Run now";
   if (r.ok){ const s=r.summary; toast(`Created ${s.created}, skipped ${s.skipped_existing} existing`); }
   else toast("Run failed: " + r.error, 5000);
-  refreshStatus(); loadCreated();
+  refreshStatus(); loadScheduled();
 };
 
 (async function init(){
@@ -889,7 +920,7 @@ $("btnRun").onclick = async () => {
   await refreshStatus();
   loadChannels();
   loadTabs();
-  loadCreated();
+  loadScheduled();
   setInterval(refreshStatus, 15000);
 })();
 </script>

@@ -145,6 +145,16 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.get("/api/scheduled")
+    @require_auth
+    def scheduled():
+        # ?past_days=N also includes events that ended in the last N days.
+        try:
+            past_days = int(request.args.get("past_days", 0))
+            return jsonify({"ok": True, **manager.scheduled_events(past_days)})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     @app.post("/api/delete-created")
     @require_auth
     def delete_created():
