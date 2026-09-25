@@ -435,9 +435,10 @@ def _parse_datetime_string(text: str, tz, cfg) -> Optional[datetime]:
         log.warning("Could not parse date/time %r", text)
         return None
     if not had_year:
-        dp = cfg.date_parsing
-        year = dp.academic_year_start if dt.month >= dp.rollover_month else dp.academic_year_start + 1
-        dt = dt.replace(year=year)
+        # Dates must carry their year in the sheet (e.g. 9/12/2026); guessing
+        # it is how events end up a year out.
+        log.warning("Date/time %r has no year; skipping", text)
+        return None
     return dt.replace(tzinfo=tz)
 
 
@@ -537,7 +538,8 @@ def _describe_column(grid, row_of, col, cfg, default_room) -> dict:
             raw = " ".join(x for x in (_cell(grid, row_of.get("date"), col),
                                        _cell(grid, row_of.get("time"), col)) if x)
         out["status"] = "no_start"
-        out["problem"] = f"No usable start ({raw!r})" if raw else "No date/time"
+        out["problem"] = (f"Date has no year ({raw!r}) — add the year in the sheet" if _lacks_year(raw)
+                          else f"No usable start ({raw!r})" if raw else "No date/time")
         return out
     out["start"] = start.isoformat()
     if not room:
@@ -615,6 +617,14 @@ def _parse_naive_with_year_flag(text: str) -> tuple[datetime, bool]:
     d2 = dateparser.parse(text, default=datetime(2002, 1, 1, 0, 0), fuzzy=True)
     had_year = d1.year == d2.year
     return d1, had_year
+
+
+def _lacks_year(text: str) -> bool:
+    """True if `text` parses as a date/time but has no year in it."""
+    try:
+        return bool(text) and not _parse_naive_with_year_flag(text)[1]
+    except (ValueError, OverflowError):
+        return False
 
 
 def _normalize_room(value: str) -> Optional[str]:

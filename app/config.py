@@ -40,8 +40,6 @@ class SheetConfig:
 
 @dataclass
 class DateParsingConfig:
-    academic_year_start: int
-    rollover_month: int
     skip_values: set[str]
 
 
@@ -243,8 +241,6 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
 
     dp_raw = raw.get("date_parsing", {}) or {}
     date_parsing = DateParsingConfig(
-        academic_year_start=int(dp_raw.get("academic_year_start", 0)) or _current_academic_year(),
-        rollover_month=int(dp_raw.get("rollover_month", 8)),
         skip_values={s.strip().upper() for s in _as_list(dp_raw.get("skip_values")) if s.strip()},
     )
 
@@ -449,9 +445,3 @@ def _env_bool(name: str, default: bool) -> bool:
         return default
     return val.strip().lower() in ("1", "true", "yes", "on")
 
-
-def _current_academic_year() -> int:
-    from datetime import datetime
-
-    now = datetime.now()
-    return now.year if now.month >= 8 else now.year - 1

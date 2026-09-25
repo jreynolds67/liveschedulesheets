@@ -47,12 +47,8 @@ sheet:
   timezone: "America/New_York"
 
 date_parsing:
-  # ONLY used as a fallback when a date has no year (e.g. bare "9/12"). If your
-  # composite START cells include the year (recommended), these are ignored.
-  # Months >= rollover_month belong to `academic_year_start`; earlier months
-  # roll to the next calendar year. e.g. 8/24 -> 2026-08-24, 4/11 -> 2027-04-11.
-  academic_year_start: 2026
-  rollover_month: 8
+  # Dates must include the year (e.g. 9/12/2026); an event whose date has no
+  # year is skipped and flagged in the UI.
   # Values (case-insensitive) that mean "no time yet" -> the column is skipped.
   skip_values: ["TBD", "TBA", "N/A", "-", "OFF"]
 

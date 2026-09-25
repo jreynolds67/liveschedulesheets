@@ -114,7 +114,9 @@ The default labels:
 | Start        | *(combined)* `datetime`             | one of   | Optional: a single cell with full date + time including year |
 
 A column becomes a recording once it has an **event name** and a **valid start**
-(`DATE` + a game time). Blank cells or `TBD`/`TBA` are skipped. If its
+(`DATE` + a game time). **Dates must include the year** (e.g. `9/12/2026`) —
+a date without one is skipped and flagged “Date has no year” in the sheet
+preview. Blank cells or `TBD`/`TBA` are skipped. If its
 `CONTROL ROOM` is blank the event still shows in Preview flagged **no room**, so
 an engineer can assign one via the inline selector or a manual override.
 

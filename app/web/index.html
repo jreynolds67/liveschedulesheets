@@ -239,10 +239,9 @@
         </div>
         <div class="hint">Comma-separated; first match in the tab wins.</div>
         <div class="grid3">
-          <div><label>Academic year start</label><input type="number" id="dp_year" /></div>
-          <div><label>Rollover month</label><input type="number" id="dp_rollover" min="1" max="12" /></div>
           <div><label>Skip values</label><input type="text" id="dp_skip" placeholder="TBD, TBA" /></div>
         </div>
+        <div class="hint">Dates must include the year (e.g. 9/12/2026); dates without one are skipped and flagged.</div>
       </div>
     </details>
   </div></section>
@@ -338,8 +337,6 @@ function fillForm(){
   $("lbl_datetime").value = csv(get(cfg,"sheet.labels.datetime",[]));
   $("lbl_date").value = csv(get(cfg,"sheet.labels.date",[]));
   $("lbl_time").value = csv(get(cfg,"sheet.labels.time",[]));
-  $("dp_year").value = get(cfg,"date_parsing.academic_year_start","");
-  $("dp_rollover").value = get(cfg,"date_parsing.rollover_month",8);
   $("dp_skip").value = csv(get(cfg,"date_parsing.skip_values",["TBD","TBA"]));
 
   renderPcr(get(cfg,"pcr_channel_map",{}));
@@ -421,8 +418,7 @@ function gather(){
   delete cfg.runtime.dry_run;
 
   cfg.date_parsing = cfg.date_parsing || {};
-  cfg.date_parsing.academic_year_start = +$("dp_year").value || 0;
-  cfg.date_parsing.rollover_month = +$("dp_rollover").value || 8;
+  delete cfg.date_parsing.academic_year_start; delete cfg.date_parsing.rollover_month;
   cfg.date_parsing.skip_values = fromCsv($("dp_skip").value);
 
   const map = {};
