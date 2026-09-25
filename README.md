@@ -141,6 +141,13 @@ LSP URL/login, PCR mapping, timings, and toggles are all set in the UI after the
 container is running. You can optionally pre-seed the LSP login with the
 `LSP_USERNAME` / `LSP_PASSWORD` env vars instead.
 
+The LSP base URL is the server's web address including its port (e.g.
+`http://10.10.71.32:6500` — the same place its `/swagger` page is served). The
+login is **optional**: the client first tries API calls with no login (LSP's
+*Basic* auth provider can allow that), then a token from `/api/v1/auth/login`,
+then HTTP Basic auth with the username & password. **Test connection** reports
+which one worked.
+
 ---
 
 ## Deploy in Portainer

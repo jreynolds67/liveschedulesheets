@@ -308,8 +308,8 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
     lsp_raw = _require(raw, "lsp", "root")
     username = (lsp_raw.get("username") or os.environ.get("LSP_USERNAME", "")).strip()
     password = lsp_raw.get("password") or os.environ.get("LSP_PASSWORD", "")
-    if not username or not password:
-        raise ConfigError("Set LSP username & password (in the UI, or LSP_USERNAME/LSP_PASSWORD env)")
+    # Login is optional: some LSP servers (Basic auth provider) accept API calls
+    # without one. The client works out what the server needs (see lsp_client).
     lsp = LspConfig(
         base_url=str(_require(lsp_raw, "base_url", "lsp")).rstrip("/"),
         verify_ssl=bool(lsp_raw.get("verify_ssl", True)),

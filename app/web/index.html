@@ -152,6 +152,8 @@
       <div><label>Password <span id="pwSet" class="hint"></span></label>
         <input type="password" id="lsp_password" autocomplete="new-password" placeholder="•••••• (leave blank to keep)" /></div>
     </div>
+    <div class="hint">Username &amp; password are optional if your LSP server accepts API calls
+      without a login; the tool tries that first, then a token login, then HTTP Basic auth.</div>
     <div class="hint" id="testResult"></div>
   </div></section>
 
@@ -893,7 +895,8 @@ $("btnTest").onclick = async () => {
   await api("POST","/api/config", gather());          // save first so test uses current values
   $("testResult").textContent = "Testing…";
   const r = await api("POST","/api/test");
-  if (r.ok){ $("testResult").innerHTML = `<span style="color:var(--accent2)">✓ Connected — ${r.channel_count} channel(s): ${r.channels.join(", ")}</span>`;
+  const how = {none:"no login needed", token:"logged in (token)", basic:"logged in (HTTP Basic)"}[r.auth_mode] || "";
+  if (r.ok){ $("testResult").innerHTML = `<span style="color:var(--accent2)">✓ Connected${how?` (${how})`:""} — ${r.channel_count} channel(s): ${esc(r.channels.join(", "))}</span>`;
     loadChannels(); }
   else $("testResult").innerHTML = `<span style="color:var(--err)">✗ ${r.error}</span>`;
 };

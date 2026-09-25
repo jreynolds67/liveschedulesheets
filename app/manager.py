@@ -114,10 +114,14 @@ class SyncManager:
         return summary
 
     def channels(self) -> list[dict]:
+        return self._channels()[0]
+
+    def _channels(self) -> tuple[list[dict], Optional[str]]:
         with self._lock:
             syncer = self._lsp_syncer()
             chans = syncer.lsp.get_all_channels()
-        return [{"Id": c.get("Id"), "Name": c.get("Name")} for c in chans]
+            auth_mode = syncer.lsp.auth_mode
+        return [{"Id": c.get("Id"), "Name": c.get("Name")} for c in chans], auth_mode
 
     def created_events(self) -> list[dict]:
         with self._lock:
@@ -209,8 +213,8 @@ class SyncManager:
 
     def test_connection(self) -> dict:
         try:
-            chans = self.channels()
-            return {"ok": True, "channel_count": len(chans),
+            chans, auth_mode = self._channels()
+            return {"ok": True, "channel_count": len(chans), "auth_mode": auth_mode,
                     "channels": [c["Name"] for c in chans if c.get("Name")]}
         except (LspError, ConfigError) as exc:
             return {"ok": False, "error": str(exc)}

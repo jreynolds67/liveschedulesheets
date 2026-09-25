@@ -1,7 +1,10 @@
 """Client for the Telestream Live Schedule Pro v1 API.
 
-Handles login, bearer-token auth with refresh/re-login on 401, channel lookup,
-event de-duplication, and event creation.
+Works out how the server wants to be authenticated on first use:
+  1. no auth -- some servers (Basic auth provider) accept anonymous API calls;
+  2. bearer token from /api/v1/auth/login, refreshed / re-obtained on 401;
+  3. HTTP Basic auth header with the username and password.
+Also handles channel lookup, event de-duplication, and event creation.
 """
 from __future__ import annotations
 
@@ -30,6 +33,8 @@ class LspClient:
         self.session.verify = cfg.verify_ssl
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
+        # "none" | "token" | "basic"; None until the first request decides it.
+        self.auth_mode: Optional[str] = None
         self._lock = threading.Lock()
 
     # -- auth ---------------------------------------------------------------
@@ -70,24 +75,53 @@ class LspClient:
             return True
         return False
 
-    def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self._access_token}"} if self._access_token else {}
+    def _has_login(self) -> bool:
+        return bool(self.cfg.username and self.cfg.password)
+
+    def _send(self, method: str, url: str, **kwargs) -> requests.Response:
+        headers, auth = {}, None
+        if self.auth_mode == "token" and self._access_token:
+            headers["Authorization"] = f"Bearer {self._access_token}"
+        elif self.auth_mode == "basic":
+            auth = (self.cfg.username, self.cfg.password)
+        return self.session.request(method, url, headers=headers, auth=auth, **kwargs)
+
+    def _authenticate(self) -> None:
+        """After a 401: get a token, or fall back to HTTP Basic. Caller holds _lock."""
+        if not self._has_login():
+            raise LspError(
+                "LSP requires a login: set the LSP username & password "
+                "(in the UI, or LSP_USERNAME/LSP_PASSWORD env)"
+            )
+        if self.auth_mode == "token" and self._refresh():
+            return
+        if self.auth_mode == "basic":
+            raise LspError("LSP rejected the username/password (HTTP Basic auth)")
+        try:
+            self.login()
+            self.auth_mode = "token"
+        except LspError as exc:
+            log.info("Token login failed (%s); trying HTTP Basic auth", exc)
+            self.auth_mode = "basic"
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
-        """Make an authed request, transparently re-authing once on 401."""
-        with self._lock:
-            if not self._access_token:
-                self.login()
+        """Make a request, (re)authenticating as needed on 401."""
         url = f"{self.cfg.base_url}{path}"
         kwargs.setdefault("timeout", self.timeout)
 
-        resp = self.session.request(method, url, headers=self._headers(), **kwargs)
+        resp = self._send(method, url, **kwargs)
         if resp.status_code == 401:
-            log.info("Access token rejected; refreshing / re-authenticating")
             with self._lock:
-                if not self._refresh():
-                    self.login()
-            resp = self.session.request(method, url, headers=self._headers(), **kwargs)
+                self._authenticate()
+            resp = self._send(method, url, **kwargs)
+            if resp.status_code == 401 and self.auth_mode == "basic":
+                raise LspError(
+                    "LSP rejected the login: token login and HTTP Basic auth both failed "
+                    "-- check the username & password"
+                )
+        if resp.status_code != 401 and self.auth_mode is None:
+            self.auth_mode = "none"
+            log.info("LSP accepted API calls without a login")
         return resp
 
     # -- channels -----------------------------------------------------------
