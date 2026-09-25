@@ -56,6 +56,12 @@ scheduling:
   # LSP requires an End. An engineer normally stops recording manually; if not,
   # the event auto-stops this many hours after it starts.
   safety_cap_hours: 6
+  # Per-sport caps that replace safety_cap_hours. A sport applies when its code
+  # appears in the event name as a whole word, ignoring case ("WSOC" matches
+  # "WSOC vs Texas", not "XWSOC"). The first matching entry wins.
+  sport_safety_caps: []
+    # - { sport: "WSOC", hours: 3 }
+    # - { sport: "VB", hours: 3.5 }
   # Only create events whose padded start is within this many days ahead.
   horizon_days: 60
   # Skip events whose start is more than this many minutes in the past.

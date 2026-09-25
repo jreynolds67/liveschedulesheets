@@ -53,7 +53,11 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   for. Rows detected by guesswork, rather than an exact label, are flagged
   **please confirm**.
 - Adjust **lead-in**, **safety-cap hours**, the active window, and the event
-  name prefix.
+  name prefix. Under **Safety cap by sport**, add a sport code (`MSOC`, `VB`,
+  `WSOC`, …) with its own cap; it applies to events whose name contains that
+  code as a whole word (ignoring case), and the first matching row wins. Other
+  events use the default cap. Changing a cap doesn't alter events already
+  created in LSP. Preview shows each event's cap.
 - Toggle **Dry run** and the **sync interval**. Dry run is **on** until you
   switch it off in the UI (the switch saves immediately and asks for
   confirmation before going live). While it's on, a *DRY RUN* badge shows in the

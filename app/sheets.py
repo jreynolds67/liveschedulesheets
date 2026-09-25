@@ -377,7 +377,7 @@ def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]
     seen[dedup_bucket] = occurrence + 1
 
     start = start - timedelta(minutes=cfg.scheduling.lead_in_minutes)
-    end = start + timedelta(hours=cfg.scheduling.safety_cap_hours)
+    end = start + timedelta(hours=cfg.scheduling.cap_hours_for(name))
     return ScheduledEvent(
         name=name,
         pcr=pcr or "",
@@ -542,7 +542,7 @@ def _apply_event_overrides(tab, events, cfg) -> list[ScheduledEvent]:
                 ev.pcr = room
         if ov.start is not None:
             ev.start = ov.start - timedelta(minutes=cfg.scheduling.lead_in_minutes)
-            ev.end = ev.start + timedelta(hours=cfg.scheduling.safety_cap_hours)
+            ev.end = ev.start + timedelta(hours=cfg.scheduling.cap_hours_for(ev.name))
         out.append(ev)
     return out
 

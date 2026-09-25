@@ -49,6 +49,16 @@ class SchedulingConfig:
     horizon_days: int
     past_grace_minutes: int
     event_name_prefix: str
+    # (sport code, hours) in priority order; see cap_hours_for().
+    sport_safety_caps: list[tuple[str, float]] = field(default_factory=list)
+
+    def cap_hours_for(self, event_name: str) -> float:
+        """Safety cap for an event: the first sport code that appears in its
+        name as a whole word ("WSOC" in "WSOC vs Texas"), else the default."""
+        for sport, hours in self.sport_safety_caps:
+            if channel_name_matches(sport, event_name):
+                return hours
+        return self.safety_cap_hours
 
 
 @dataclass
@@ -245,6 +255,7 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
         horizon_days=int(sc_raw.get("horizon_days", 60)),
         past_grace_minutes=int(sc_raw.get("past_grace_minutes", 30)),
         event_name_prefix=str(sc_raw.get("event_name_prefix", "")),
+        sport_safety_caps=_parse_sport_caps(sc_raw.get("sport_safety_caps")),
     )
 
     google_raw = raw.get("google", {}) or {}
@@ -338,6 +349,23 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
     )
 
     return LspSettings(pcr_channel_map=pcr_channel_map, lsp=lsp, runtime=runtime)
+
+
+def _parse_sport_caps(raw) -> list[tuple[str, float]]:
+    """raw: [{sport: "WSOC", hours: 3}, ...] -> [("WSOC", 3.0), ...]"""
+    out = []
+    for item in raw or []:
+        sport = str((item or {}).get("sport") or "").strip()
+        if not sport:
+            continue
+        try:
+            hours = float(item.get("hours"))
+        except (TypeError, ValueError):
+            raise ConfigError(f"Safety cap for {sport} needs a number of hours") from None
+        if hours <= 0:
+            raise ConfigError(f"Safety cap for {sport} must be more than 0 hours")
+        out.append((sport, hours))
+    return out
 
 
 def _parse_tab_overrides(raw: dict) -> dict[str, TabOverride]:

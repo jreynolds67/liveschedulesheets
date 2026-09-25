@@ -58,6 +58,8 @@
   .pcr-row .pcr-hits { grid-column:1 / -1; margin-top:-4px; }
   .pcr-row .rm { background:transparent; border:1px solid var(--line); color:var(--err);
     padding:9px 0; border-radius:8px; }
+  .cap-row { display:grid; grid-template-columns:minmax(0,1fr) 140px 34px; gap:10px; align-items:end; margin-bottom:10px; }
+  .cap-row .rm { background:transparent; border:1px solid var(--line); color:var(--err); padding:9px 0; border-radius:8px; }
   .pill.no_room { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.ignore { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.tool { background:rgba(59,209,136,.15); color:var(--accent2); }
@@ -205,13 +207,19 @@
   <section class="card"><h2>Scheduling</h2><div class="body">
     <div class="grid3">
       <div><label>Lead-in (minutes before start)</label><input type="number" id="lead_in" min="0" /></div>
-      <div><label>Safety-cap duration (hours)</label><input type="number" id="safety_cap" min="0" step="0.5" /></div>
+      <div><label>Default safety cap (hours)</label><input type="number" id="safety_cap" min="0" step="0.5" /></div>
       <div><label>Event name prefix</label><input type="text" id="name_prefix" placeholder="(optional)" /></div>
     </div>
     <div class="grid2">
       <div><label>Only schedule within (days ahead)</label><input type="number" id="horizon" min="1" /></div>
       <div><label>Ignore starts older than (minutes)</label><input type="number" id="past_grace" min="0" /></div>
     </div>
+    <div><label>Safety cap by sport</label>
+      <div class="hint" style="margin-bottom:8px">Replaces the default cap for events whose name contains the sport
+        code as a whole word, ignoring case — e.g. “WSOC” matches “WSOC vs Texas”. The first matching row wins.
+        Events already created in LSP keep their end time.</div>
+      <div id="capRows"></div>
+      <button id="btnAddCap" class="ghost">+ Add sport</button></div>
   </div></section>
 
   <!-- Runtime -->
@@ -317,6 +325,8 @@ function fillForm(){
   $("name_prefix").value = get(cfg,"scheduling.event_name_prefix","");
   $("horizon").value = get(cfg,"scheduling.horizon_days",60);
   $("past_grace").value = get(cfg,"scheduling.past_grace_minutes",30);
+  $("capRows").innerHTML = "";
+  get(cfg,"scheduling.sport_safety_caps",[]).forEach(c => addCapRow(c.sport, c.hours));
 
   $("poll_interval").value = get(cfg,"runtime.poll_interval_seconds",900);
   $("dry_run").checked = !get(cfg,"runtime.live",false);
@@ -371,6 +381,16 @@ function renderPcrHits(div){
     : `<span style="color:var(--warn)">No LSP channels match</span>`;
 }
 
+function addCapRow(sport="", hours=""){
+  const div = document.createElement("div"); div.className = "cap-row";
+  div.innerHTML = `
+    <div><label>Sport</label><input type="text" class="cap-sport" placeholder="e.g. WSOC" value="${esc(sport)}" /></div>
+    <div><label>Safety cap (hours)</label><input type="number" class="cap-hours" min="0.5" step="0.5" value="${esc(hours)}" /></div>
+    <button class="rm" title="Remove">✕</button>`;
+  div.querySelector(".rm").onclick = () => div.remove();
+  $("capRows").appendChild(div);
+}
+
 function gather(){
   cfg.lsp = cfg.lsp || {};
   cfg.lsp.base_url = $("lsp_base_url").value.trim();
@@ -398,6 +418,9 @@ function gather(){
   cfg.scheduling.event_name_prefix = $("name_prefix").value;
   cfg.scheduling.horizon_days = +$("horizon").value;
   cfg.scheduling.past_grace_minutes = +$("past_grace").value;
+  cfg.scheduling.sport_safety_caps = [...document.querySelectorAll(".cap-row")]
+    .map(r => ({sport: r.querySelector(".cap-sport").value.trim(), hours: +r.querySelector(".cap-hours").value}))
+    .filter(c => c.sport);
 
   cfg.runtime = cfg.runtime || {};
   cfg.runtime.poll_interval_seconds = +$("poll_interval").value;
@@ -784,7 +807,7 @@ function renderPreview(items){
       <td>${esc(i.event_name)}<div class="hint" title="${esc((i.channels||[]).map(c=>`${c.name} — ${c.status.replace(/_/g,' ')}`).join("\n"))}">${esc(i.message||"")}</div></td>
       <td class="hint">${i.source_tab}</td>
       <td></td>
-      <td class="mono">${new Date(i.start).toLocaleString()}</td>
+      <td class="mono">${new Date(i.start).toLocaleString()}<div class="hint">stops after ${+((new Date(i.end) - new Date(i.start)) / 36e5).toFixed(2)} h</div></td>
       <td></td>`;
     // Room selector
     const sel = document.createElement("select");
@@ -883,6 +906,7 @@ async function loadChannels(){
 
 // Wire up buttons
 $("btnAddPcr").onclick = () => addPcrRow();
+$("btnAddCap").onclick = () => addCapRow();
 $("btnRefreshTabs").onclick = () => loadTabs();
 $("sheet_id").addEventListener("input", () => { clearTimeout(linkTimer); linkTimer = setTimeout(onLinkChange, 400); });
 $("btnRefreshCreated").onclick = () => loadScheduled();
