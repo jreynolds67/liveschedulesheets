@@ -260,8 +260,8 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
     ).strip()
     if not google_creds:
         raise ConfigError(
-            "Set the Google credentials (upload a service-account key or user sign-in in the web UI, "
-            "or set GOOGLE_APPLICATION_CREDENTIALS / google.credentials_file)"
+            "Set the Google service-account key path (GOOGLE_APPLICATION_CREDENTIALS env "
+            "or google.credentials_file in config)"
         )
     if os.path.isdir(google_creds):
         # Docker creates an empty directory when a bind-mounted file is missing on the host.

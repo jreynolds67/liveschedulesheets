@@ -147,36 +147,6 @@ allow-list. Turn individual tabs off in the UI (**Sheet tabs** card).
 5. Copy the service account's email (`…@….iam.gserviceaccount.com`) and **share
    the Google Sheet with that email as a Viewer**.
 
-#### If your organization blocks service-account keys
-
-If step 3 fails with *"An Organization Policy that blocks service accounts key
-creation has been enforced"* (`iam.disableServiceAccountKeyCreation`), sign the
-service in as a **Google user** instead. It then reads the sheet as that user,
-so use an account that can already open it (ideally a shared/ops account rather
-than a person's).
-
-1. In the same project, enable the **Google Sheets API**, then go to **Google
-   Auth Platform → Branding**, fill in the app name/emails and choose audience
-   **Internal**. *(If you choose External, go to **Audience** and click
-   **Publish app**. An External app left in "Testing" loses its sign-in
-   after 7 days.)*
-2. **Clients → Create client → Desktop app**, then download its JSON
-   (`client_secret_….json`).
-3. On your own computer (no extra packages needed), run:
-
-   ```bash
-   python3 tools/google_login.py client_secret_XXXX.json
-   ```
-
-   Sign in with the account that should read the sheet and allow read-only
-   Sheets access. This writes `google-user-credentials.json`.
-4. Upload that file with the web UI's **Upload key (.json)** button. The card
-   shows *Signed in* and the account's email. Then delete the local copy.
-
-The sign-in stops working if that user's password is changed, if access is
-revoked at myaccount.google.com, or if it goes unused for 6 months. If that
-happens, run step 3 again and upload the new file.
-
 ### 2. Everything else — in the web UI
 
 LSP URL/login, PCR mapping, timings, and toggles are all set in the UI after the
