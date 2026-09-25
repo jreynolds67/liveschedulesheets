@@ -54,7 +54,9 @@ class PlanItem:
 
 
 class Syncer:
-    def __init__(self, cfg: Config, reader: SheetReader, lsp: LspClient, state: State):
+    def __init__(self, cfg: Config, reader: Optional[SheetReader], lsp: LspClient, state: State):
+        # cfg may be an LspSettings and reader None for LSP-only use (channels,
+        # scheduled view, cleanup) before the sheet side is configured.
         self.cfg = cfg
         self.reader = reader
         self.lsp = lsp

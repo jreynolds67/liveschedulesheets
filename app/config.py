@@ -125,6 +125,15 @@ class SheetSettings:
 
 
 @dataclass
+class LspSettings:
+    """The part of Config needed to talk to LSP (no sheet / Google key), so the
+    LSP side of the UI works before the Google key is installed."""
+    pcr_channel_map: dict[str, ChannelRef]
+    lsp: LspConfig
+    runtime: RuntimeConfig
+
+
+@dataclass
 class Config:
     sheet: SheetConfig
     date_parsing: DateParsingConfig
@@ -249,7 +258,10 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
             "the key file probably isn't at the host path mounted in docker-compose.yml"
         )
     if not os.path.isfile(google_creds):
-        raise ConfigError(f"Google credentials file not found: {google_creds}")
+        raise ConfigError(
+            f"Google credentials file not found: {google_creds} (on the Docker host, put "
+            "service-account.json in the folder mounted at /secrets)"
+        )
 
     return SheetSettings(
         sheet=sheet,
@@ -265,7 +277,23 @@ def parse_config(raw: dict) -> Config:
     """Validate a raw config dict into a Config. Secrets fall back to env."""
     raw = raw or {}
     ss = parse_sheet_settings(raw)
+    ls = parse_lsp_settings(raw)
+    return Config(
+        sheet=ss.sheet,
+        date_parsing=ss.date_parsing,
+        scheduling=ss.scheduling,
+        pcr_channel_map=ls.pcr_channel_map,
+        lsp=ls.lsp,
+        runtime=ls.runtime,
+        google_credentials_file=ss.google_credentials_file,
+        tab_overrides=ss.tab_overrides,
+        event_overrides=ss.event_overrides,
+    )
 
+
+def parse_lsp_settings(raw: dict) -> LspSettings:
+    """Validate just the LSP half of the config (login, PCR map, runtime)."""
+    raw = raw or {}
     pcr_map_raw = raw.get("pcr_channel_map", {}) or {}
     pcr_channel_map: dict[str, ChannelRef] = {}
     for letter, ref in pcr_map_raw.items():
@@ -298,17 +326,7 @@ def parse_config(raw: dict) -> Config:
         log_level=os.environ.get("LOG_LEVEL", str(rt_raw.get("log_level", "INFO"))).upper(),
     )
 
-    return Config(
-        sheet=ss.sheet,
-        date_parsing=ss.date_parsing,
-        scheduling=ss.scheduling,
-        pcr_channel_map=pcr_channel_map,
-        lsp=lsp,
-        runtime=runtime,
-        google_credentials_file=ss.google_credentials_file,
-        tab_overrides=ss.tab_overrides,
-        event_overrides=ss.event_overrides,
-    )
+    return LspSettings(pcr_channel_map=pcr_channel_map, lsp=lsp, runtime=runtime)
 
 
 def _parse_tab_overrides(raw: dict) -> dict[str, TabOverride]:

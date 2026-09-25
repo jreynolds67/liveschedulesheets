@@ -127,10 +127,11 @@ allow-list. Turn individual tabs off in the UI (**Sheet tabs** card).
    a project and **enable the Google Sheets API**.
 2. **APIs & Services → Credentials → Create credentials → Service account.**
 3. Open it → **Keys → Add key → JSON**. Download the file.
-4. Copy it onto the **Docker host** at
-   `/opt/liveschedulesheets/service-account.json` (or anywhere, and set the
-   `GOOGLE_KEY_FILE` stack env var to that path). For local `docker run`
-   testing, `secrets/service-account.json` in this project works too.
+4. Copy it onto the **Docker host** as
+   `/opt/liveschedulesheets/service-account.json` (or into another folder, and
+   set the `GOOGLE_KEY_DIR` stack env var to that folder). The container picks
+   it up without a redeploy. For local `docker run` testing,
+   `secrets/service-account.json` in this project works too.
 5. Copy the service account's email (`…@….iam.gserviceaccount.com`) and **share
    the Google Sheet with that email as a Viewer**.
 
@@ -151,12 +152,13 @@ container is running. You can optionally pre-seed the LSP login with the
 3. Under **Environment variables**, optionally set `LSP_USERNAME` / `LSP_PASSWORD`
    and `UI_USER` / `UI_PASSWORD`.
 4. Put the Google key on the Docker host at
-   `/opt/liveschedulesheets/service-account.json`, or set `GOOGLE_KEY_FILE` to
-   its absolute host path. It must be a real file there *before* deploying —
-   if it's missing, Docker mounts an empty directory in its place and the UI
-   reports the key path "is a directory". A relative path like `./secrets/…`
-   doesn't work for Git stacks, because Portainer checks out the repo in its own
-   data folder. **Never commit a real key to a shared repo.**
+   `/opt/liveschedulesheets/service-account.json`, or set `GOOGLE_KEY_DIR` to
+   the absolute host folder that holds `service-account.json`. It can be added
+   after deploying — until then the sheet features report the key is missing,
+   but the LSP side (Test connection, channels, the *Scheduled in Live Schedule
+   Pro* card, cleanup) still works. A relative path like `./secrets` doesn't
+   work for Git stacks, because Portainer checks out the repo in its own data
+   folder. **Never commit a real key to a shared repo.**
 5. Deploy, then open `http://10.10.251.95` and finish configuration in the UI.
 
 **Networking:** the container joins the existing **Companion** `ipvlan`

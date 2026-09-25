@@ -30,10 +30,10 @@ services:
       companion_net:
         ipv4_address: 10.10.251.95
     volumes:
-      # Google service-account key (read-only). Absolute path ON THE DOCKER HOST:
-      # Portainer Git stacks can't see files next to the compose file, and a
-      # missing file gets mounted as an empty directory.
-      - ${GOOGLE_KEY_FILE:-/opt/liveschedulesheets/service-account.json}:/secrets/service-account.json:ro
+      # Folder ON THE DOCKER HOST holding service-account.json (read-only).
+      # Absolute path, because Portainer Git stacks can't see files next to the
+      # compose file. The key can be added later without redeploying.
+      - ${GOOGLE_KEY_DIR:-/opt/liveschedulesheets}:/secrets:ro
       # Persistent config (config.yaml) + de-dup state (state.json).
       - lss_state:/data
 

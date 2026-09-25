@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .config import (Config, ConfigError, extract_spreadsheet_id, parse_config,
-                     parse_row_picks, parse_sheet_settings)
+                     parse_lsp_settings, parse_row_picks, parse_sheet_settings)
 from .lsp_client import LspClient, LspError
 from .settings_store import SettingsStore
 from .sheets import SheetReader, inspect_grid
@@ -45,6 +45,9 @@ class SyncManager:
         self._cache_hash: Optional[str] = None
         self._cfg: Optional[Config] = None
         self._syncer: Optional[Syncer] = None
+        # LSP-only syncer, used while the sheet side (e.g. Google key) isn't set up.
+        self._lsp_hash: Optional[str] = None
+        self._lsp_only: Optional[Syncer] = None
 
         self.last_run: Optional[dict] = None
         self.last_error: Optional[str] = None
@@ -62,13 +65,38 @@ class SyncManager:
         h = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
         if h != self._cache_hash or self._syncer is None:
             cfg = parse_config(raw)  # raises ConfigError if invalid
-            reader = SheetReader(cfg)
+            try:
+                reader = SheetReader(cfg)
+            except Exception as exc:  # noqa: BLE001 -- e.g. a malformed key file
+                raise ConfigError(f"Could not load the Google service-account key: {exc}") from exc
             lsp = LspClient(cfg.lsp)
             state = State(cfg.runtime.state_file)
             self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state)
             self._cache_hash = h
+            self._lsp_only = self._lsp_hash = None
             log.info("Rebuilt sync components from updated config")
         return self._cfg, self._syncer
+
+    def _lsp_syncer(self) -> Syncer:
+        """Syncer for LSP-only operations (channels, scheduled view, cleanup).
+
+        Uses the full syncer when the whole config is valid; otherwise falls
+        back to one built from just the LSP half, with no sheet reader, so LSP
+        can be tested before the Google key is installed.
+        """
+        try:
+            return self._components()[1]
+        except ConfigError as full_exc:
+            raw = self.store.load()
+            try:
+                ls = parse_lsp_settings(raw)
+            except ConfigError:
+                raise full_exc from None
+            h = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
+            if h != self._lsp_hash or self._lsp_only is None:
+                self._lsp_only = Syncer(ls, None, LspClient(ls.lsp), State(ls.runtime.state_file))
+                self._lsp_hash = h
+            return self._lsp_only
 
     # -- operations for the web UI -----------------------------------------
 
@@ -87,23 +115,23 @@ class SyncManager:
 
     def channels(self) -> list[dict]:
         with self._lock:
-            _, syncer = self._components()
+            syncer = self._lsp_syncer()
             chans = syncer.lsp.get_all_channels()
         return [{"Id": c.get("Id"), "Name": c.get("Name")} for c in chans]
 
     def created_events(self) -> list[dict]:
         with self._lock:
-            _, syncer = self._components()
+            syncer = self._lsp_syncer()
             return syncer.created_events()
 
     def scheduled_events(self, past_days: int = 0) -> dict:
         with self._lock:
-            _, syncer = self._components()
+            syncer = self._lsp_syncer()
             return syncer.scheduled_events(past_days)
 
     def delete_created(self) -> dict:
         with self._lock:
-            _, syncer = self._components()
+            syncer = self._lsp_syncer()
             return syncer.delete_created()
 
     # -- sheet inspection (web UI row mapping) -------------------------------
@@ -201,6 +229,10 @@ class SyncManager:
             created_count = len(syncer.state.tool_created())
         except ConfigError as exc:
             cfg_ok, cfg_err = False, str(exc)
+            try:
+                created_count = len(self._lsp_syncer().state.tool_created())
+            except ConfigError:
+                pass
         return {
             "config_ok": cfg_ok,
             "config_error": cfg_err,
