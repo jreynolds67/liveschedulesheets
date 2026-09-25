@@ -21,9 +21,6 @@ services:
       UI_USER: ${UI_USER:-}
       UI_PASSWORD: ${UI_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # Dry run: nothing is created in (or deleted from) LSP. Overrides the UI
-      # toggle while set. To go live, set DRY_RUN=false on the stack and redeploy.
-      DRY_RUN: ${DRY_RUN:-true}
     sysctls:
       # Let the non-root app user bind port 80.
       net.ipv4.ip_unprivileged_port_start: 0

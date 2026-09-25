@@ -339,7 +339,10 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
     runtime = RuntimeConfig(
         poll_interval_seconds=int(rt_raw.get("poll_interval_seconds", 900)),
         run_once=_env_bool("RUN_ONCE", bool(rt_raw.get("run_once", False))),
-        dry_run=_env_bool("DRY_RUN", bool(rt_raw.get("dry_run", False))),
+        # Dry run unless the UI's toggle has explicitly gone live (runtime.live).
+        # The older runtime.dry_run key is ignored so existing configs start safe.
+        # DRY_RUN env overrides (headless / docker run testing).
+        dry_run=_env_bool("DRY_RUN", not bool(rt_raw.get("live", False))),
         state_file=str(rt_raw.get("state_file", "/data/state.json")),
         log_level=os.environ.get("LOG_LEVEL", str(rt_raw.get("log_level", "INFO"))).upper(),
     )

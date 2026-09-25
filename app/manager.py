@@ -246,7 +246,7 @@ class SyncManager:
             "config_error": cfg_err,
             "poll_interval_seconds": interval,
             "dry_run": dry_run,
-            # Set on the stack (DRY_RUN env), which overrides the UI toggle.
+            # DRY_RUN env (headless testing) overrides the UI toggle.
             "dry_run_locked": os.environ.get("DRY_RUN") is not None,
             "created_count": created_count,
             "loop_running": bool(self._thread and self._thread.is_alive()),

@@ -219,7 +219,7 @@
     <div class="grid2">
       <div><label>Sync interval (seconds)</label><input type="number" id="poll_interval" min="60" /></div>
       <div><label>Dry run</label>
-        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">Log what would happen; nothing is created in or deleted from LSP</span></div></div>
+        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: log what would happen; nothing is created in or deleted from LSP. Applies immediately.</span></div></div>
     </div>
     <details><summary>Advanced: labels &amp; date parsing</summary>
       <div class="body" style="padding:14px 0 0;">
@@ -326,7 +326,7 @@ function fillForm(){
   $("past_grace").value = get(cfg,"scheduling.past_grace_minutes",30);
 
   $("poll_interval").value = get(cfg,"runtime.poll_interval_seconds",900);
-  $("dry_run").checked = get(cfg,"runtime.dry_run",false);
+  $("dry_run").checked = !get(cfg,"runtime.live",false);
 
   $("lbl_event").value = csv(get(cfg,"sheet.labels.event_name",["EVENT"]));
   $("lbl_pcr").value = csv(get(cfg,"sheet.labels.pcr",["PCR"]));
@@ -412,7 +412,8 @@ function gather(){
 
   cfg.runtime = cfg.runtime || {};
   cfg.runtime.poll_interval_seconds = +$("poll_interval").value;
-  cfg.runtime.dry_run = $("dry_run").checked;
+  cfg.runtime.live = !$("dry_run").checked;
+  delete cfg.runtime.dry_run;
 
   cfg.date_parsing = cfg.date_parsing || {};
   cfg.date_parsing.academic_year_start = +$("dp_year").value || 0;
@@ -801,7 +802,7 @@ async function refreshStatus(){
   $("dryBadge").style.display = s.dry_run ? "" : "none";
   if (s.dry_run_locked){
     $("dry_run").checked = !!s.dry_run; $("dry_run").disabled = true;
-    $("dryHint").textContent = `Set to ${s.dry_run?"ON":"OFF"} by DRY_RUN on the Portainer stack — change it there and redeploy`;
+    $("dryHint").textContent = `Forced ${s.dry_run?"ON":"OFF"} by the DRY_RUN environment variable — remove it to use this toggle`;
   }
   if (s.dry_run) $("btnDeleteCreated").disabled = true;
   let html = "";
@@ -950,6 +951,17 @@ $("btnPreview").onclick = async () => {
   const r = await api("GET","/api/preview");
   if (r.ok) renderPreview(r.items);
   else $("previewBox").innerHTML = `<span style="color:var(--err)">${r.error}</span>`;
+};
+// Dry run is a safety switch: it saves as soon as it's flipped.
+$("dry_run").onchange = async () => {
+  const cb = $("dry_run");
+  if (!cb.checked && !confirm("Turn dry run OFF?\n\nThe next sync (scheduled or Run now) WILL create events in Live Schedule Pro.")){
+    cb.checked = true; return;
+  }
+  const r = await api("POST","/api/config", gather());
+  toast(cb.checked ? "Dry run ON — LSP will not be changed" : "Dry run OFF — syncs will create events in LSP", 4000);
+  if (!r.valid) console.warn("Config incomplete:", r.error);
+  refreshStatus();
 };
 $("btnRun").onclick = async () => {
   const dry = lastStatus?.dry_run;

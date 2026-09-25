@@ -54,11 +54,12 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   **please confirm**.
 - Adjust **lead-in**, **safety-cap hours**, the active window, and the event
   name prefix.
-- Toggle **Dry run** and the **sync interval**. The Portainer stack ships with
-  `DRY_RUN=true`, which locks dry run on (the UI shows a *DRY RUN* badge and
-  the toggle is disabled): passes and **Run now** only report what they *would*
-  create, and nothing is created in or deleted from LSP. To go live, set
-  `DRY_RUN=false` on the stack and redeploy.
+- Toggle **Dry run** and the **sync interval**. Dry run is **on** until you
+  switch it off in the UI (the switch saves immediately and asks for
+  confirmation before going live). While it's on, a *DRY RUN* badge shows in the
+  header, passes and **Run now** only report what they *would* create, and
+  nothing is created in or deleted from LSP. It's stored as `runtime.live`
+  (default `false`); a `DRY_RUN` env var, if set, overrides the toggle.
 - **Preview events** — see exactly what the next sync would create/skip, with no
   changes made. Each row has an inline **room selector** and an **Ignore**
   checkbox for fixing individual events.
@@ -256,7 +257,7 @@ tool-created entry in `state.json`.
 The UI covers everything; `config.example.yaml` documents every field inline
 (it seeds the live config on first run). Highlights: `scheduling.lead_in_minutes`,
 `scheduling.safety_cap_hours`, `scheduling.horizon_days` / `past_grace_minutes`,
-`runtime.poll_interval_seconds`, `runtime.dry_run`. Multi-tab settings:
+`runtime.poll_interval_seconds`, `runtime.live`. Multi-tab settings:
 `sheet.tabs` (empty = auto-discover visible tabs), `tab_overrides`
 (enable/disable a tab, `default_control_room`, pinned `rows`), and `event_overrides` (per-event
 `control_room` / `start` / `ignore`, matched by tab + date + event name).
