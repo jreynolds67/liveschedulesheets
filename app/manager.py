@@ -120,6 +120,11 @@ class SyncManager:
             _, syncer = self._components()
             return syncer.send_one(tab, event_date, event_name, occurrence)
 
+    def unlock_event(self, record_id: str) -> dict:
+        with self._lock:
+            _, syncer = self._components()
+            return syncer.unlock(record_id)
+
     def channels(self) -> list[dict]:
         return self._channels()[0]
 

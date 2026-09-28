@@ -24,7 +24,8 @@ class ScheduledEvent:
         return (self.event_date, self.name.strip().lower(), self.occurrence)
 
     def dedup_key(self, channel_id: str = "") -> str:
-        """Stable identity used for local-state de-duplication (per channel)."""
+        """Per-channel key of the pre-records state format; only used to adopt
+        those bookings (see State)."""
         raw = f"{self.pcr}|{self.name.strip().lower()}|{self.start.astimezone().isoformat()}"
         if channel_id:
             raw += f"|{channel_id}"

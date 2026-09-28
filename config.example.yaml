@@ -52,6 +52,8 @@ date_parsing:
 
 scheduling:
   # Begin recording this many minutes BEFORE the sheet's start time.
+  # Changing this (or the caps below) also updates events already in LSP that
+  # haven't started, unless they were changed by hand there (locked).
   lead_in_minutes: 10
   # LSP requires an End. An engineer normally stops recording manually; if not,
   # the event auto-stops this many hours after it starts.
@@ -119,5 +121,6 @@ runtime:
   live: false                  # false = DRY RUN: syncs log what would be created and change
                                # nothing in LSP (Preview's per-event "Send to LSP" and the
                                # cleanup button still act). Set by the UI's Dry run toggle.
-  state_file: "/data/state.json"   # mount a volume so it survives restarts
+  state_file: "/data/state.json"   # tracked events + lock state; mount a volume so it
+                                   # survives restarts
   log_level: "INFO"

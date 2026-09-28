@@ -4,7 +4,7 @@ Works out how the server wants to be authenticated on first use:
   1. no auth -- some servers (Basic auth provider) accept anonymous API calls;
   2. bearer token from /api/v1/auth/login, refreshed / re-obtained on 401;
   3. HTTP Basic auth header with the username and password.
-Also handles channel lookup, event de-duplication, and event creation.
+Also handles channel lookup and creating, updating and removing events.
 """
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ class LspClient:
     # -- events -------------------------------------------------------------
 
     def get_events_for_channel(self, channel_id: str) -> list[dict]:
-        """All events on a channel (used for de-duplication)."""
+        """All events on a channel (used to match and check tracked events)."""
         resp = self._request(
             "GET", "/api/v1/GetEvents", params={"channelId": channel_id}
         )
@@ -168,6 +168,23 @@ class LspClient:
                 f"AddEvent failed for {name!r} ({resp.status_code}): {resp.text[:400]}"
             )
         return resp.json()
+
+    def patch_event(self, event_id: str, name: str, start: datetime, end: datetime,
+                    force: bool = False) -> None:
+        """Change an event that hasn't started (PATCH /api/v1/PatchEvent/{id})."""
+        self._check_writable(f"update event {name!r}", force)
+        body = {"Name": name, "Start": _iso(start), "End": _iso(end)}
+        resp = self._request("PATCH", f"/api/v1/PatchEvent/{event_id}", json=body)
+        if resp.status_code != 200:
+            raise LspError(
+                f"PatchEvent failed for {name!r} ({resp.status_code}): {resp.text[:400]}"
+            )
+        try:
+            kind = resp.json().get("ResultKind")
+        except ValueError:
+            kind = None
+        if kind and kind != "Success":
+            raise LspError(f"PatchEvent for {name!r} returned {kind}: {resp.text[:400]}")
 
     def remove_event(self, event_id: str, force: bool = False) -> None:
         """Delete a single event by its LSP id (DELETE /api/v1/RemoveEvent)."""

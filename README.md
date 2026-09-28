@@ -17,8 +17,12 @@ Every `poll_interval` (default 15 min) it:
 3. Creates an LSP recording event starting `lead_in_minutes` before the sheet's
    start time, ending after a `safety_cap_hours` cap (an engineer normally stops
    it manually in LSP first).
-4. Skips events that already exist (checked against LSP and a local state file),
-   so it is safe to run repeatedly.
+4. Keeps events it already created in step with the sheet: a changed game
+   time, date, name or PCR **updates** the LSP event (or moves it to the new
+   PCR's channels). Once someone changes an event **by hand in LSP**, it is
+   **locked** and the tool leaves it alone. See
+   [How changes are tracked](#how-changes-are-tracked). It's safe to run
+   repeatedly: nothing is duplicated.
 
 There is **no composite tab** — the schedule lives across the per-sport tabs and
 the service assembles it. Events on a tab with no PCR row (e.g. **Football**)
@@ -56,8 +60,9 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   name prefix. Under **Safety cap by sport**, add a sport code (`MSOC`, `VB`,
   `WSOC`, …) with its own cap; it applies to events whose name contains that
   code as a whole word (ignoring case), and the first matching row wins. Other
-  events use the default cap. Changing a cap doesn't alter events already
-  created in LSP. Preview shows each event's cap.
+  events use the default cap. Changing a cap (or the lead-in) also updates
+  events already created in LSP that haven't started and aren't locked.
+  Preview shows each event's cap.
 - Toggle **Dry run** and the **sync interval**. Dry run is **on** until you
   switch it off in the UI (the switch saves immediately and asks for
   confirmation before going live). While it's on, a *DRY RUN* badge shows in the
@@ -65,14 +70,17 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   only things that change LSP while it's on are the explicit one-off actions:
   Preview's **Send to LSP** and the cleanup button. It's stored as `runtime.live`
   (default `false`); a `DRY_RUN` env var, if set, overrides the toggle.
-- **Preview events** — see exactly what the next sync would create/skip, with no
-  changes made. Each row has an inline **PCR selector** and an **Ignore**
-  checkbox for fixing individual events.
-- **Send one event to LSP** — rows that would be created have a **Send to LSP**
-  button that creates just that event now, on all its channels, so you can test
-  one booking at a time. It works **even with dry run on** (the scheduled sync
-  stays dry), is recorded in `state.json` like any tool-created event (so a
-  later pass won't duplicate it), and can be removed with the cleanup button.
+- **Preview events** — see exactly what the next sync would do, with no changes
+  made: **create**, **update** (the sheet changed), **exists** (up to date),
+  **locked** (changed by hand in LSP), **not in sheet** (tracked, but gone from
+  the sheet), out of window, or no channel. Each row has an inline **PCR
+  selector** and an **Ignore** checkbox for fixing individual events; locked
+  rows have an **Unlock** button.
+- **Send one event to LSP** — rows that would be created or updated have a
+  **Send to LSP** button that applies just that event now, on all its channels,
+  so you can test one at a time. It works **even with dry run on** (the
+  scheduled sync stays dry), is recorded in `state.json` like any sync (so a
+  later pass won't repeat it), and can be removed with the cleanup button.
   Also available as `POST /api/send-event` with
   `{source_tab, event_date, event_name, occurrence}` from a preview row.
 - Stage **Manual overrides** — per-event fixes (matched by tab + date + event
@@ -86,7 +94,7 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   events that have disappeared from LSP.
 - **Clean up test events** — the same card can **delete just the events this
   tool created** from LSP in one click. Events already in LSP (or created by
-  hand) are never touched.
+  hand), and locked events, are never touched.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
 picks up changes automatically. (Optional: protect the UI with HTTP Basic auth
@@ -212,7 +220,7 @@ docker push your-registry/liveschedulesheets:latest
 
 Then set `image:` in `docker-compose.yml` and deploy the stack.
 
-The `lss_state` named volume persists the live `config.yaml`, the de-dup
+The `lss_state` named volume persists the live `config.yaml`, the tracking
 `state.json`, and an uploaded Google key across restarts and redeploys.
 
 ---
@@ -241,20 +249,59 @@ docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
 
 ---
 
-## How de-duplication works
+## How changes are tracked
 
 At the start of every pass (and every preview) the tool fetches LSP's current
-channel list and resolves each room's channels, before anything is created.
-An event is booked separately on each channel its room matches, and each
-booking is matched by **channel + name + start minute (UTC)** — so if a new
-channel appears, the next pass adds just the missing bookings:
-- The local `state.json` (on the `lss_state` volume) records what was created.
-  Events this tool creates are tagged `created_by_tool`; events found already in
-  LSP are tagged `existed` (and are never deleted by the cleanup below).
-- LSP is queried per channel each pass and is the source of truth, so duplicates
-  are avoided even if the state file is lost. Editing an event's **name or start
-  time** in the sheet creates a *new* LSP event; delete the old one in LSP if
-  needed.
+channel list, resolves each PCR's channels, and reads the events on them. Each
+sheet event it schedules is tracked in `state.json` (on the `lss_state` volume)
+as a **record**: where it came from (tab, column, name, date), and one
+**booking** per LSP channel with a snapshot of the LSP event (name, start, end,
+channel) as LSP reported it right after the tool last wrote it.
+
+**Following the sheet.** Each pass matches sheet events to records:
+
+1. same tab + date + event name (+ which same-named game that day): a changed
+   **start time** or **PCR**;
+2. otherwise the same tab + name, when only one unmatched event and one
+   unmatched record share it: a changed **date**;
+3. otherwise the same tab + column + date, likewise: a changed **name**.
+
+Steps 2–3 only match events that haven't started, so a finished game never
+swallows a later rematch. For a matched event that hasn't started, the tool
+updates the LSP event's name/start/end in place (`PatchEvent`), and when the PCR
+changes it removes the bookings on the old PCR's channels and creates them on
+the new ones. A new channel that matches the PCR gets a booking on the next
+pass. Lead-in and safety-cap changes are applied the same way. Once an event
+has started, sheet changes are no longer applied to it.
+
+**Locking.** Before changing anything, the tool compares each booking with its
+snapshot. If the name, start or end differ, or the event was deleted or moved
+to another channel, **someone changed it in LSP**, and the whole sheet event is
+**locked**: the tool never updates, re-creates or deletes it again, and the
+cleanup button skips it. Locks are recorded even in dry run. Preview shows
+locked events with the reason and an **Unlock** button (`POST /api/unlock`
+`{record_id}`); unlocking takes LSP's current values as the new baseline and
+forgets bookings deleted in LSP, so the next pass puts the sheet's values back
+and re-creates those bookings.
+
+**Gone from the sheet.** A tracked event that no longer appears in the sheet
+(column removed, date made TBD, tab turned off, ignored) shows in Preview as
+**not in sheet** and is **left in LSP**. Nothing is deleted automatically,
+because a misread tab would otherwise wipe real bookings. Delete it in LSP if
+it's cancelled.
+
+**New events.** A sheet event with no record is created on each of its PCR's
+channels, unless LSP already has an event with the same name and start minute
+there (made by hand). That one is recorded but never modified or deleted.
+
+State from older versions (one hashed key per booking) is adopted into
+records automatically on the first pass. A booking whose name or start had
+already been changed in LSP, or which was deleted, is adopted as locked.
+
+If `state.json` is lost, the tool falls back to matching LSP events by
+channel + name + start minute, so unchanged events aren't duplicated (they are
+then treated as made by hand and no longer follow the sheet). Events edited or
+deleted in LSP would be created again, though, so keep the volume.
 
 ### Deleting tool-created events (testing)
 
@@ -305,8 +352,8 @@ app/
   settings_store.py # live config on /data, seeded from the example
   sheets.py      # Google fetch + pure parse_grid() / locate_rows() / inspect_grid()
   lsp_client.py  # Live Schedule Pro API client (auth, channels, events)
-  sync.py        # plan() (read-only) + run_once() (creates)
-  state.py       # local created-event cache
+  sync.py        # plan() (read-only) + run_once() (creates / updates / locks)
+  state.py       # tracked events, their LSP bookings and snapshots
   models.py      # ScheduledEvent
 config.example.yaml   # seed / documented defaults
 Dockerfile

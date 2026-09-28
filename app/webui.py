@@ -166,6 +166,19 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.post("/api/unlock")
+    @require_auth
+    def unlock():
+        """Let the tool manage an event locked by a hand edit in LSP again.
+        Body: {record_id}"""
+        body = request.get_json(force=True, silent=True) or {}
+        if not body.get("record_id"):
+            return jsonify({"ok": False, "error": "record_id is required"})
+        try:
+            return jsonify({"ok": True, **manager.unlock_event(body["record_id"])})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     @app.get("/api/created")
     @require_auth
     def created():

@@ -48,11 +48,15 @@
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:600; font-size:12px; }
-  .pill { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; }
+  .pill { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
   .pill.create { background:rgba(79,140,255,.18); color:var(--accent); }
   .pill.exists { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.out_of_window { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.no_channel { background:rgba(255,107,107,.16); color:var(--err); }
+  .pill.update { background:rgba(79,140,255,.18); color:var(--accent); }
+  .pill.locked { background:rgba(245,181,68,.16); color:var(--warn); }
+  .pill.not_in_sheet { background:rgba(245,181,68,.16); color:var(--warn); }
+  .pill.error { background:rgba(255,107,107,.16); color:var(--err); }
   .filebtn { display:inline-block; cursor:pointer; padding:7px 14px; border-radius:8px; border:1px solid var(--line); font-size:13px; font-weight:600; margin:0; }
   .pcr-row { display:grid; grid-template-columns:70px 1fr 34px; gap:10px; align-items:end; margin-bottom:10px; }
   .pcr-row .pcr-hits { grid-column:1 / -1; margin-top:-4px; }
@@ -252,7 +256,9 @@
   <section class="card"><h2>Preview</h2><div class="body">
     <div class="hint">What the next sync would do (no changes made). Use the PCR selector to
       assign a missing/wrong PCR, or Ignore to drop an event. Staged fixes appear below
-      under “Manual overrides” — click <b>Save</b> to apply them.</div>
+      under “Manual overrides” — click <b>Save</b> to apply them. Events already scheduled follow the
+      sheet (<b>update</b>) until someone changes them in LSP; then they're <b>locked</b> and left alone
+      until you <b>Unlock</b> them.</div>
     <div id="previewBox" class="hint">Click “Preview events” to see the plan.</div>
   </div></section>
 
@@ -267,7 +273,8 @@
   <section class="card"><h2>Scheduled in Live Schedule Pro</h2><div class="body">
     <div class="hint">Live from LSP: events on the mapped PCR channels. Events tagged
       <span class="pill tool">this tool</span> were created by this tool. <b>Delete</b> removes only
-      those — events already in Live Schedule Pro (or made by hand) are never touched. Useful for
+      those — events already in Live Schedule Pro (or made by hand) and <span class="pill locked">locked</span>
+      events (changed by hand in LSP) are never touched. Useful for
       cleaning up between test runs.</div>
     <div class="schedbar hint">
       <label><input type="checkbox" id="schedToolOnly"> Only events created by this tool</label>
@@ -782,8 +789,9 @@ async function refreshStatus(){
   html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"} · tool-created events tracked: <b>${s.created_count??0}</b></div>`;
   if (s.last_run){ const su=s.last_run.summary;
     html += `<div>Last ${s.last_run.trigger} run ${new Date(s.last_run.time).toLocaleString()}: `
-      + `${su.dry_run?"would create":"created"} <b>${su.created}</b>, existing ${su.skipped_existing}, out-of-window ${su.skipped_window}, `
-      + `no-channel ${su.no_channel||0}, errors ${su.errors}</div>`; }
+      + `${su.dry_run?"would create":"created"} <b>${su.created}</b>, ${su.dry_run?"would update":"updated"} <b>${su.updated||0}</b>, `
+      + `${su.dry_run?"would remove":"removed"} ${su.deleted||0}, up to date ${su.skipped_existing}, locked ${su.locked||0}, `
+      + `not in sheet ${su.not_in_sheet||0}, out-of-window ${su.skipped_window}, no-channel ${su.no_channel||0}, errors ${su.errors}</div>`; }
   if (s.last_error) html += `<div style="color:var(--err)">Last error: ${s.last_error}</div>`;
   $("statusBox").innerHTML = html;
 }
@@ -808,6 +816,8 @@ function renderPreview(items){
       <td></td>
       <td class="mono">${new Date(i.start).toLocaleString()}<div class="hint">stops after ${+((new Date(i.end) - new Date(i.start)) / 36e5).toFixed(2)} h</div></td>
       <td></td>`;
+    // Gone from the sheet: nothing to override here.
+    if (i.status === "not_in_sheet"){ tr.children[3].textContent = i.pcr ? `PCR ${i.pcr}` : ""; tb.appendChild(tr); return; }
     // Room selector
     const sel = document.createElement("select");
     sel.className = "roomsel";
@@ -824,12 +834,20 @@ function renderPreview(items){
     const lbl = document.createElement("span"); lbl.className = "hint"; lbl.textContent = "ignore";
     wrap.appendChild(cb); wrap.appendChild(lbl);
     // Send just this event to LSP now (testing) -- works even in dry run.
-    if (i.status === "create"){
+    if (i.status === "create" || i.status === "update"){
       const send = document.createElement("button");
       send.className = "ghost mini"; send.textContent = "Send to LSP";
       send.title = "Create just this event in Live Schedule Pro now, even with dry run on";
       send.onclick = () => sendEvent(i, send);
       wrap.appendChild(send);
+    }
+    // Locked by a hand edit in LSP: let the tool manage it again.
+    if (i.locked && i.record_id){
+      const un = document.createElement("button");
+      un.className = "ghost mini"; un.textContent = "Unlock";
+      un.title = "Let this tool manage the event again: the next sync re-applies the sheet over the LSP edits";
+      un.onclick = () => unlockEvent(i, un);
+      wrap.appendChild(un);
     }
     tr.children[5].appendChild(wrap);
     tb.appendChild(tr);
@@ -837,19 +855,32 @@ function renderPreview(items){
 }
 
 async function sendEvent(i, btn){
-  const n = (i.channels||[]).filter(c => c.status === "create").length;
-  const dry = lastStatus?.dry_run ? "\n\nDry run is ON, but this still creates it in LSP (the scheduled sync stays dry)." : "";
-  if (!confirm(`Create "${i.name}" in Live Schedule Pro now on ${n} channel(s)?${dry}\n\nStaged changes are saved first.`)) return;
+  const verb = i.status === "update" ? "Apply the sheet's changes to" : "Create";
+  const lines = (i.channels||[]).filter(c => ["create","update","delete"].includes(c.status))
+    .map(c => `  • ${c.name}: ${c.message||c.status}`).join("\n");
+  const dry = lastStatus?.dry_run ? "\n\nDry run is ON, but this still changes LSP (the scheduled sync stays dry)." : "";
+  if (!confirm(`${verb} "${i.name}" in Live Schedule Pro now?\n\n${lines}${dry}\n\nStaged changes are saved first.`)) return;
   await api("POST","/api/config", gather());
   btn.disabled = true; btn.textContent = "Sending…";
   const r = await api("POST","/api/send-event", {source_tab:i.source_tab, event_date:i.event_date,
     event_name:i.event_name, occurrence:i.occurrence||0});
   if (r.ok){ const s = r.summary;
-    toast(`Sent "${s.name}": created on ${s.created} channel(s)`
-      + `${s.skipped_existing?`, ${s.skipped_existing} already there`:""}${s.errors?`, ${s.errors} failed — see log`:""}`, 4000);
+    toast(`Sent "${s.name}": ` + [["created",s.created],["updated",s.updated],["removed",s.deleted]]
+      .filter(x => x[1]).map(x => `${x[0]} on ${x[1]}`).join(", ") + " channel(s)"
+      + `${s.errors?`, ${s.errors} failed — see log`:""}`, 4000);
     $("btnPreview").click();
   } else { toast("Send failed: " + r.error, 5000); btn.disabled = false; btn.textContent = "Send to LSP"; }
   refreshStatus(); loadScheduled();
+}
+
+async function unlockEvent(i, btn){
+  if (!confirm(`Unlock "${i.name}"?\n\nSomeone changed it in Live Schedule Pro (${i.message.replace(/^(Will lock|Locked): /,"")}). `
+    + `Unlocking lets this tool manage it again: the next sync puts the sheet's name and times back, `
+    + `and re-creates bookings that were deleted in LSP.`)) return;
+  btn.disabled = true;
+  const r = await api("POST","/api/unlock", {record_id: i.record_id});
+  if (r.ok){ toast(`Unlocked "${r.name}"`); $("btnPreview").click(); }
+  else { toast("Unlock failed: " + r.error, 5000); btn.disabled = false; }
 }
 
 let schedData = null;
@@ -874,7 +905,7 @@ function renderScheduled(){
     if (!groups.has(k)) groups.set(k, {...e, channels: [], statuses: new Set(), creators: new Set(), tool: 0});
     const g = groups.get(k);
     g.channels.push(e.channel); if (e.status) g.statuses.add(e.status);
-    if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++;
+    if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++; if (e.locked) g.locked = true;
   }
   let rows = [...groups.values()];
   if ($("schedToolOnly").checked) rows = rows.filter(g => g.tool);
@@ -884,7 +915,7 @@ function renderScheduled(){
   else if (!rows.length) html += `<div class="hint">No events to show.</div>`;
   else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th></tr></thead><tbody>`
     + rows.map(g => `<tr>
-      <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}</td>
+      <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
       <td class="mono">${fmt(g.start)}</td><td class="mono">${fmt(g.end)}</td>
       <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td></tr>`).join("")
@@ -935,12 +966,12 @@ $("btnRefreshCreated").onclick = () => loadScheduled();
 $("schedPast").onchange = () => loadScheduled();
 $("schedToolOnly").onchange = () => renderScheduled();
 $("btnDeleteCreated").onclick = async () => {
-  if (!confirm("Delete every event this tool created from Live Schedule Pro?\n\nOnly tool-created events are removed; anything else in LSP is left alone.")) return;
+  if (!confirm("Delete every event this tool created from Live Schedule Pro?\n\nOnly tool-created events are removed; anything else in LSP, and locked events changed by hand, are left alone.")) return;
   $("btnDeleteCreated").disabled = true; $("btnDeleteCreated").textContent = "Deleting…";
   const r = await api("POST","/api/delete-created");
   $("btnDeleteCreated").textContent = "Delete tool-created events";
   if (r.ok){ const s=r.summary;
-    toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}`);
+    toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}${s.skipped_locked?`; ${s.skipped_locked} locked left alone`:""}`);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);
   loadScheduled(); refreshStatus();
@@ -982,14 +1013,14 @@ $("dry_run").onchange = async () => {
 $("btnRun").onclick = async () => {
   const dry = lastStatus?.dry_run;
   if (!confirm(dry ? "Run a sync now? Dry run is ON — nothing will be created in LSP."
-                   : "Run a sync now? Dry run is OFF — this WILL create events in LSP.")) return;
+                   : "Run a sync now? Dry run is OFF — this WILL create and update events in LSP.")) return;
   await api("POST","/api/config", gather());
   $("btnRun").disabled = true; $("btnRun").textContent = "Running…";
   const r = await api("POST","/api/run");
   $("btnRun").disabled = false; $("btnRun").textContent = "Run now";
   if (r.ok){ const s=r.summary;
-    toast(s.dry_run ? `Dry run: would create ${s.created}, ${s.skipped_existing} already exist — nothing sent to LSP`
-                    : `Created ${s.created}, skipped ${s.skipped_existing} existing`, 4000); }
+    toast(s.dry_run ? `Dry run: would create ${s.created}, update ${s.updated}, remove ${s.deleted} — nothing sent to LSP`
+                    : `Created ${s.created}, updated ${s.updated}, removed ${s.deleted}${s.locked?`, ${s.locked} locked`:""}`, 4000); }
   else toast("Run failed: " + r.error, 5000);
   refreshStatus(); loadScheduled();
 };
