@@ -115,6 +115,11 @@ class SyncManager:
         self.last_error = None
         return summary
 
+    def send_event(self, tab: str, event_date: str, event_name: str, occurrence: int = 0) -> dict:
+        with self._lock:
+            _, syncer = self._components()
+            return syncer.send_one(tab, event_date, event_name, occurrence)
+
     def channels(self) -> list[dict]:
         return self._channels()[0]
 

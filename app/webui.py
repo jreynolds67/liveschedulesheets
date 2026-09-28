@@ -151,6 +151,21 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.post("/api/send-event")
+    @require_auth
+    def send_event():
+        """Create one previewed event in LSP now, even in dry run.
+        Body: {source_tab, event_date, event_name, occurrence?}"""
+        body = request.get_json(force=True, silent=True) or {}
+        if not body.get("source_tab") or not body.get("event_name"):
+            return jsonify({"ok": False, "error": "source_tab and event_name are required"})
+        try:
+            summary = manager.send_event(body["source_tab"], body.get("event_date") or "",
+                                         body["event_name"], int(body.get("occurrence") or 0))
+            return jsonify({"ok": True, "summary": summary})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     @app.get("/api/created")
     @require_auth
     def created():

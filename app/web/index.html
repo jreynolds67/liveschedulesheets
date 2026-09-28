@@ -128,7 +128,7 @@
 <header>
   <h1>Live Schedule&nbsp;Sheets</h1>
   <span id="statusBadge" class="badge warn">loading…</span>
-  <span id="dryBadge" class="badge warn" style="display:none" title="Nothing is created in or deleted from Live Schedule Pro">DRY RUN — LSP is not changed</span>
+  <span id="dryBadge" class="badge warn" style="display:none" title="Syncs don't create anything in Live Schedule Pro. Only Preview's Send to LSP and the cleanup button change it.">DRY RUN — LSP is not changed</span>
   <div class="spacer"></div>
   <div class="btns">
     <button id="btnTest" class="ghost">Test connection</button>
@@ -227,7 +227,7 @@
     <div class="grid2">
       <div><label>Sync interval (seconds)</label><input type="number" id="poll_interval" min="60" /></div>
       <div><label>Dry run</label>
-        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: log what would happen; nothing is created in or deleted from LSP. Applies immediately.</span></div></div>
+        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: syncs only log what they would create. Only Preview's <b>Send to LSP</b> and the cleanup button change LSP. Applies immediately.</span></div></div>
     </div>
     <details><summary>Advanced: labels &amp; date parsing</summary>
       <div class="body" style="padding:14px 0 0;">
@@ -777,7 +777,6 @@ async function refreshStatus(){
     $("dry_run").checked = !!s.dry_run; $("dry_run").disabled = true;
     $("dryHint").textContent = `Forced ${s.dry_run?"ON":"OFF"} by the DRY_RUN environment variable — remove it to use this toggle`;
   }
-  if (s.dry_run) $("btnDeleteCreated").disabled = true;
   let html = "";
   if (s.config_error) html += `<div style="color:var(--err)">⚠ ${s.config_error}</div>`;
   html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"} · tool-created events tracked: <b>${s.created_count??0}</b></div>`;
@@ -824,9 +823,33 @@ function renderPreview(items){
     cb.onchange = () => { upsertOv(i, {ignore: cb.checked || null}); toast(cb.checked?"Will be ignored — Save to apply":"Ignore cleared"); };
     const lbl = document.createElement("span"); lbl.className = "hint"; lbl.textContent = "ignore";
     wrap.appendChild(cb); wrap.appendChild(lbl);
+    // Send just this event to LSP now (testing) -- works even in dry run.
+    if (i.status === "create"){
+      const send = document.createElement("button");
+      send.className = "ghost mini"; send.textContent = "Send to LSP";
+      send.title = "Create just this event in Live Schedule Pro now, even with dry run on";
+      send.onclick = () => sendEvent(i, send);
+      wrap.appendChild(send);
+    }
     tr.children[5].appendChild(wrap);
     tb.appendChild(tr);
   });
+}
+
+async function sendEvent(i, btn){
+  const n = (i.channels||[]).filter(c => c.status === "create").length;
+  const dry = lastStatus?.dry_run ? "\n\nDry run is ON, but this still creates it in LSP (the scheduled sync stays dry)." : "";
+  if (!confirm(`Create "${i.name}" in Live Schedule Pro now on ${n} channel(s)?${dry}\n\nStaged changes are saved first.`)) return;
+  await api("POST","/api/config", gather());
+  btn.disabled = true; btn.textContent = "Sending…";
+  const r = await api("POST","/api/send-event", {source_tab:i.source_tab, event_date:i.event_date,
+    event_name:i.event_name, occurrence:i.occurrence||0});
+  if (r.ok){ const s = r.summary;
+    toast(`Sent "${s.name}": created on ${s.created} channel(s)`
+      + `${s.skipped_existing?`, ${s.skipped_existing} already there`:""}${s.errors?`, ${s.errors} failed — see log`:""}`, 4000);
+    $("btnPreview").click();
+  } else { toast("Send failed: " + r.error, 5000); btn.disabled = false; btn.textContent = "Send to LSP"; }
+  refreshStatus(); loadScheduled();
 }
 
 let schedData = null;
@@ -843,8 +866,7 @@ function renderScheduled(){
   if (!r) return;
   const toolCount = r.events.filter(e => e.by_tool).length;
   // Delete covers everything tool-created that is tracked, not just what's shown.
-  $("btnDeleteCreated").disabled = !!lastStatus?.dry_run
-    || !(lastStatus?.created_count || toolCount || r.missing.length);
+  $("btnDeleteCreated").disabled = !(lastStatus?.created_count || toolCount || r.missing.length);
   // One row per event: the same name + start + room across its channels.
   const groups = new Map();
   for (const e of r.events){
@@ -917,8 +939,7 @@ $("btnDeleteCreated").onclick = async () => {
   $("btnDeleteCreated").disabled = true; $("btnDeleteCreated").textContent = "Deleting…";
   const r = await api("POST","/api/delete-created");
   $("btnDeleteCreated").textContent = "Delete tool-created events";
-  if (r.ok && r.summary.dry_run) toast(`Dry run: would delete ${r.summary.would_delete} — nothing removed from LSP`, 4000);
-  else if (r.ok){ const s=r.summary;
+  if (r.ok){ const s=r.summary;
     toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}`);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);

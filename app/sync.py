@@ -140,6 +140,41 @@ class Syncer:
             return summary
 
         summary["parsed"] = len(items)
+        self._execute(items, summary, live=not self.cfg.runtime.dry_run)
+        self.state.save()
+        log.info(
+            "Pass complete: parsed=%(parsed)d created=%(created)d existing=%(skipped_existing)d "
+            "out-of-window=%(skipped_window)d no-channel=%(no_channel)d errors=%(errors)d",
+            summary,
+        )
+        return summary
+
+    def send_one(self, tab: str, event_date: str, event_name: str, occurrence: int = 0) -> dict:
+        """Create one sheet event in LSP now (Preview's per-event send, for testing).
+
+        Always live, even with dry run on: it is an explicit, single-event
+        action and the background loop stays dry. Uses the same plan and
+        de-duplication as a pass, so channels it is already on are skipped
+        and a later pass won't create it again.
+        """
+        want = (event_date, event_name.strip().lower(), occurrence)
+        item = next((i for i in self.plan()
+                     if i.event.source_tab == tab and i.event.override_key() == want), None)
+        if item is None:
+            raise LspError("That event is no longer in the sheet — refresh the preview")
+        if item.status != CREATE:
+            raise LspError(f"Nothing to send: {item.message or item.status}")
+        summary = {"name": item.lsp_name, "created": 0, "skipped_existing": 0, "errors": 0}
+        self._execute([item], summary, live=True, force=True)
+        self.state.save()
+        log.info("Sent %r to LSP from preview: created=%d existing=%d errors=%d",
+                 item.lsp_name, summary["created"], summary["skipped_existing"], summary["errors"])
+        return summary
+
+    def _execute(self, items: list[PlanItem], summary: dict, live: bool, force: bool = False) -> None:
+        """Create the CREATE targets of `items` (or just log them when not
+        `live`), recording each in state and counting into `summary`.
+        `force` lets the LSP client write even when it was built read-only."""
         for item in items:
             if item.status == OUT_OF_WINDOW:
                 summary["skipped_window"] += 1
@@ -159,14 +194,14 @@ class Syncer:
                     continue
 
                 # t.status == CREATE
-                if self.cfg.runtime.dry_run:
+                if not live:
                     log.info("[DRY RUN] would create %r on %s (PCR %s) %s -> %s",
                              item.lsp_name, t.channel_name, item.event.pcr,
                              item.event.start.isoformat(), item.event.end.isoformat())
                     summary["created"] += 1
                     continue
                 try:
-                    result = self.lsp.add_event(item.event, t.channel_id, item.lsp_name)
+                    result = self.lsp.add_event(item.event, t.channel_id, item.lsp_name, force=force)
                 except LspError:
                     log.exception("Failed to create event %r on %s", item.lsp_name, t.channel_name)
                     summary["errors"] += 1
@@ -180,14 +215,6 @@ class Syncer:
                                       "created_by_tool": True,
                                       "pcr": item.event.pcr, "source_tab": item.event.source_tab})
                 summary["created"] += 1
-
-        self.state.save()
-        log.info(
-            "Pass complete: parsed=%(parsed)d created=%(created)d existing=%(skipped_existing)d "
-            "out-of-window=%(skipped_window)d no-channel=%(no_channel)d errors=%(errors)d",
-            summary,
-        )
-        return summary
 
     # -- cleanup (testing) --------------------------------------------------
 
@@ -257,17 +284,15 @@ class Syncer:
         """Delete from LSP every event this tool created, then forget them.
 
         Only touches events tagged as tool-created in local state, so events
-        already present in LSP (or made by hand) are never removed.
+        already present in LSP (or made by hand) are never removed. Runs even
+        with dry run on, so events sent from Preview for testing can be
+        cleaned up without taking the loop live.
         """
-        summary = {"deleted": 0, "failed": 0, "errors": [], "dry_run": self.cfg.runtime.dry_run}
-        if self.cfg.runtime.dry_run:
-            summary["would_delete"] = len(self.state.tool_created())
-            log.info("[DRY RUN] would delete %d tool-created event(s)", summary["would_delete"])
-            return summary
+        summary = {"deleted": 0, "failed": 0, "errors": []}
         for key, info in self.state.tool_created():
             event_id = info.get("event_id")
             try:
-                self.lsp.remove_event(event_id)
+                self.lsp.remove_event(event_id, force=True)
                 self.state.unmark(key)
                 summary["deleted"] += 1
                 log.info("Deleted tool-created event %r (id=%s)", info.get("name"), event_id)

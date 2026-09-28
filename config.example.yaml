@@ -116,7 +116,8 @@ lsp:
 runtime:
   poll_interval_seconds: 900   # 15 minutes
   run_once: false              # true = one pass then exit (testing / cron)
-  live: false                  # false = DRY RUN: log what would be created, change nothing
-                               # in LSP. Set by the UI's Dry run toggle.
+  live: false                  # false = DRY RUN: syncs log what would be created and change
+                               # nothing in LSP (Preview's per-event "Send to LSP" and the
+                               # cleanup button still act). Set by the UI's Dry run toggle.
   state_file: "/data/state.json"   # mount a volume so it survives restarts
   log_level: "INFO"

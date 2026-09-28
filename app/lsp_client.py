@@ -147,12 +147,15 @@ class LspClient:
             )
         return resp.json()
 
-    def _check_writable(self, action: str) -> None:
-        if self.read_only:
+    def _check_writable(self, action: str, force: bool = False) -> None:
+        # `force`: an explicit one-off operator action (Preview's per-event
+        # send, cleanup) that is allowed while dry run is on.
+        if self.read_only and not force:
             raise LspError(f"Dry run is on: refusing to {action} in LSP")
 
-    def add_event(self, ev: ScheduledEvent, channel_id: str, name: str) -> dict:
-        self._check_writable(f"create event {name!r}")
+    def add_event(self, ev: ScheduledEvent, channel_id: str, name: str,
+                  force: bool = False) -> dict:
+        self._check_writable(f"create event {name!r}", force)
         body = {
             "Name": name,
             "Start": _iso(ev.start),
@@ -166,9 +169,9 @@ class LspClient:
             )
         return resp.json()
 
-    def remove_event(self, event_id: str) -> None:
+    def remove_event(self, event_id: str, force: bool = False) -> None:
         """Delete a single event by its LSP id (DELETE /api/v1/RemoveEvent)."""
-        self._check_writable(f"delete event {event_id}")
+        self._check_writable(f"delete event {event_id}", force)
         resp = self._request(
             "DELETE", "/api/v1/RemoveEvent", json={"EventId": event_id}
         )

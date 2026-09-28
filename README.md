@@ -61,12 +61,20 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
 - Toggle **Dry run** and the **sync interval**. Dry run is **on** until you
   switch it off in the UI (the switch saves immediately and asks for
   confirmation before going live). While it's on, a *DRY RUN* badge shows in the
-  header, passes and **Run now** only report what they *would* create, and
-  nothing is created in or deleted from LSP. It's stored as `runtime.live`
+  header, and passes and **Run now** only report what they *would* create. The
+  only things that change LSP while it's on are the explicit one-off actions:
+  Preview's **Send to LSP** and the cleanup button. It's stored as `runtime.live`
   (default `false`); a `DRY_RUN` env var, if set, overrides the toggle.
 - **Preview events** — see exactly what the next sync would create/skip, with no
   changes made. Each row has an inline **PCR selector** and an **Ignore**
   checkbox for fixing individual events.
+- **Send one event to LSP** — rows that would be created have a **Send to LSP**
+  button that creates just that event now, on all its channels, so you can test
+  one booking at a time. It works **even with dry run on** (the scheduled sync
+  stays dry), is recorded in `state.json` like any tool-created event (so a
+  later pass won't duplicate it), and can be removed with the cleanup button.
+  Also available as `POST /api/send-event` with
+  `{source_tab, event_date, event_name, occurrence}` from a preview row.
 - Stage **Manual overrides** — per-event fixes (matched by tab + date + event
   name): assign/correct the PCR, override the start time, or ignore an
   event. They persist in the overrides list until removed.
@@ -222,8 +230,9 @@ docker run --rm -p 8080:8080 \
 ```
 
 Turn on **Dry run** in the UI (or `-e DRY_RUN=true`, which overrides the UI) to
-log what would be created without touching LSP — no events are created or
-deleted, even by the cleanup button. Headless single pass (cron/testing):
+log what would be created without the sync touching LSP. Preview's **Send to
+LSP** button and the cleanup button still act on LSP, so you can test one
+event at a time and clean up afterwards. Headless single pass (cron/testing):
 
 ```bash
 docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
@@ -254,7 +263,8 @@ Pro* card (and `POST /api/delete-created`)
 removes **only** the events this tool created — read from the `created_by_tool`
 entries in `state.json` and deleted via `DELETE /api/v1/RemoveEvent`. After a
 delete they are forgotten from state, so a later pass will re-create them. This
-lets you iterate during testing without wiping hand-made events in LSP.
+lets you iterate during testing without wiping hand-made events in LSP. It works
+with dry run on too, to clean up events sent one at a time from Preview.
 
 The card's event list comes from `GET /api/scheduled?past_days=N`, which calls
 `GetEvents` for each mapped PCR channel and marks events whose id matches a
