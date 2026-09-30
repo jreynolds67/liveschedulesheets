@@ -119,6 +119,15 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.get("/api/lsp-event/<event_id>")
+    @require_auth
+    def lsp_event(event_id):
+        """One LSP event's raw JSON (variables and all), for troubleshooting."""
+        try:
+            return jsonify({"ok": True, "event": manager.lsp_event(event_id)})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     @app.get("/api/tabs")
     @require_auth
     def tabs():

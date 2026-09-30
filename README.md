@@ -174,8 +174,9 @@ Each event on a PCR channel has a text variable named **Event Name**
 default (e.g. `Event XX`). The tool fills it in two ways:
 
 - **On each event (always).** After creating or updating an event, the tool
-  reads the event's variables. These are its workflow `Customization`
-  parameters and its labels' parameters. If the one named `Event Name`
+  reads the event's variables. These are its Vantage workflow variables
+  (`Customization.Conditions`, value in `ConditionValue.Text`; an empty value
+  means the variable's default), then any workflow or label parameters. If the one named `Event Name`
   (ignoring case and spacing) doesn't hold the event name, the tool sets it
   with `PATCH /api/v1/PatchEvent/{id}`. Events the tool created earlier that
   still hold the default show in Preview as **update** (`Will update Event
@@ -198,7 +199,9 @@ have. Events are scheduled either way. Leave the setting blank to turn all
 of this off.
 
 Also available as `GET /api/event-name-links` (check) and
-`POST /api/event-name-links` (link now).
+`POST /api/event-name-links` (link now). To see exactly what LSP holds for an
+event, click **raw** next to its value in the *Scheduled* list
+(`GET /api/lsp-event/<event id>`, read-only).
 
 ---
 

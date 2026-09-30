@@ -116,7 +116,8 @@ lsp:
   verify_ssl: true                                     # false only for self-signed certs
   # The text variable on each event that gets the event name (e.g. "VB STANFORD
   # PITT") instead of its default (e.g. "Event XX"). Matched by name, ignoring
-  # case, in the event's workflow variables and label parameters. The tool
+  # case, in the event's Vantage workflow variables (Customization.Conditions)
+  # and its parameters. The tool
   # sets it on every event it creates or updates. Where a channel's labels
   # offer it, it also points the channel's "sync event name with label
   # parameter" option at it. Blank = off.

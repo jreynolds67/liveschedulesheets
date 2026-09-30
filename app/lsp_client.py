@@ -181,6 +181,15 @@ class LspClient:
             )
         return resp.json()
 
+    def get_event(self, event_id: str) -> Optional[dict]:
+        """One event exactly as LSP returns it (GetFilteredEvents), or None."""
+        resp = self._request("GET", "/api/v1/GetFilteredEvents", params={"eventIds": event_id})
+        if resp.status_code != 200:
+            raise LspError(f"GetFilteredEvents failed for {event_id} ({resp.status_code}): "
+                           f"{resp.text[:300]}")
+        data = resp.json()
+        return (data[0] if data else None) if isinstance(data, list) else data
+
     def _check_writable(self, action: str, force: bool = False) -> None:
         # `force`: an explicit one-off operator action (Preview's per-event
         # send, cleanup) that is allowed while dry run is on.

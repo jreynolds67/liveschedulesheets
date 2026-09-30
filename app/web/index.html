@@ -938,7 +938,7 @@ function renderScheduled(){
   else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>${esc(r.variable || "Variable")}</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th><th></th></tr></thead><tbody>`
     + rows.map((g, gi) => `<tr>
       <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
-      <td>${varCell(g)}</td>
+      <td>${varCell(g)} <a class="hint" href="/api/lsp-event/${encodeURIComponent(g.ids[0])}" target="_blank" title="This event's raw data from LSP">raw</a></td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
       <td class="mono nowrap">${fmtWhen(g.start)}</td><td class="mono nowrap">${fmtWhen(g.end)}</td>
       <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td>

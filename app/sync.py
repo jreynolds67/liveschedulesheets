@@ -743,11 +743,13 @@ class Syncer:
         # Newest first: the likeliest to reflect the channel's current workflow.
         events = sorted(events, key=lambda e: e.get("Start") or "", reverse=True)
         for e in events:
-            p = _variable_param(e, variable)
-            if p is not None:
-                default = " ".join(t for t in ((p.get("Default") or {}).get("Text") or []) if t)
+            found = _variable(e, variable)
+            if found is not None:
+                holder, is_var = found
+                default = _variable_default(holder, is_var)
+                kind = "workflow variable" if is_var else "parameter"
                 return {"status": "per_event", "message": (
-                    f"“{p.get('Name')}” is on its events"
+                    f"“{holder.get('Name')}” {kind} is on its events"
                     + (f" (default “{default}”)" if default else "")
                     + "; the tool sets it on each event it creates or updates")}
         seen = [n for n in dict.fromkeys(
@@ -954,37 +956,56 @@ def _find_variable(labels: list[dict], variable: str) -> tuple[Optional[dict], l
     return None, seen
 
 
-def _parameter_lists(e: dict):
-    """Every parameter list on an LSP event that can hold a variable: its
-    workflow Customization's, then each of its labels'."""
+def _variables(e: dict):
+    """(name, holder, is_workflow_variable) for each variable on an LSP event:
+    its workflow (Vantage) variables -- Customization.Conditions, value in
+    ConditionValue.Text -- then its workflow and label parameters (value in
+    Text)."""
     cust = e.get("Customization") or {}
-    yield cust.get("Parameters") or []
-    for label in (e.get("Labels") or []) + (cust.get("Labels") or []):
-        yield (label or {}).get("Parameters") or []
+    for c in cust.get("Conditions") or []:
+        yield (c or {}).get("Name") or "", c or {}, True
+    params = [cust.get("Parameters") or []]
+    params += [(label or {}).get("Parameters") or []
+               for label in (e.get("Labels") or []) + (cust.get("Labels") or [])]
+    for plist in params:
+        for p in plist:
+            yield (p or {}).get("Name") or "", p or {}, False
 
 
-def _variable_param(e: dict, variable: str) -> Optional[dict]:
-    """The parameter named `variable` (ignoring case and spacing) on an event."""
+def _variable(e, variable: str) -> Optional[tuple[dict, bool]]:
+    """(holder, is_workflow_variable) for the variable named `variable`
+    (ignoring case and spacing) on an event."""
     want = " ".join((variable or "").split()).lower()
     if not want or not isinstance(e, dict):
         return None
-    for params in _parameter_lists(e):
-        for p in params:
-            if " ".join(((p or {}).get("Name") or "").split()).lower() == want:
-                return p
+    for name, holder, is_var in _variables(e):
+        if " ".join(name.split()).lower() == want:
+            return holder, is_var
     return None
 
 
 def _variable_names(e: dict) -> list[str]:
-    return [(p or {}).get("Name") or "" for params in _parameter_lists(e) for p in params]
+    return [name for name, _, _ in _variables(e)]
+
+
+def _texts(value) -> str:
+    return " ".join(t for t in ((value or {}).get("Text") or []) if t)
+
+
+def _variable_default(holder: dict, is_var: bool) -> str:
+    box = (holder.get("ConditionValue") or {}) if is_var else holder
+    return _texts(box.get("Default"))
 
 
 def _variable_value(e: dict, variable: str) -> Optional[str]:
-    """An LSP event's event-name variable value; None if it has no such variable."""
-    p = _variable_param(e, variable)
-    if p is None:
+    """An LSP event's event-name variable value (its default when it has no
+    value of its own); None if the event has no such variable."""
+    found = _variable(e, variable)
+    if found is None:
         return None
-    return " ".join(t for t in (p.get("Text") or []) if t)
+    holder, is_var = found
+    own = _texts(holder.get("ConditionValue") if is_var else holder)
+    return own or _variable_default(holder, is_var)
 
 
 def _with_variable(e, variable: str, value: str) -> Optional[dict]:
@@ -995,7 +1016,11 @@ def _with_variable(e, variable: str, value: str) -> Optional[dict]:
     if current is None or current.strip() == value.strip():
         return None
     fields = {k: copy.deepcopy(e[k]) for k in ("Customization", "Labels") if e.get(k)}
-    _variable_param(fields, variable)["Text"] = [value]
+    holder, is_var = _variable(fields, variable)
+    if is_var:
+        holder["ConditionValue"] = holder.get("ConditionValue") or {}
+        holder = holder["ConditionValue"]
+    holder["Text"] = [value]
     return fields
 
 

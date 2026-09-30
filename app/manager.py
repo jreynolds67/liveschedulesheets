@@ -142,6 +142,10 @@ class SyncManager:
             syncer = self._lsp_syncer()
             return syncer.event_name_links(apply=apply, force=apply)
 
+    def lsp_event(self, event_id: str) -> Optional[dict]:
+        with self._lock:
+            return self._lsp_syncer().lsp.get_event(event_id)
+
     def created_events(self) -> list[dict]:
         with self._lock:
             syncer = self._lsp_syncer()
