@@ -114,13 +114,10 @@ event_overrides: {}
 lsp:
   base_url: "https://live-schedule-pro.example.com"   # no trailing slash
   verify_ssl: true                                     # false only for self-signed certs
-  # The text variable on each event that gets the event name (e.g. "VB STANFORD
-  # PITT") instead of its default (e.g. "Event XX"). Matched by name, ignoring
-  # case, in the event's Vantage workflow variables (Customization.Conditions)
-  # and its parameters. The tool
-  # sets it on every event it creates or updates. Where a channel's labels
-  # offer it, it also points the channel's "sync event name with label
-  # parameter" option at it. Blank = off.
+  # The Vantage workflow variable on each event that gets the event name from
+  # the sheet (e.g. "VB STANFORD PITT") instead of its default (e.g. "Event
+  # XX"). Matched by name, ignoring case. The tool sets it on every event it
+  # creates or updates. Blank = off.
   event_name_variable: "Event Name"
 
 runtime:

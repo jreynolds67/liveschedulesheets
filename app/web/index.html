@@ -209,13 +209,10 @@
       <span class="hint" id="channelHint"></span></div>
     <div><label>Event name variable</label>
       <input type="text" id="lsp_event_var" placeholder="Event Name" />
-      <div class="hint" style="margin-top:6px">The variable that gets the event's name (e.g. “VB STANFORD PITT”)
-        instead of its default. The tool sets it on every event it creates or updates. Where a channel's labels
-        offer it, the channel's <i>sync event name</i> option is also pointed at it. <b>Check channels</b> shows
-        where each channel's variable was found. Leave blank to turn this off.</div></div>
+      <div class="hint" style="margin-top:6px">The Vantage workflow variable that gets the event's name from the
+        sheet (e.g. “VB STANFORD PITT”) on every event the tool creates or updates. Leave blank to turn this off.</div></div>
     <div id="varBox" class="hint"></div>
-    <div class="row"><button id="btnCheckVar" class="ghost">Check channels</button>
-      <button id="btnLinkVar" class="ghost">Link now</button></div>
+    <div class="row"><button id="btnCheckVar" class="ghost">Check channels</button></div>
   </div></section>
 
   <!-- Scheduling -->
@@ -938,7 +935,7 @@ function renderScheduled(){
   else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>${esc(r.variable || "Variable")}</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th><th></th></tr></thead><tbody>`
     + rows.map((g, gi) => `<tr>
       <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
-      <td>${varCell(g)} <a class="hint" href="/api/lsp-event/${encodeURIComponent(g.ids[0])}" target="_blank" title="This event's raw data from LSP">raw</a></td>
+      <td>${varCell(g)}</td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
       <td class="mono nowrap">${fmtWhen(g.start)}</td><td class="mono nowrap">${fmtWhen(g.end)}</td>
       <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td>
@@ -1008,30 +1005,23 @@ async function loadChannels(){
   }
 }
 
-const VAR_STATUS = {linked:["exists","linked"], linked_now:["create","linked now"], needs_link:["update","not linked"], per_event:["exists","set per event"],
-  missing:["no_channel","no variable"], error:["error","error"], off:["ignore","off"]};
-function renderVarLinks(r){
+const VAR_STATUS = {found:["exists","found"], missing:["no_channel","not found"], error:["error","error"], off:["ignore","off"]};
+function renderVarChannels(r){
   if (!r.ok){ $("varBox").innerHTML = `<span style="color:var(--err)">${esc(r.error||"")}</span>`; return; }
   if (!r.channels.length){ $("varBox").textContent = "No PCR channels found in LSP."; return; }
-  $("varBox").innerHTML = `<div style="overflow-x:auto"><table><thead><tr><th>Channel</th><th>PCR</th><th>Status</th><th></th></tr></thead><tbody>`
+  $("varBox").innerHTML = `<div style="overflow-x:auto"><table><thead><tr><th>Channel</th><th>PCR</th><th>${esc(r.variable || "Variable")}</th><th></th></tr></thead><tbody>`
     + r.channels.map(c => { const [cls, txt] = VAR_STATUS[c.status] || ["exists", c.status];
       return `<tr><td>${esc(c.name)}</td><td>${esc(c.pcr)}</td><td><span class="pill ${cls}">${txt}</span></td><td class="hint">${esc(c.message||"")}</td></tr>`; }).join("")
     + `</tbody></table></div>`;
 }
-async function checkVarLinks(){
+async function checkVarChannels(){
   await api("POST","/api/config", gather());
   $("varBox").textContent = "Checking channels…";
-  renderVarLinks(await api("GET","/api/event-name-links"));
+  renderVarChannels(await api("GET","/api/event-name-channels"));
 }
 
 // Wire up buttons
-$("btnCheckVar").onclick = checkVarLinks;
-$("btnLinkVar").onclick = async () => {
-  if (!confirm("Set every PCR channel whose labels offer this variable to copy the event name into it?\n\nThis changes those channels' settings in LSP now, even with dry run on. (Workflow variables are set per event instead.)")) return;
-  await api("POST","/api/config", gather());
-  $("varBox").textContent = "Linking…";
-  renderVarLinks(await api("POST","/api/event-name-links"));
-};
+$("btnCheckVar").onclick = checkVarChannels;
 $("btnAddPcr").onclick = () => addPcrRow();
 $("btnAddCap").onclick = () => addCapRow();
 $("btnRefreshTabs").onclick = () => loadTabs();
@@ -1103,7 +1093,7 @@ $("btnRun").onclick = async () => {
   await loadConfig();
   await refreshStatus();
   loadChannels();
-  api("GET","/api/event-name-links").then(renderVarLinks);
+  api("GET","/api/event-name-channels").then(renderVarChannels);
   loadTabs();
   loadScheduled();
   setInterval(refreshStatus, 15000);

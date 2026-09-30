@@ -51,11 +51,10 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   Channels are looked up live every pass, so added or renamed channels are
   picked up automatically; the UI lists which channels each PCR matches.
   Below the mapping, set the **Event name variable** (default `Event Name`).
-  **Check channels** lists each PCR channel as **set per event**, **linked**,
-  **not linked** or **no variable**, with where the variable was found.
-  **Link now** links the channels that can be linked straight away, even
-  with dry run on. The *Scheduled in Live Schedule Pro* list shows each
-  event's variable value, in amber when it isn't the event name.
+  **Check channels** lists each PCR channel as **found** or **not found**,
+  according to whether its events carry that variable. The *Scheduled in
+  Live Schedule Pro* list shows each event's value, in amber when it isn't
+  the event name.
 - Pick tabs and **check and choose rows** in *Sheet tabs & row mapping*. Every
   visible tab has a button; the selected one has an **Include this tab**
   toggle and is shown as a grid, with the detected Event / Date / Start / PCR
@@ -169,44 +168,35 @@ allow-list. Turn individual tabs off in the UI (**Include this tab** in the
 
 ## The Event Name variable
 
-Each PCR channel's workflow has a text variable named **Event Name**
+Each PCR channel's Vantage workflow has a text variable named **Event Name**
 (`lsp.event_name_variable`). The channel stores it with no value and a default
 (e.g. `Event XX`). When an event is created, LSP copies the channel's
 variables into it, so a new event starts out holding that default. The tool
-replaces it with the event name in two ways:
+replaces it with the event name from the sheet (the `EVENT` cell, plus any
+event name prefix), the same on every channel. Vantage adds the channel,
+date and time itself.
 
-- **On each event (always).** After creating an event, the tool reads it
-  back from LSP. It uses the id in LSP's `AddEvent` reply, or, if the reply
-  has none, finds the new event on its channel by name and start. It then
-  sets the variable in the event's Vantage workflow variables
-  (`Customization.Conditions`, value in `ConditionValue.Text`; an empty value
-  means the default), or in a workflow or label parameter of that name. It
-  sends one `PATCH /api/v1/PatchEvent/{id}`, then reads the event back
-  (`GetFilteredEvents`) to check LSP kept the value. An event updated from
-  the sheet gets the same. Events the tool created earlier that still hold
-  the default show in Preview as **update** (`Will update Event Name`) and
-  are fixed on the next sync. Each booking is tried once per name
-  (`variable_sent` in `state.json`), so a value LSP won't keep isn't re-sent
-  every pass; the log says `LSP didn't keep …` if that happens.
-- **Channel sync (where available).** If a channel's labels offer the
-  parameter (`GET /api/v1/GetAvailableSyncEventNameLabelsParametersForChannel`),
-  the channel's *sync event name with label parameter* option is pointed at it
-  (`POST /api/v1/SetSyncEventNameLabelParametersForChannel`), so LSP fills it
-  in too. Workflow variables aren't offered there, so those channels show
-  **set per event**.
+After creating an event, the tool reads it back from LSP. It uses the id in
+LSP's `AddEvent` reply, or, if the reply has none, finds the new event on its
+channel by name and start. It then sets the variable in the event's workflow
+variables (`Customization.Conditions`, value in `ConditionValue.Text`; an
+empty value means the default) with one `PATCH /api/v1/PatchEvent/{id}`, and
+reads the event back (`GetFilteredEvents`) to check LSP kept it. An event
+updated from the sheet gets the same. An event the tool created earlier that
+still holds the default shows in Preview as **update** (`Will update Event
+Name`) and is fixed on the next sync. Each booking is tried once per name
+(`variable_sent` in `state.json`), so a value LSP won't keep isn't re-sent
+every pass; the log says `LSP didn't keep …` if that happens.
 
-The value is the LSP event name: the sheet's `EVENT` cell plus any event
-name prefix. Both run only when a sync is live; with dry run on, Preview's
-**SEND TO LSP** does both for that one event. **Check channels** reads each
-channel's labels and, if needed, its events. It then reports where the
-variable was found and, if it wasn't, which variables the channel's events do
-have. Events are scheduled either way. Leave the setting blank to turn all
-of this off.
+This happens only when a sync is live; with dry run on, Preview's **SEND TO
+LSP** does it for that one event. **Check channels** reads each PCR
+channel's newest events. It shows **not found** if they don't carry the
+variable, listing the variables they do have. Events are scheduled either
+way. Leave the setting blank to turn this off.
 
-Also available as `GET /api/event-name-links` (check) and
-`POST /api/event-name-links` (link now). To see exactly what LSP holds for an
-event, click **raw** next to its value in the *Scheduled* list
-(`GET /api/lsp-event/<event id>`, read-only).
+Also available as `GET /api/event-name-channels`. To see exactly what LSP
+holds for an event, `GET /api/lsp-event/<event id>` returns it as LSP's API
+does (read-only).
 
 ---
 

@@ -135,12 +135,10 @@ class SyncManager:
             auth_mode = syncer.lsp.auth_mode
         return [{"Id": c.get("Id"), "Name": c.get("Name")} for c in chans], auth_mode
 
-    def event_name_links(self, apply: bool = False) -> dict:
-        """The PCR channels' event-name variable links; `apply` links the rest
-        now (an explicit operator action, so it works with dry run on)."""
+    def event_name_channels(self) -> dict:
+        """Whether each PCR channel's events carry the event-name variable."""
         with self._lock:
-            syncer = self._lsp_syncer()
-            return syncer.event_name_links(apply=apply, force=apply)
+            return self._lsp_syncer().event_name_channels()
 
     def lsp_event(self, event_id: str) -> Optional[dict]:
         with self._lock:
