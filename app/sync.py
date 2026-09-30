@@ -25,7 +25,7 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from dateutil import parser as dateparser
 
@@ -84,6 +84,7 @@ class PlanItem:
     record_id: Optional[str] = None
     locked: bool = False
     new_lock: str = ""       # set when this pass finds a hand edit in LSP
+    started: bool = False    # tracked and already started: its record is frozen
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +101,8 @@ class PlanItem:
             "source_column": self.event.source_column,
             "event_date": self.event.event_date,
             "occurrence": self.event.occurrence,
+            "same_day": self.event.same_day,
+            "sheet_start": self.event.sheet_start,
             "record_id": self.record_id,
             "locked": self.locked or bool(self.new_lock),
         }
@@ -135,7 +138,8 @@ class _LspView:
 
 class Syncer:
     def __init__(self, cfg: Config, reader: Optional[SheetReader], lsp: LspClient, state: State,
-                 stop: Optional[threading.Event] = None):
+                 stop: Optional[threading.Event] = None,
+                 heartbeat: Optional[Callable[[], None]] = None):
         # cfg may be an LspSettings and reader None for LSP-only use (channels,
         # scheduled view, cleanup) before the sheet side is configured.
         self.cfg = cfg
@@ -144,6 +148,8 @@ class Syncer:
         self.state = state
         # Set on shutdown: a pass stops between LSP writes (state saved).
         self.stop = stop or threading.Event()
+        # Called as a pass makes progress, so a long pass isn't taken for a stuck one.
+        self.heartbeat = heartbeat or (lambda: None)
         self.sheet_errors: list[str] = []
 
     # -- planning (read-only) ----------------------------------------------
@@ -161,6 +167,7 @@ class Syncer:
         wanted |= {cid for rec in self.state.events.values() for cid in rec.get("bookings", {})}
         view = _LspView(self.lsp, wanted)
         self._view = view  # _execute rebaselines snapshots from it
+        self.heartbeat()
 
         now = datetime.now(timezone.utc)
         matches = self._match(events, now)
@@ -171,7 +178,7 @@ class Syncer:
             if rid is None:
                 items.append(self._plan_new(ev, by_pcr, view, planned_keys))
             else:
-                items.append(self._plan_tracked(ev, rid, by_pcr, names, view, now))
+                items.append(self._plan_tracked(ev, rid, by_pcr, names, view, now, planned_keys))
 
         matched = set(matches.values())
         for rid, rec in self.state.events.items():
@@ -184,7 +191,8 @@ class Syncer:
     def _match(self, events: list[ScheduledEvent], now: datetime) -> dict[int, str]:
         """Pair sheet events with tracked records: index -> record id.
 
-        1. same tab + date + name + occurrence (a time or PCR change);
+        1. same tab + date + name, and the same game that day (a time or PCR
+           change; see ScheduledEvent.is_same_game for doubleheaders);
         2. same tab + name, when exactly one unmatched event and one unmatched
            record share it (a date change);
         3. same tab + column + date, likewise (a name change).
@@ -193,15 +201,18 @@ class Syncer:
         """
         out: dict[int, str] = {}
         used: set[str] = set()
-        exact: dict[tuple, str] = {}
+        same_day: dict[tuple, list[str]] = defaultdict(list)
         for rid, rec in self.state.events.items():
-            exact.setdefault((rec["tab"], rec["date"], rec["name"].strip().lower(),
-                              rec.get("occurrence", 0)), rid)
+            same_day[(rec["tab"], rec["date"], rec["name"].strip().lower())].append(rid)
         for i, ev in enumerate(events):
-            rid = exact.get((ev.source_tab, *ev.override_key()))
-            if rid and rid not in used:
-                out[i] = rid
-                used.add(rid)
+            for rid in same_day.get((ev.source_tab, ev.event_date, ev.name.strip().lower()), []):
+                rec = self.state.events[rid]
+                if rid not in used and ev.is_same_game(rec.get("occurrence", 0),
+                                                       rec.get("same_day", 0),
+                                                       rec.get("sheet_start", "")):
+                    out[i] = rid
+                    used.add(rid)
+                    break
 
         loose = [
             (lambda ev: (ev.source_tab, ev.name.strip().lower()),
@@ -265,7 +276,8 @@ class Syncer:
             return PlanItem(ev, name, CREATE, targets, message=msg)
         return PlanItem(ev, name, EXISTS, targets, message=f"Already on all {len(targets)} channels")
 
-    def _plan_tracked(self, ev, rid, by_pcr, names, view: _LspView, now) -> PlanItem:
+    def _plan_tracked(self, ev, rid, by_pcr, names, view: _LspView, now,
+                      planned_keys) -> PlanItem:
         """A sheet event the tool already scheduled: bring LSP in line with it."""
         rec = self.state.events[rid]
         name = ev.lsp_name(self.cfg.scheduling.event_name_prefix)
@@ -287,6 +299,7 @@ class Syncer:
         started = _parse_utc(rec.get("start"))
         if started and started <= now:
             return PlanItem(ev, name, EXISTS, as_is(EXISTS, "Started"), record_id=rid,
+                            started=True,
                             message="Started; sheet changes are no longer applied")
         edit = self._hand_edit(rec, view, now)
         if edit is None:
@@ -308,12 +321,26 @@ class Syncer:
             return PlanItem(ev, name, NO_CHANNEL, as_is(EXISTS, "Left as is"), record_id=rid,
                             message=f"No LSP channels match PCR {ev.pcr or '(none)'}; "
                                     "existing bookings left as they are")
+        key = (name.strip().lower(), _minute_key(ev.start))
         targets, wanted = [], set()
         for cid, cn in chans:
             wanted.add(cid)
             b = bookings.get(cid)
             if b is None:
-                targets.append(Target(cid, cn, CREATE, "Will be created"))
+                # A new channel for this event (its PCR changed): as for a new
+                # event, never add a second copy of one already there.
+                if (cid, *key) in planned_keys:
+                    targets.append(Target(cid, cn, EXISTS, "Same event earlier in the sheet"))
+                elif cid in view.failed:
+                    targets.append(Target(cid, cn, ERROR, "Could not read this channel from LSP"))
+                elif found := view.find(cid, name, ev.start):
+                    targets.append(Target(cid, cn, EXISTS,
+                                          "Already in LSP (made by hand; left alone)",
+                                          event_id=found.get("Id"),
+                                          adopt=_booking(found, cn, by_tool=False)))
+                else:
+                    planned_keys.add((cid, *key))
+                    targets.append(Target(cid, cn, CREATE, "Will be created"))
             elif not b.get("by_tool"):
                 targets.append(Target(cid, cn, EXISTS, "Made by hand in LSP; left alone",
                                       event_id=b.get("event_id")))
@@ -333,9 +360,18 @@ class Syncer:
                 if (hit and var and b.get("variable_sent") != name
                         and _with_variable(hit[1], var, name) is not None):
                     diffs.append(var)
+                event_id = hit[1].get("Id") if hit else b.get("event_id")
+                if {"name", "start"} & set(diffs):
+                    # Moving it onto another event with the same name and
+                    # start would record the same thing twice.
+                    other = view.find(cid, name, ev.start)
+                    if (cid, *key) in planned_keys or (other and other.get("Id") != event_id):
+                        targets.append(Target(cid, cn, EXISTS, _DUPLICATE, event_id=event_id))
+                        continue
+                    planned_keys.add((cid, *key))
                 targets.append(Target(cid, cn, UPDATE if diffs else EXISTS,
                                       f"Will update {', '.join(diffs)}" if diffs else "Up to date",
-                                      event_id=hit[1].get("Id") if hit else b.get("event_id")))
+                                      event_id=event_id))
         for cid, b in bookings.items():
             if cid in wanted or not b.get("by_tool"):
                 continue
@@ -355,13 +391,20 @@ class Syncer:
         counts = defaultdict(int)
         for t in targets:
             counts[t.status] += 1
+        if counts[ERROR]:
+            return PlanItem(ev, name, ERROR, targets, record_id=rid,
+                            message="Could not read LSP; skipped this pass")
+        dup = sum(t.message == _DUPLICATE for t in targets)
         if not (counts[CREATE] or counts[UPDATE] or counts[DELETE]):
             return PlanItem(ev, name, EXISTS, targets, record_id=rid,
-                            message=f"Up to date on all {len(targets)} channels")
+                            message=(f"Not changed on {dup} channel(s): {_DUPLICATE}" if dup
+                                     else f"Up to date on all {len(targets)} channels"))
         parts = [f"{verb} on {counts[s]}" for s, verb in
                  ((UPDATE, "update"), (CREATE, "create"), (DELETE, "remove")) if counts[s]]
-        return PlanItem(ev, name, UPDATE, targets, record_id=rid,
-                        message="Sheet changed: will " + ", ".join(parts) + " channel(s)")
+        msg = "Sheet changed: will " + ", ".join(parts) + " channel(s)"
+        if dup:
+            msg += f"; not changed on {dup}: {_DUPLICATE}"
+        return PlanItem(ev, name, UPDATE, targets, record_id=rid, message=msg)
 
     def _plan_not_in_sheet(self, rid, rec, names, view, now) -> Optional[PlanItem]:
         """A tracked event that is gone from the sheet (column removed, date
@@ -507,6 +550,7 @@ class Syncer:
         touched: list[tuple[str, str]] = []  # (record id, channel id) to rebaseline
         now = _now_iso()
         for item in items:
+            self.heartbeat()
             if self.stop.is_set():
                 log.warning("Shutting down: stopping the pass before %r", item.lsp_name)
                 summary["problems"].append("Pass stopped early for shutdown")
@@ -540,7 +584,7 @@ class Syncer:
             for t in item.targets:
                 if t.status == EXISTS:
                     summary["skipped_existing"] += 1
-                    if t.adopt is not None:
+                    if t.adopt is not None and live:
                         rid = rid or self._new_record(item)
                         self.state.events[rid]["bookings"][t.channel_id] = t.adopt
                     continue
@@ -567,7 +611,10 @@ class Syncer:
                 summary[_COUNTER[t.status]] += 1
                 self._record_write()
 
-            if live and rid:
+            # A started event's record keeps the times it started with: taking
+            # the sheet's new ones would make it look not started next pass,
+            # and the tool would move an event that is already recording.
+            if live and rid and not item.started:
                 self.state.events[rid].update(_record_fields(item))
         self._rebaseline(touched)
 
@@ -955,6 +1002,8 @@ class Syncer:
 
 _COUNTER = {CREATE: "created", UPDATE: "updated", DELETE: "deleted"}
 
+_DUPLICATE = "another LSP event already has this name and start there; left as is"
+
 
 def _summary(dry_run: bool) -> dict:
     return {"parsed": 0, "created": 0, "updated": 0, "deleted": 0, "skipped_existing": 0,
@@ -1050,7 +1099,8 @@ def _record_fields(item: PlanItem) -> dict:
     """What a record remembers about its sheet event (for matching and display)."""
     ev = item.event
     return {"tab": ev.source_tab, "column": ev.source_column, "name": ev.name,
-            "date": ev.event_date, "occurrence": ev.occurrence, "pcr": ev.pcr,
+            "date": ev.event_date, "occurrence": ev.occurrence, "same_day": ev.same_day,
+            "sheet_start": ev.sheet_start, "pcr": ev.pcr,
             "lsp_name": item.lsp_name, "start": ev.start.isoformat(), "end": ev.end.isoformat()}
 
 

@@ -105,3 +105,62 @@ def test_stop_waits_for_the_pass(tmp_path, key_file, monkeypatch):
     m.stop(timeout=5)
     assert finished.is_set() and not m._thread.is_alive()
     assert m.health()[0] is False
+
+
+def test_both_syncers_share_one_state(tmp_path, key_file, monkeypatch):
+    m = manager(tmp_path, key_file, monkeypatch)
+    full = m._components()[1]
+    raw = m.store.load()
+    good = __import__("copy").deepcopy(raw)
+    raw["sheet"]["labels"]["date"] = []  # sheet half invalid: LSP-only fallback
+    m.store.save(raw)
+    lsp_only = m._lsp_syncer()
+    assert lsp_only is not full and lsp_only.state is full.state
+    lsp_only.state.new_record({"name": "x"})  # e.g. cleanup changing records
+    m.store.save(good)  # the same config as before comes back
+    assert m._components()[1].state is lsp_only.state
+
+
+def test_grid_cache_drops_expired_tabs(tmp_path, key_file, monkeypatch):
+    m = manager(tmp_path, key_file, monkeypatch)
+
+    class Reader:
+        class cfg:
+            class sheet:
+                spreadsheet_id = "sid"
+
+        def fetch_grid(self, tab):
+            return [[tab]]
+
+    m._grid_cache[("sid", "old")] = (time.monotonic() - 10_000, [["old"]])
+    m._grid(Reader(), "new", refresh=False)
+    assert set(m._grid_cache) == {("sid", "new")}
+
+
+def test_watchdog_restarts_a_stuck_loop(tmp_path, key_file, monkeypatch):
+    monkeypatch.setattr("app.manager._WATCHDOG_SECONDS", 0.01)
+    # Any pass at all counts as stuck (the interval is at least 60 s).
+    monkeypatch.setattr("app.manager._STUCK_SECONDS", -10_000)
+    restarted = threading.Event()
+    m = manager(tmp_path, key_file, monkeypatch)
+    m._on_unhealthy = lambda why: restarted.set()
+    m._components()
+
+    def stuck_pass():
+        m._stop.wait(5)
+        return {"problems": []}
+
+    monkeypatch.setattr(m._syncer, "run_once", stuck_pass)
+    m.start_loop()
+    try:
+        assert restarted.wait(2)
+    finally:
+        m.stop(timeout=5)
+
+
+def test_pass_progress_keeps_the_loop_healthy(tmp_path, key_file, monkeypatch):
+    m = manager(tmp_path, key_file, monkeypatch)
+    syncer = m._components()[1]
+    m._heartbeat = 0
+    syncer.heartbeat()
+    assert time.monotonic() - m._heartbeat < 1

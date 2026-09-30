@@ -103,7 +103,10 @@ tab_overrides: {}
 
 # Per-event fixes for missing/wrong data (normally managed from the web UI).
 # Matched by date + event name (+ occurrence when a tab has duplicates on the
-# same day, 0-based). Any field you omit is left as parsed.
+# same day, 0-based). The UI also records same_day (how many same-named games
+# the day had) and sheet_start (the game's start in the sheet): once the day's
+# count changes, the fix follows the game by its start instead of its number.
+# Any field you omit is left as parsed.
 #   control_room: assign/override the PCR letter.
 #   start:        override the start ("YYYY-MM-DD HH:MM", sheet timezone).
 #   ignore:       true to drop this event entirely.
@@ -112,6 +115,8 @@ event_overrides: {}
   #   - date: "2026-08-27"
   #     event: "Opening Spike VB (SET DAY)"
   #     occurrence: 0
+  #     same_day: 1
+  #     sheet_start: "2026-08-27T19:00"
   #     control_room: "A"
 
 lsp:

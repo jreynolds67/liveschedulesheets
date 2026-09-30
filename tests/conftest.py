@@ -122,14 +122,16 @@ class FakeReader:
 
 
 def sheet_event(name="WSOC vs Texas", pcr="A", days=2, hour=19, tab="Fall Olympic", col=2,
-                occurrence=0, lead_in=10, cap_hours=3.0) -> ScheduledEvent:
-    """A sheet event `days` from today, as parse_grid would produce it."""
+                occurrence=0, lead_in=10, cap_hours=3.0, same_day=1) -> ScheduledEvent:
+    """A sheet event `days` from today, as parse_grid would produce it
+    (`same_day`: how many games with this name that day)."""
     day = (datetime.now(TZ) + timedelta(days=days)).date()
     kickoff = datetime(day.year, day.month, day.day, hour, 0, tzinfo=TZ)
     start = kickoff - timedelta(minutes=lead_in)
     return ScheduledEvent(name=name, pcr=pcr, start=start, end=start + timedelta(hours=cap_hours),
                           source_tab=tab, source_column=col, event_date=day.isoformat(),
-                          occurrence=occurrence)
+                          occurrence=occurrence, same_day=same_day,
+                          sheet_start=kickoff.strftime("%Y-%m-%dT%H:%M"))
 
 
 @pytest.fixture

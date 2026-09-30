@@ -198,6 +198,8 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
         ev = _parse_column(tab, grid, row_of, col, cfg, seen)
         if ev is not None:
             out.append(ev)
+    for ev in out:
+        ev.same_day = seen.get((ev.name.strip().lower(), ev.event_date), 1)
 
     out = _apply_event_overrides(tab, out, cfg)
     log.info("Tab %r: parsed %d schedulable event(s)", tab, len(out))
@@ -397,6 +399,7 @@ def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]
 
     pcr = _normalize_room(_cell(grid, row_of.get("pcr"), col))  # None -> unassigned (fix in UI)
 
+    sheet_start = start.strftime("%Y-%m-%dT%H:%M")
     start = start - timedelta(minutes=cfg.scheduling.lead_in_minutes)
     end = start + timedelta(hours=cfg.scheduling.cap_hours_for(name))
     return ScheduledEvent(
@@ -408,6 +411,7 @@ def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]
         source_column=col + 1,
         event_date=date_str,
         occurrence=occurrence,
+        sheet_start=sheet_start,
     )
 
 
@@ -565,7 +569,9 @@ def _apply_event_overrides(tab, events, cfg) -> list[ScheduledEvent]:
         return events
     out = []
     for ev in events:
-        ov = overrides.get((ev.event_date, ev.name.strip().lower(), ev.occurrence))
+        ov = next((o for o in overrides
+                   if o.date == ev.event_date and o.name == ev.name.strip().lower()
+                   and ev.is_same_game(o.occurrence, o.same_day, o.sheet_start)), None)
         if ov is None:
             out.append(ev)
             continue

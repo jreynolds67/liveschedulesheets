@@ -770,19 +770,28 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") hideRowMenu(
 
 // ---- Event overrides -----------------------------------------------------
 function ovList(tab){ return (cfg.event_overrides[tab] = cfg.event_overrides[tab] || []); }
-function findOv(tab,date,event,occ){
-  return ovList(tab).find(o => o.date===date && (o.event||"").toLowerCase()===event.toLowerCase() && (o.occurrence||0)===occ);
+// Mirrors ScheduledEvent.is_same_game() in app/models.py: by the game's number
+// that day, or by its sheet start once the day's count of same-named games has
+// changed (a doubleheader game added or removed renumbers the rest).
+function sameGame(o, item){
+  const n = item.same_day || 0;
+  if (o.same_day && n && o.same_day !== n) return !!o.sheet_start && o.sheet_start === item.sheet_start;
+  return (o.occurrence||0) === (item.occurrence||0);
+}
+function findOv(item){
+  return ovList(item.source_tab).find(o => o.date===item.event_date
+    && (o.event||"").toLowerCase()===item.event_name.toLowerCase() && sameGame(o, item));
 }
 function upsertOv(item, patch){
-  const tab=item.source_tab, date=item.event_date, event=item.event_name, occ=item.occurrence||0;
-  let o = findOv(tab,date,event,occ);
-  if (!o){ o = {date, event, occurrence:occ}; ovList(tab).push(o); }
-  Object.assign(o, patch);
+  let o = findOv(item);
+  if (!o){ o = {date:item.event_date, event:item.event_name}; ovList(item.source_tab).push(o); }
+  // Re-identify it by the game as it is now.
+  Object.assign(o, {occurrence:item.occurrence||0, same_day:item.same_day||0,
+                    sheet_start:item.sheet_start||""}, patch);
   cleanOv();
 }
-function removeOv(tab,date,event,occ){
-  cfg.event_overrides[tab] = ovList(tab).filter(o =>
-    !(o.date===date && (o.event||"").toLowerCase()===event.toLowerCase() && (o.occurrence||0)===occ));
+function removeOv(tab, o){
+  cfg.event_overrides[tab] = ovList(tab).filter(x => x !== o);
   if (!cfg.event_overrides[tab].length) delete cfg.event_overrides[tab];
   renderOverrides();
 }
@@ -808,7 +817,7 @@ function renderOverrides(){
   const box = $("overridesBox");
   const entries = [];
   Object.keys(cfg.event_overrides||{}).forEach(tab =>
-    (cfg.event_overrides[tab]||[]).forEach(o => entries.push({tab, ...o})));
+    (cfg.event_overrides[tab]||[]).forEach(o => entries.push({tab, o, ...o})));
   if (!entries.length){ box.className="hint"; box.textContent = "No event fixes."; return; }
   box.className = "";
   box.innerHTML = entries.map((o,i) => `
@@ -818,10 +827,10 @@ function renderOverrides(){
       <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`PCR ${esc(o.control_room)}`:"-")}</div>
       <div class="mono hint">${o.start?esc(String(o.start).replace("T"," ")):""}</div>
       <div class="hint">${o.ignore?"drop":(o.control_room?"PCR":"")}${o.start?" · start":""}</div>
-      <button class="rm mini ghost" data-tab="${esc(o.tab)}" data-date="${esc(o.date)}" data-ev="${encodeURIComponent(o.event)}" data-occ="${esc(o.occurrence||0)}">REMOVE</button>
+      <button class="rm mini ghost" data-i="${i}">REMOVE</button>
     </div>`).join("");
-  box.querySelectorAll(".rm").forEach(b => b.onclick = () =>
-    removeOv(b.dataset.tab, b.dataset.date, decodeURIComponent(b.dataset.ev), +b.dataset.occ));
+  box.querySelectorAll(".rm").forEach(b => b.onclick = () => {
+    const e = entries[+b.dataset.i]; removeOv(e.tab, e.o); });
 }
 
 async function loadConfig(){ cfg = await api("GET","/api/config"); fillForm(); }
@@ -888,7 +897,7 @@ function renderPreview(items){
     // Ignore toggle
     const wrap = document.createElement("div"); wrap.className = "inline";
     const cb = document.createElement("input"); cb.type = "checkbox";
-    const existing = findOv(i.source_tab, i.event_date, i.event_name, i.occurrence||0);
+    const existing = findOv(i);
     cb.checked = !!(existing && existing.ignore);
     cb.onchange = () => { upsertOv(i, {ignore: cb.checked || null}); toast(cb.checked?"Will be ignored - Save to apply":"Ignore cleared"); };
     const lbl = document.createElement("span"); lbl.className = "hint"; lbl.textContent = "ignore";

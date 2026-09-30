@@ -155,3 +155,40 @@ def test_room_normalisation():
 def test_a1_tab_quotes_apostrophes():
     assert a1_tab("Football") == "'Football'"
     assert a1_tab("Women's Basketball") == "'Women''s Basketball'"
+
+
+DOUBLEHEADER = [
+    ["DATE", "9/12/2026", "9/12/2026"],
+    ["EVENT", "BSB vs Duke", "BSB vs Duke"],
+    ["GAME START", "1:00 PM", "6:00 PM"],
+    ["CONTROL ROOM", "A", "A"],
+]
+
+
+def test_doubleheader_events_know_their_day(tmp_path):
+    events = parse_grid("Spring", DOUBLEHEADER, cfg_for(tmp_path))
+    assert [(e.occurrence, e.same_day, e.sheet_start) for e in events] == [
+        (0, 2, "2026-09-12T13:00"), (1, 2, "2026-09-12T18:00")]
+
+
+def test_event_fix_follows_its_game_when_a_doubleheader_game_is_removed(tmp_path):
+    fixes = {"Spring": [
+        # Game 1 ignored, game 2 moved to PCR C, made while both were in the sheet.
+        {"date": "2026-09-12", "event": "BSB vs Duke", "occurrence": 0, "same_day": 2,
+         "sheet_start": "2026-09-12T13:00", "ignore": True},
+        {"date": "2026-09-12", "event": "BSB vs Duke", "occurrence": 1, "same_day": 2,
+         "sheet_start": "2026-09-12T18:00", "control_room": "C"},
+    ]}
+    cfg = cfg_for(tmp_path, event_overrides=fixes)
+    assert [(e.sheet_start, e.pcr) for e in parse_grid("Spring", DOUBLEHEADER, cfg)] == [
+        ("2026-09-12T18:00", "C")]
+    # Game 1's column deleted: game 2 is now game 0, but it isn't ignored.
+    only_game_two = [row[:1] + row[2:] for row in DOUBLEHEADER]
+    assert [(e.sheet_start, e.pcr) for e in parse_grid("Spring", only_game_two, cfg)] == [
+        ("2026-09-12T18:00", "C")]
+
+
+def test_event_fix_without_a_game_count_matches_by_number(tmp_path):
+    cfg = cfg_for(tmp_path, event_overrides={"Spring": [
+        {"date": "2026-09-12", "event": "BSB vs Duke", "occurrence": 1, "control_room": "D"}]})
+    assert [e.pcr for e in parse_grid("Spring", DOUBLEHEADER, cfg)] == ["A", "D"]

@@ -19,6 +19,7 @@ from .settings_store import SettingsStore
 from .webui import CONFIG_PATH, SEED_PATH, SHUTDOWN_WAIT_SECONDS
 
 _stop = False
+_exit_code = 0
 
 
 def _handle_signal(signum, _frame):
@@ -27,13 +28,19 @@ def _handle_signal(signum, _frame):
     _stop = True
 
 
+def _restart(_why: str) -> None:
+    """The loop died or is stuck: exit non-zero so the supervisor restarts us."""
+    global _stop, _exit_code
+    _exit_code, _stop = 1, True
+
+
 def main() -> int:
     setup_logging()
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
     store = SettingsStore(CONFIG_PATH, SEED_PATH)
-    manager = SyncManager(store)
+    manager = SyncManager(store, on_unhealthy=_restart)
 
     run_once = os.environ.get("RUN_ONCE", "").strip().lower() in ("1", "true", "yes", "on")
     if run_once:
@@ -48,7 +55,7 @@ def main() -> int:
     while not _stop:
         time.sleep(1)
     manager.stop(timeout=SHUTDOWN_WAIT_SECONDS)
-    return 0
+    return _exit_code
 
 
 if __name__ == "__main__":

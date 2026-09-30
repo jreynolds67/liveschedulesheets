@@ -289,19 +289,31 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
 SHUTDOWN_WAIT_SECONDS = 45
 
 
+# Exit status: non-zero after the watchdog found the sync loop dead or stuck.
+_exit_code = 0
+
+
 def _exit_on_sigterm(signum, _frame):
     # Docker stops the container with SIGTERM, which by default kills Python
     # without running `finally` blocks. Turn it into SystemExit so serve()
     # returns and main() stops the sync loop cleanly.
     log.info("Signal %s; shutting down", signum)
-    raise SystemExit(0)
+    raise SystemExit(_exit_code)
+
+
+def _restart(_why: str) -> None:
+    """Shut down like a SIGTERM so Docker's restart policy starts a fresh
+    process (it doesn't act on an unhealthy container)."""
+    global _exit_code
+    _exit_code = 1
+    signal.raise_signal(signal.SIGTERM)
 
 
 def main() -> int:
     setup_logging()
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     store = SettingsStore(CONFIG_PATH, SEED_PATH)
-    manager = SyncManager(store)
+    manager = SyncManager(store, on_unhealthy=_restart)
     manager.start_loop()
 
     app = create_app(manager, store)
@@ -319,7 +331,7 @@ def main() -> int:
         app.run(host=host, port=port)
     finally:
         manager.stop(timeout=SHUTDOWN_WAIT_SECONDS)
-    return 0
+    return _exit_code
 
 
 if __name__ == "__main__":

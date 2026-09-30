@@ -313,3 +313,88 @@ def test_corrupt_state_file_is_set_aside(tmp_path):
     [aside] = [p for p in tmp_path.iterdir() if ".corrupt-" in p.name]
     assert aside.read_text() == '{"events": {"x": '
     assert not path.exists()
+
+
+# -- started events, doubleheaders, double bookings -----------------------------
+
+def test_started_event_is_never_moved_by_a_later_sheet_change(make_syncer, lsp):
+    s = make_syncer([sheet_event(hour=19)])
+    s.run_once()
+    for rec in s.state.events.values():
+        rec["start"] = "2020-01-01T12:00:00+00:00"  # it has started
+    s.state.save()
+    before = {k: dict(v) for k, v in lsp.events.items()}
+    # A weather delay: the sheet moves the game later the same day. The
+    # started record must keep its times, so later passes leave it alone too.
+    for _ in range(3):
+        s = make_syncer([sheet_event(hour=21)])
+        assert statuses(s) == [EXISTS]
+        s.run_once()
+    assert {k: dict(v) for k, v in lsp.events.items()} == before
+    assert all(r["start"] == "2020-01-01T12:00:00+00:00" for r in s.state.events.values())
+
+
+def doubleheader(*games):
+    """Sheet events for same-named games on one day: (hour, column) pairs."""
+    return [sheet_event(name="BSB vs Duke", hour=h, col=c, occurrence=i, same_day=len(games))
+            for i, (h, c) in enumerate(games)]
+
+
+def test_removing_game_one_of_a_doubleheader_leaves_game_two_alone(make_syncer, lsp):
+    make_syncer(doubleheader((13, 2), (18, 3))).run_once()
+    before = {k: dict(v) for k, v in lsp.events.items()}
+    # Game 1's column is deleted: game 2 is now the day's only (first) game.
+    s = make_syncer(doubleheader((18, 2)))
+    items = s.plan()
+    assert sorted(i.status for i in items) == [EXISTS, NOT_IN_SHEET]
+    s.run_once()
+    assert {k: dict(v) for k, v in lsp.events.items()} == before  # nothing moved
+
+
+def test_adding_a_game_before_a_tracked_one_keeps_it(make_syncer, lsp):
+    make_syncer(doubleheader((18, 2))).run_once()
+    ids = set(lsp.events)
+    # An earlier game is added in front: the tracked game becomes game 2.
+    s = make_syncer(doubleheader((13, 2), (18, 3)))
+    assert sorted(i.status for i in s.plan()) == [CREATE, EXISTS]
+    s.run_once()
+    assert ids < set(lsp.events) and len(lsp.events) == 4
+
+
+def test_update_never_lands_on_another_event_with_the_same_name_and_start(make_syncer, lsp):
+    make_syncer([sheet_event(hour=19)]).run_once()
+    ev = sheet_event(hour=21)
+    lsp.add_hand_made("a1", ev.name, ev.start, ev.end)
+    s = make_syncer([ev])
+    [item] = s.plan()
+    by_channel = {t.channel_id: t.status for t in item.targets}
+    assert by_channel == {"a1": EXISTS, "a2": UPDATE}
+    assert "already has this name and start" in item.message
+    s.run_once()
+    on_a1 = sorted(e["Start"] for e in lsp.events.values() if e["ChannelId"] == "a1")
+    assert len(on_a1) == 2 and len(set(on_a1)) == 2  # the tool's one wasn't moved onto it
+
+
+def test_pcr_change_adopts_a_hand_made_event_on_the_new_channel(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    ev = sheet_event(pcr="B")
+    lsp.add_hand_made("b1", ev.name, ev.start, ev.end)
+    s = make_syncer([ev])
+    summary = s.run_once()
+    assert (summary["created"], summary["deleted"]) == (0, 2)
+    assert [e["ChannelId"] for e in lsp.events.values()] == ["b1"]
+    [rec] = s.state.events.values()
+    assert rec["bookings"]["b1"]["by_tool"] is False
+
+
+def test_dry_run_does_not_record_hand_made_events(key_file, state_path, lsp):
+    from app.config import parse_config
+    from app.sync import Syncer
+    from .conftest import raw_config
+    cfg = parse_config(raw_config(key_file, state_path, runtime={"live": False}))
+    ev = sheet_event(pcr="B")
+    lsp.add_hand_made("b1", ev.name, ev.start, ev.end)
+    s = Syncer(cfg, FakeReader([ev]), lsp, State(state_path))
+    assert statuses(s) == [EXISTS]
+    s.run_once()
+    assert s.state.events == {}

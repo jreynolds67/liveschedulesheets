@@ -112,7 +112,15 @@ class TabOverride:
 
 @dataclass
 class EventOverride:
-    """Per-event UI fix, matched by (date, event-name, occurrence)."""
+    """Per-event UI fix for the game with this date and name (lowercase),
+    picked out by ScheduledEvent.is_same_game()."""
+    date: str = ""
+    name: str = ""
+    occurrence: int = 0
+    # The day's same-named game count and the game's sheet start when the fix
+    # was made (0 / "" for fixes made before these were recorded).
+    same_day: int = 0
+    sheet_start: str = ""
     control_room: Optional[str] = None
     start: Optional[datetime] = None
     ignore: bool = False
@@ -145,7 +153,7 @@ class SheetSettings:
     scheduling: SchedulingConfig
     google_credentials_file: str
     tab_overrides: dict[str, TabOverride] = field(default_factory=dict)
-    event_overrides: dict[str, dict[tuple, EventOverride]] = field(default_factory=dict)
+    event_overrides: dict[str, list[EventOverride]] = field(default_factory=dict)
 
 
 @dataclass
@@ -167,8 +175,8 @@ class Config:
     runtime: RuntimeConfig
     google_credentials_file: str
     tab_overrides: dict[str, TabOverride] = field(default_factory=dict)
-    # tab -> {(date, name_lower, occurrence): EventOverride}
-    event_overrides: dict[str, dict[tuple, EventOverride]] = field(default_factory=dict)
+    # tab -> [EventOverride]
+    event_overrides: dict[str, list[EventOverride]] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -395,11 +403,12 @@ def parse_row_picks(raw) -> dict[str, RowPick]:
     return out
 
 
-def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, dict[tuple, EventOverride]]:
-    """raw: {tab: [ {date, event, occurrence?, control_room?, start?, ignore?}, ... ]}"""
-    out: dict[str, dict[tuple, EventOverride]] = {}
+def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, list[EventOverride]]:
+    """raw: {tab: [ {date, event, occurrence?, same_day?, sheet_start?,
+    control_room?, start?, ignore?}, ... ]}"""
+    out: dict[str, list[EventOverride]] = {}
     for tab, items in (raw or {}).items():
-        bucket: dict[tuple, EventOverride] = {}
+        bucket: list[EventOverride] = []
         for item in items or []:
             item = item or {}
             date = str(item.get("date", "")).strip()
@@ -408,9 +417,11 @@ def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, dict[tuple, Eve
                 continue  # need both to match an event
             try:
                 occ = int(item.get("occurrence") or 0)
+                same_day = int(item.get("same_day") or 0)
             except (TypeError, ValueError):
                 raise ConfigError(f"Event fix for {name!r} on {date} has a bad occurrence "
-                                  f"{item.get('occurrence')!r}") from None
+                                  f"{item.get('occurrence')!r} or game count "
+                                  f"{item.get('same_day')!r}") from None
             start = None
             start_raw = item.get("start")
             if start_raw:
@@ -418,11 +429,13 @@ def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, dict[tuple, Eve
                     start = datetime.fromisoformat(str(start_raw)).replace(tzinfo=tz)
                 except ValueError:
                     pass
-            bucket[(date, name, occ)] = EventOverride(
+            bucket.append(EventOverride(
+                date=date, name=name, occurrence=occ, same_day=same_day,
+                sheet_start=str(item.get("sheet_start") or "").strip(),
                 control_room=(item.get("control_room") or None),
                 start=start,
                 ignore=bool(item.get("ignore", False)),
-            )
+            ))
         if bucket:
             out[str(tab)] = bucket
     return out

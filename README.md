@@ -98,8 +98,9 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   Also available as `POST /api/send-event` with
   `{source_tab, event_date, event_name, occurrence}` from a preview row.
 - **Event fixes** — the PCR you pick or the **Ignore** you tick on a Preview
-  row is saved as a per-event fix (matched by tab + date + event name) and
-  applied on top of the sheet on every sync. The *Event fixes* card lists them;
+  row is saved as a per-event fix (matched by tab + date + event name, and
+  for doubleheaders which game; see below) and applied on top of the sheet
+  on every sync. The *Event fixes* card lists them;
   remove one to go back to what the sheet says. Fixes for games more than a
   day in the past are dropped on the next Save, as are tab settings for tabs
   the sheet no longer has. (Stored as `event_overrides`.)
@@ -181,7 +182,12 @@ an engineer can assign one via the inline selector (saved as an event fix).
 Same-named games on the same day (doubleheaders) are numbered in column order
 (the `occurrence` in event fixes), counting every column with that name and
 date, even one whose time is still TBD, so game 2 keeps its number and its
-fixes when game 1's time is filled in.
+fixes when game 1's time is filled in. Event fixes and tracked events also
+remember how many same-named games the day had and the game's start in the
+sheet. If that count changes (game 1's column deleted, or a game added), the
+numbers shift, so they're matched by start time instead: game 1's fix, or its
+LSP event, never slides onto game 2. (If the count *and* the time change at
+once, a fix no longer applies; set it again from Preview.)
 
 **PCRs are letters `A`–`E` only** (bare or as `PCR A`). A stray value that isn't a letter
 (e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
@@ -288,8 +294,11 @@ config's placeholder URL the first time is exempt.
 
 **Health, logs and shutdown:** the image has a `HEALTHCHECK` (`GET /healthz`,
 no login needed) that marks the container unhealthy if the sync loop has died
-or a pass has been stuck for over half an hour past its interval; Portainer
-shows it. (Plain Docker doesn't restart unhealthy containers by itself.) The
+or a pass has made no progress for over half an hour past its interval;
+Portainer shows it. Docker doesn't restart an unhealthy container by itself,
+so the app also checks this every minute and, when it trips, shuts down with
+exit status 1; the stack's `restart: unless-stopped` then starts it afresh
+(nothing is lost: `state.json` is saved after every LSP write). The
 stack caps the container log at 5 × 10 MB. On stop or redeploy, the app
 finishes the LSP write in progress, saves `state.json` and exits (it waits up
 to 45 s; the stack's `stop_grace_period` is 60 s).
@@ -367,6 +376,14 @@ python -c "import json; [print(f\"{i['metadata']['name']}=={i['metadata']['versi
 Paste that list under the header comment in `requirements.txt`, and run the
 tests.
 
+### Upgrading Python
+
+The image is `python:3.12-slim-trixie`: Debian 13 pinned, the 3.12 patch level
+floating for security fixes. Python 3.12 gets security fixes until
+**October 2028**; before then, change the `FROM` line to a newer version,
+regenerate `requirements.txt` with the new `--python-version`, and run the
+tests.
+
 ---
 
 ## How changes are tracked
@@ -380,8 +397,8 @@ channel) as LSP reported it right after the tool last wrote it.
 
 **Following the sheet.** Each pass matches sheet events to records:
 
-1. same tab + date + event name (+ which same-named game that day): a changed
-   **start time** or **PCR**;
+1. same tab + date + event name (+ which same-named game that day, as for
+   event fixes): a changed **start time** or **PCR**;
 2. otherwise the same tab + name, when only one unmatched event and one
    unmatched record share it: a changed **date**;
 3. otherwise the same tab + column + date, likewise: a changed **name**.
@@ -394,7 +411,14 @@ the new ones. A new channel that matches the PCR gets a booking on the next
 pass. Lead-in and safety-cap changes are applied the same way. Once an event
 has started, sheet changes are no longer applied to it (and it's no longer
 checked for hand edits, since LSP may change a recording's end itself when it's
-stopped).
+stopped); its record keeps the times it started with, so a later time change
+in the sheet (a weather delay) can't make it look unstarted and move an event
+that is recording. Schedule the delayed game by hand in LSP.
+
+**No double bookings.** The tool never moves or creates an event onto a channel
+where LSP already has one with the same name and start minute: a new event
+(or a new channel after a PCR change) records that one as made by hand, and an
+update that would land on it is skipped and shown in Preview.
 
 **Suspicious changes are held.** If the sheet moves a tracked event outside
 the active window (into the past, or beyond `horizon_days`, usually a typo in
@@ -425,7 +449,8 @@ it's cancelled.
 
 **New events.** A sheet event with no record is created on each of its PCR's
 channels, unless LSP already has an event with the same name and start minute
-there (made by hand). That one is recorded but never modified or deleted.
+there (made by hand). That one is recorded (on live passes; a dry run only
+shows it) but never modified or deleted.
 
 Matching the values last sent covers LSP returning the old values on the
 re-read right after an update. If LSP gives an event a new id when it's updated,

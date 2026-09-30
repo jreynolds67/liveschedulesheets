@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import (Config, ConfigError, extract_spreadsheet_id, parse_config,
                      parse_lsp_settings, parse_row_picks, parse_sheet_settings)
@@ -36,8 +36,11 @@ _GRID_CACHE_SECONDS = 120
 _READ_WAIT_SECONDS = 15
 # ...and actions the operator asked for and expects to happen.
 _WRITE_WAIT_SECONDS = 120
-# The loop counts as stuck when a pass runs this much longer than the interval.
+# The loop counts as stuck when a pass makes no progress for this much longer
+# than the interval.
 _STUCK_SECONDS = 30 * 60
+# How often the watchdog checks the loop.
+_WATCHDOG_SECONDS = 60
 
 
 class ManagerError(Exception):
@@ -45,8 +48,12 @@ class ManagerError(Exception):
 
 
 class SyncManager:
-    def __init__(self, store: SettingsStore):
+    def __init__(self, store: SettingsStore,
+                 on_unhealthy: Optional[Callable[[str], None]] = None):
         self.store = store
+        # Called (once) when the loop has died or is stuck, to restart the
+        # process: Docker's restart policy ignores an unhealthy container.
+        self._on_unhealthy = on_unhealthy
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -57,6 +64,9 @@ class SyncManager:
         # LSP-only syncer, used while the sheet side (e.g. Google key) isn't set up.
         self._lsp_hash: Optional[str] = None
         self._lsp_only: Optional[Syncer] = None
+        # The one in-memory copy of the state file, shared by both syncers so
+        # neither acts on records the other has changed.
+        self._state: Optional[State] = None
 
         self._created_count = 0  # for status() while a sync holds the lock
         self._state_error: Optional[str] = None
@@ -85,7 +95,8 @@ class SyncManager:
                 raise ConfigError(f"Could not load the Google service-account key: {exc}") from exc
             lsp = LspClient(cfg.lsp, read_only=cfg.runtime.dry_run)
             state = self._load_state(cfg.runtime.state_file)
-            self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state, stop=self._stop)
+            self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state, stop=self._stop,
+                                                  heartbeat=self._beat)
             self._cache_hash = h
             self._lsp_only = self._lsp_hash = None
             log.info("Rebuilt sync components from updated config")
@@ -109,18 +120,27 @@ class SyncManager:
             h = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
             if h != self._lsp_hash or self._lsp_only is None:
                 self._lsp_only = Syncer(ls, None, LspClient(ls.lsp, read_only=ls.runtime.dry_run),
-                                        self._load_state(ls.runtime.state_file), stop=self._stop)
+                                        self._load_state(ls.runtime.state_file), stop=self._stop,
+                                        heartbeat=self._beat)
                 self._lsp_hash = h
             return self._lsp_only
 
     def _load_state(self, path: str) -> State:
+        """The state for `path`: the copy already in memory (every change is
+        saved as it's made, so it is never behind the file), or read afresh."""
+        if self._state is not None and self._state.path == path:
+            return self._state
         try:
             state = State(path)
         except OSError as exc:
             raise ConfigError(f"Could not read the state file {path}: {exc}") from exc
         if state.load_error:
             self._state_error = state.load_error
+        self._state = state
         return state
+
+    def _beat(self) -> None:
+        self._heartbeat = time.monotonic()
 
     @contextlib.contextmanager
     def _locked(self, wait: float):
@@ -222,7 +242,10 @@ class SyncManager:
         if hit and not refresh and time.monotonic() - hit[0] < _GRID_CACHE_SECONDS:
             return hit[1]
         grid = reader.fetch_grid(tab)
-        self._grid_cache[key] = (time.monotonic(), grid)
+        now = time.monotonic()
+        self._grid_cache = {k: v for k, v in self._grid_cache.items()
+                            if now - v[0] < _GRID_CACHE_SECONDS}
+        self._grid_cache[key] = (now, grid)
         return grid
 
     def tabs(self, spreadsheet: Optional[str] = None) -> dict:
@@ -348,8 +371,22 @@ class SyncManager:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._heartbeat = time.monotonic()
         self._thread = threading.Thread(target=self._loop, name="sync-loop", daemon=True)
         self._thread.start()
+        if self._on_unhealthy is not None:
+            threading.Thread(target=self._watchdog, name="sync-watchdog", daemon=True).start()
+
+    def _watchdog(self) -> None:
+        """Restart the process (via on_unhealthy) once the loop has died or
+        stopped making progress. State is saved after every LSP write, so
+        abandoning a stuck pass loses nothing."""
+        while not self._stop.wait(_WATCHDOG_SECONDS):
+            ok, why = self.health()
+            if not ok:
+                log.error("Sync loop unhealthy (%s); restarting", why)
+                self._on_unhealthy(why)
+                return
 
     def stop(self, timeout: Optional[float] = None) -> None:
         """Ask the loop to stop and wait (up to `timeout`) for a pass in
