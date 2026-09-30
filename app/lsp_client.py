@@ -230,6 +230,36 @@ class LspClient:
         if kind and kind != "Success":
             raise LspError(f"PatchEvent for {name!r} returned {kind}: {resp.text[:400]}")
 
+    def update_event(self, current: dict, name: str, start: datetime, end: datetime,
+                     customization: Optional[dict], force: bool = False) -> None:
+        """Replace an event that hasn't started (POST /api/v1/UpdateEvent),
+        keeping its other fields as LSP returned them in `current`."""
+        self._check_writable(f"update event {name!r}", force)
+        body = {
+            "EventId": current.get("Id"),
+            "ChannelId": current.get("ChannelId"),
+            "Name": name,
+            "Description": current.get("Description"),
+            "Color": current.get("Color"),
+            "SourceRouteIndex": current.get("SourceRouteIndex"),
+            "LockRouteOnRecording": bool(current.get("LockRouteOnRecording")),
+            "Start": _iso(start),
+            "End": _iso(end),
+            "Customization": customization if customization is not None else current.get("Customization"),
+            "Labels": current.get("Labels") or [],
+        }
+        resp = self._request("POST", "/api/v1/UpdateEvent", json=body)
+        if resp.status_code != 200:
+            raise LspError(
+                f"UpdateEvent failed for {name!r} ({resp.status_code}): {resp.text[:400]}"
+            )
+        try:
+            kind = resp.json().get("ResultKind")
+        except (ValueError, AttributeError):
+            kind = None
+        if kind and kind != "Success":
+            raise LspError(f"UpdateEvent for {name!r} returned {kind}: {resp.text[:400]}")
+
     def remove_event(self, event_id: str, force: bool = False) -> None:
         """Delete a single event by its LSP id (DELETE /api/v1/RemoveEvent)."""
         self._check_writable(f"delete event {event_id}", force)

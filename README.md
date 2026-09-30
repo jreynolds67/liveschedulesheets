@@ -178,10 +178,13 @@ default (e.g. `Event XX`). The tool fills it in two ways:
   (`Customization.Conditions`, value in `ConditionValue.Text`; an empty value
   means the variable's default), then any workflow or label parameters. If the one named `Event Name`
   (ignoring case and spacing) doesn't hold the event name, the tool sets it
-  with `PATCH /api/v1/PatchEvent/{id}`. Events the tool created earlier that
+  with `PATCH /api/v1/PatchEvent/{id}`, then reads the event back
+  (`GetFilteredEvents`). If LSP didn't keep the value, it sends the whole
+  event with `POST /api/v1/UpdateEvent` and checks again. The log says which
+  one worked, or what LSP still holds. Events the tool created earlier that
   still hold the default show in Preview as **update** (`Will update Event
   Name`) and are fixed on the next sync. Each booking is tried once per name
-  (`variable_set` in `state.json`), so a value LSP won't keep isn't re-sent
+  (`variable_sent` in `state.json`), so a value LSP won't keep isn't re-sent
   every pass.
 - **Channel sync (where available).** If a channel's labels offer the
   parameter (`GET /api/v1/GetAvailableSyncEventNameLabelsParametersForChannel`),

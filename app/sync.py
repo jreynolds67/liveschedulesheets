@@ -351,7 +351,7 @@ class Syncer:
                 if not _same_instant(cur.get("End"), ev.end):
                     diffs.append("end")
                 var = self.cfg.lsp.event_name_variable
-                if (hit and var and b.get("variable_set") != name
+                if (hit and var and b.get("variable_sent") != name
                         and _with_variable(hit[1], var, name) is not None):
                     diffs.append(var)
                 targets.append(Target(cid, cn, UPDATE if diffs else EXISTS,
@@ -619,22 +619,49 @@ class Syncer:
     def _fill_variable(self, item: PlanItem, t: Target, event_id: str, current,
                        rid: str, force: bool) -> None:
         """Set the event's event-name variable to its name, if the event has
-        that variable and it holds something else (e.g. its default). Tried
-        once per name, so a value LSP won't keep isn't re-sent every pass;
-        a failure is logged and never undoes the create / update."""
+        that variable and it holds something else (e.g. its default).
+
+        Sends it with PatchEvent, reads the event back to check LSP kept it,
+        and if not, sends the whole event with UpdateEvent and checks again.
+        Tried once per name, so a value LSP won't keep isn't re-sent every
+        pass; a failure is logged and never undoes the create / update."""
         var = self.cfg.lsp.event_name_variable
         fields = _with_variable(current, var, item.lsp_name) if var else None
         if fields is None:
             return
-        self.state.events[rid]["bookings"][t.channel_id]["variable_set"] = item.lsp_name
-        ev = item.event
+        self.state.events[rid]["bookings"][t.channel_id]["variable_sent"] = item.lsp_name
+        ev, where = item.event, f"{item.lsp_name!r} on {t.channel_name}"
         try:
             self.lsp.patch_event(event_id, item.lsp_name, ev.start, ev.end,
                                  force=force, extra=fields)
         except LspError as exc:
-            log.warning("Could not set %r on %r on %s: %s", var, item.lsp_name, t.channel_name, exc)
+            log.warning("PatchEvent could not set %r on %s: %s", var, where, exc)
+        now_holds = self._read_variable(event_id, var)
+        if now_holds == item.lsp_name:
+            log.info("Set %r = %r on %s (PatchEvent)", var, item.lsp_name, t.channel_name)
             return
-        log.info("Set %r = %r on %s", var, item.lsp_name, t.channel_name)
+        log.info("LSP still has %r = %r on %s after PatchEvent; trying UpdateEvent",
+                 var, now_holds, where)
+        try:
+            self.lsp.update_event({**current, "Id": event_id}, item.lsp_name, ev.start, ev.end,
+                                  fields.get("Customization"), force=force)
+        except LspError as exc:
+            log.warning("UpdateEvent could not set %r on %s: %s", var, where, exc)
+            return
+        now_holds = self._read_variable(event_id, var)
+        if now_holds == item.lsp_name:
+            log.info("Set %r = %r on %s (UpdateEvent)", var, item.lsp_name, t.channel_name)
+        else:
+            log.warning("LSP didn't keep %r = %r on %s: it still holds %r",
+                        var, item.lsp_name, t.channel_name, now_holds)
+
+    def _read_variable(self, event_id: str, variable: str) -> Optional[str]:
+        """The event-name variable's value on an LSP event, read fresh."""
+        try:
+            return _variable_value(self.lsp.get_event(event_id) or {}, variable)
+        except LspError as exc:
+            log.warning("Could not read event %s back from LSP: %s", event_id, exc)
+            return None
 
     def _refresh_baselines(self, rid: str) -> None:
         """For an untouched record's bookings: follow an event LSP gave a new
