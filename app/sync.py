@@ -51,6 +51,10 @@ ERROR = "error"
 # other than this tool locks the event.
 _SNAPSHOT_FIELDS = ("Name", "Start", "End", "ChannelId")
 
+# How long to keep a record after its event ends, when LSP's own cleanup
+# threshold (settings/general EventCleanupThresholdInDays) can't be read.
+DEFAULT_CLEANUP_DAYS = 365
+
 
 @dataclass
 class Target:
@@ -438,6 +442,7 @@ class Syncer:
         summary["parsed"] = sum(i.status != NOT_IN_SHEET for i in items)
         try:
             self._execute(items, summary, live=not self.cfg.runtime.dry_run)
+            self._prune()
         finally:
             self.state.save()  # keep what was written even if the pass broke off
         log.info(
@@ -748,6 +753,33 @@ class Syncer:
                 b["snapshot"] = _snapshot(hit[1])
             # Otherwise keep what the write returned (or None: baseline next pass).
 
+    def _prune(self) -> None:
+        """Forget records of events that ended longer ago than LSP keeps
+        events (its EventCleanupThresholdInDays setting), so the state file
+        doesn't grow forever."""
+        days = self._cleanup_days()
+        dropped = self.state.prune(datetime.now(timezone.utc) - timedelta(days=days))
+        if dropped:
+            log.info("Forgot %d event(s) that ended over %d days ago (LSP's event cleanup)",
+                     dropped, days)
+
+    def _cleanup_days(self) -> int:
+        """LSP's event cleanup threshold in days, or DEFAULT_CLEANUP_DAYS if
+        it can't be read (e.g. the login lacks lsp-config-read)."""
+        try:
+            days = int(self.lsp.get_general_settings().get("EventCleanupThresholdInDays") or 0)
+        except (LspError, TypeError, ValueError) as exc:
+            days, why = 0, str(exc)
+        else:
+            why = "not set"
+        if days > 0:
+            return days
+        if not getattr(self, "_cleanup_warned", False):
+            log.warning("Could not read LSP's event cleanup threshold (%s); keeping records "
+                        "for %d days after their events end", why, DEFAULT_CLEANUP_DAYS)
+            self._cleanup_warned = True
+        return DEFAULT_CLEANUP_DAYS
+
     # -- event name variable ------------------------------------------------
 
     def event_name_channels(self) -> dict:
@@ -847,11 +879,12 @@ class Syncer:
                 })
         events.sort(key=lambda ev: _parse_utc(ev["start"]) or cutoff)
 
-        # Tool-created events not found on any mapped channel (deleted or
-        # moved by hand in LSP, or their PCR is no longer mapped).
+        # Tool-created events in this window not found on any mapped channel
+        # (deleted or moved by hand in LSP, or their PCR is no longer mapped).
         missing = []
         for event_id, info in tool_ids.items():
-            if event_id in all_ids:
+            end = _parse_utc(info.get("end"))
+            if event_id in all_ids or (end is not None and end < cutoff):
                 continue
             missing.append({"id": event_id, "name": info.get("name"),
                             "pcr": info.get("pcr"), "source_tab": info.get("source_tab")})
@@ -859,17 +892,26 @@ class Syncer:
                 "variable": variable}
 
     def delete_created(self) -> dict:
-        """Delete from LSP every event this tool created, then forget them.
+        """Delete from LSP every upcoming event this tool created, then
+        forget them.
 
         Only touches events tagged as tool-created in local state, so events
-        already present in LSP (or made by hand) are never removed. Runs even
-        with dry run on, so events sent from Preview for testing can be
-        cleaned up without taking the loop live. Locked events (changed by
-        hand in LSP) are left alone too; unlock one to include it.
+        already present in LSP (or made by hand) are never removed. Events
+        that have started are skipped, so a recording in progress or a past
+        one's history is never removed. Runs even with dry run on, so events
+        sent from Preview for testing can be cleaned up without taking the
+        loop live. Locked events (changed by hand in LSP) are left alone too;
+        unlock one to include it.
         """
-        summary = {"deleted": 0, "failed": 0, "errors": [], "skipped_locked": 0}
+        summary = {"deleted": 0, "failed": 0, "errors": [], "skipped_locked": 0,
+                   "skipped_started": 0}
+        now = datetime.now(timezone.utc)
         for ref, info in self.state.tool_created():
             event_id = info.get("event_id")
+            start = _parse_utc(info.get("start"))
+            if start is None or start <= now:
+                summary["skipped_started"] += 1
+                continue
             if info.get("locked"):
                 summary["skipped_locked"] += 1
                 continue
@@ -883,7 +925,9 @@ class Syncer:
                 summary["errors"].append(f"{info.get('name')}: {exc}")
                 log.warning("Could not delete event %s: %s", event_id, exc)
         self.state.save()
-        log.info("Cleanup complete: deleted=%d failed=%d", summary["deleted"], summary["failed"])
+        log.info("Cleanup complete: deleted=%d failed=%d skipped: started=%d locked=%d",
+                 summary["deleted"], summary["failed"], summary["skipped_started"],
+                 summary["skipped_locked"])
         return summary
 
     def delete_events(self, event_ids: list[str]) -> dict:

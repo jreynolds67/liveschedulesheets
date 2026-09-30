@@ -286,8 +286,8 @@
     <div class="hint">Live from LSP: events on the mapped PCR channels. Events tagged
       <span class="pill tool">this tool</span> were created by this tool; <span class="pill locked">locked</span>
       ones were changed by hand in LSP, so the tool leaves them alone. <b>DELETE</b> on a row removes that
-      event from LSP on all its channels. <b>Delete tool-created events</b> removes every event this tool
-      created (except locked ones), for cleaning up between test runs.</div>
+      event from LSP on all its channels. <b>Delete tool-created events</b> removes every upcoming event this
+      tool created (not ones that have started, nor locked ones), for cleaning up between test runs.</div>
     <div class="schedbar hint">
       <label><input type="checkbox" id="schedToolOnly"> Only events created by this tool</label>
       <label>Show <select id="schedPast">
@@ -463,12 +463,14 @@ function gather(){
 
   cfg.tab_overrides = gatherTabs();
   cfg.event_overrides = cfg.event_overrides || {};
+  pruneOldOverrides();
   delete cfg.google_credentials_set;
   return cfg;
 }
 
 // ---- Tabs ----------------------------------------------------------------
 let tabsList = [];
+let allTabs = [];  // every tab name in the sheet, hidden ones too
 
 async function loadTabs(openGid=null){
   const sid = currentSheet();
@@ -476,12 +478,14 @@ async function loadTabs(openGid=null){
   const r = await api("GET","/api/tabs" + (sid ? `?spreadsheet=${encodeURIComponent(sid)}` : ""));
   if (!r.ok){
     loadedSheetId = null;  // so re-entering a good link reloads everything
+    tabsList = []; allTabs = [];
     $("sheetInfo").innerHTML = `<span style="color:var(--err)">Could not read the sheet: ${esc(r.error||"")}</span>`;
     $("mapTabs").innerHTML = ""; $("mapBox").className = "hint";
     $("mapBox").textContent = "Fix the sheet link / access above to preview it.";
     return;
   }
   tabsList = r.tabs || [];
+  allTabs = r.all_tabs || tabsList.map(t => t.name);
   loadedSheetId = r.spreadsheet_id;
   $("sheetInfo").innerHTML = `<span style="color:var(--accent2)">✓</span> <b>${esc(r.title||"Untitled sheet")}</b>
     · ${tabsList.length} visible tab(s) · <a href="${sheetUrl(r.spreadsheet_id)}" target="_blank" rel="noopener">open in Google Sheets ↗</a>`;
@@ -506,9 +510,12 @@ function setTabEnabled(name, on){
 }
 
 function gatherTabs(){
-  // Only record a tab that deviates from the default (enabled, auto rows).
+  // Only record a tab that deviates from the default (enabled, auto rows),
+  // and (once the saved sheet's tabs are loaded) only tabs it still has.
+  const known = loadedSheetId && loadedSheetId === currentSheet() ? new Set(allTabs) : null;
   const out = {};
   for (const [name, ov] of Object.entries(cfg.tab_overrides || {})){
+    if (known && !known.has(name)) continue;
     const o = {...ov};
     delete o.default_control_room;
     if (o.enabled !== false) delete o.enabled;
@@ -766,6 +773,15 @@ function cleanOv(){
     if (!cfg.event_overrides[tab].length) delete cfg.event_overrides[tab];
   }
   renderOverrides();
+}
+
+// Event fixes for games more than a day past can't change anything any more.
+function pruneOldOverrides(){
+  const d = new Date(Date.now() - 86400000);
+  const cutoff = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  for (const tab of Object.keys(cfg.event_overrides))
+    cfg.event_overrides[tab] = ovList(tab).filter(o => !o.date || o.date >= cutoff);
+  cleanOv();
 }
 
 function renderOverrides(){
@@ -1030,12 +1046,13 @@ $("btnRefreshCreated").onclick = () => loadScheduled();
 $("schedPast").onchange = () => loadScheduled();
 $("schedToolOnly").onchange = () => renderScheduled();
 $("btnDeleteCreated").onclick = async () => {
-  if (!confirm("Delete every event this tool created from Live Schedule Pro?\n\nOnly tool-created events are removed; anything else in LSP, and locked events changed by hand, are left alone.")) return;
+  if (!confirm("Delete every upcoming event this tool created from Live Schedule Pro?\n\nOnly tool-created events that haven't started are removed; anything else in LSP, events that have started, and locked events changed by hand are left alone.")) return;
   $("btnDeleteCreated").disabled = true; $("btnDeleteCreated").textContent = "Deleting…";
   const r = await api("POST","/api/delete-created");
   $("btnDeleteCreated").textContent = "Delete tool-created events";
   if (r.ok){ const s=r.summary;
-    toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}${s.skipped_locked?`; ${s.skipped_locked} locked left alone`:""}`);
+    const kept = [[s.skipped_started, "started"], [s.skipped_locked, "locked"]].filter(x => x[0]).map(x => `${x[0]} ${x[1]}`);
+    toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}${kept.length?`; left alone: ${kept.join(", ")}`:""}`, 4000);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);
   loadScheduled(); refreshStatus();

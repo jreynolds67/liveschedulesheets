@@ -19,6 +19,7 @@ import logging
 import os
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
@@ -95,9 +96,19 @@ class State:
                         "pcr": rec.get("pcr"), "source_tab": rec.get("tab"),
                         "channel_id": cid, "channel_name": b.get("channel_name"),
                         "event_id": b["event_id"], "created_at": b.get("created_at"),
+                        "start": rec.get("start"), "end": rec.get("end"),
                         "locked": bool(rec.get("locked")),
                     }))
         return out
+
+    def prune(self, ended_before: datetime) -> int:
+        """Drop records whose event ended before `ended_before` (LSP has
+        cleaned those events up too). Returns how many were dropped."""
+        old = [rid for rid, rec in self.events.items()
+               if (end := _parse_time(rec.get("end"))) is not None and end < ended_before]
+        for rid in old:
+            del self.events[rid]
+        return len(old)
 
     def forget(self, ref: tuple) -> None:
         """Drop one booking; a record left with none is dropped too, so the
@@ -137,6 +148,14 @@ class State:
         except OSError:
             log.exception("Could not write state file %s", self.path)
             raise
+
+
+def _parse_time(value) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def atomic_write(path: str, write) -> None:

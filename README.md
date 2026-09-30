@@ -96,20 +96,23 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
 - **Event fixes** — the PCR you pick or the **Ignore** you tick on a Preview
   row is saved as a per-event fix (matched by tab + date + event name) and
   applied on top of the sheet on every sync. The *Event fixes* card lists them;
-  remove one to go back to what the sheet says. (Stored as `event_overrides`.)
+  remove one to go back to what the sheet says. Fixes for games more than a
+  day in the past are dropped on the next Save, as are tab settings for tabs
+  the sheet no longer has. (Stored as `event_overrides`.)
 - **Run now**, and see the **last-run status** (the *Status* card at the top).
 - **See what's scheduled in LSP** — the *Scheduled in Live Schedule Pro* card
   lists, live from LSP, the upcoming and in-progress events on the mapped PCR
   channels (optionally the last 24 h / 7 days too). Events this tool created are
   tagged, with a filter to show only those, and it warns about tool-created
-  events that have disappeared from LSP.
+  events in the shown time range that have disappeared from LSP.
 - **Delete an event** — each row of that card has a **DELETE** button that
   removes the event from LSP on all its channels (any event, with a
   confirmation) and stops tracking it. If it's still in the sheet the next sync
   creates it again, so tick **Ignore** on it in Preview to keep it out.
-- **Clean up test events** — the same card can **delete just the events this
-  tool created** from LSP in one click. Events already in LSP (or created by
-  hand), and locked events, are never touched.
+- **Clean up test events** — the same card can **delete just the upcoming
+  events this tool created** from LSP in one click. Events already in LSP (or
+  created by hand), events that have started (in progress or past), and locked
+  events are never touched.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
 picks up changes automatically. (Optional: protect the UI with HTTP Basic auth
@@ -362,6 +365,13 @@ State from older versions (one hashed key per booking) is adopted into
 records automatically on the first pass. A booking whose name or start had
 already been changed in LSP, or which was deleted, is adopted as locked.
 
+**Old records are pruned.** LSP deletes events some days after they end (its
+*Event cleanup threshold*, read each pass from `GET /api/v1/settings/general`
+→ `EventCleanupThresholdInDays`). After each pass the tool forgets records
+whose events ended longer ago than that, so `state.json` doesn't grow
+forever. If the setting can't be read (the login needs `lsp-config-read`), it
+keeps records for 365 days.
+
 If `state.json` is lost, the tool falls back to matching LSP events by
 channel + name + start minute, so unchanged events aren't duplicated (they are
 then treated as made by hand and no longer follow the sheet). Events edited or
@@ -371,8 +381,10 @@ deleted in LSP would be created again, though, so keep the volume.
 
 The *Delete tool-created events* button on the UI's *Scheduled in Live Schedule
 Pro* card (and `POST /api/delete-created`)
-removes **only** the events this tool created — read from the `created_by_tool`
-entries in `state.json` and deleted via `DELETE /api/v1/RemoveEvent`. After a
+removes **only** the events this tool created that haven't started — read from
+the tool-created bookings in `state.json` and deleted via
+`DELETE /api/v1/RemoveEvent`. Events in progress or past, and locked ones, are
+skipped (the reply counts them as `skipped_started` / `skipped_locked`). After a
 delete they are forgotten from state, so a later pass will re-create them. This
 lets you iterate during testing without wiping hand-made events in LSP. It works
 with dry run on too, to clean up events sent one at a time from Preview.

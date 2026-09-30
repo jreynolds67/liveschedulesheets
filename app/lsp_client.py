@@ -147,6 +147,17 @@ class LspClient:
             raise LspError(f"GetAllChannels failed ({resp.status_code}): {resp.text[:300]}")
         return _json(resp, "GetAllChannels")
 
+    # -- settings -------------------------------------------------------------
+
+    def get_general_settings(self) -> dict:
+        """LSP's general settings (GET /api/v1/settings/general), e.g.
+        EventCleanupThresholdInDays: how long LSP keeps an event after it ends."""
+        resp = self._request("GET", "/api/v1/settings/general")
+        if resp.status_code != 200:
+            raise LspError(f"GetGeneralSettings failed ({resp.status_code}): {resp.text[:300]}")
+        data = _json(resp, "GetGeneralSettings")
+        return data if isinstance(data, dict) else {}
+
     # -- events -------------------------------------------------------------
 
     def get_events_for_channel(self, channel_id: str) -> list[dict]:

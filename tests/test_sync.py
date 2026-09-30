@@ -146,3 +146,64 @@ def test_lead_in_change_updates_unstarted_events(make_syncer, lsp):
     moved = sheet_event(lead_in=20)
     assert moved.start == sheet_event().start - timedelta(minutes=10)
     assert make_syncer([moved]).run_once()["updated"] == 2
+
+
+# -- longevity -----------------------------------------------------------------
+
+def _age(syncer, days_ago):
+    """Move every tracked record's event `days_ago` days into the past."""
+    from datetime import datetime, timezone
+    when = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    for rec in syncer.state.events.values():
+        rec["start"] = when.isoformat()
+        rec["end"] = (when + timedelta(hours=3)).isoformat()
+    syncer.state.save()
+
+
+def test_records_are_pruned_after_lsps_cleanup_threshold(make_syncer, lsp):
+    s = make_syncer([sheet_event()])
+    s.run_once()
+    _age(s, 100)
+    lsp.cleanup_days = 120
+    s = make_syncer([])
+    s.run_once()
+    assert len(s.state.events) == 1
+    lsp.cleanup_days = 90
+    s = make_syncer([])
+    s.run_once()
+    assert s.state.events == {}
+    assert make_syncer([]).state.events == {}  # and saved
+
+
+def test_unreadable_threshold_falls_back_to_a_year(make_syncer, lsp):
+    s = make_syncer([sheet_event()])
+    s.run_once()
+    lsp.cleanup_days = None  # settings call refused
+    _age(s, 200)
+    s = make_syncer([])
+    s.run_once()
+    assert len(s.state.events) == 1
+    _age(s, 400)
+    s = make_syncer([])
+    s.run_once()
+    assert s.state.events == {}
+
+
+def test_cleanup_skips_events_that_have_started(make_syncer, lsp):
+    s = make_syncer([sheet_event(pcr="B"), sheet_event(name="VB vs Duke", pcr="B", days=3)])
+    s.run_once()
+    started = next(r for r in s.state.events.values() if r["name"] == "WSOC vs Texas")
+    started["start"] = "2020-01-01T12:00:00+00:00"
+    summary = s.delete_created()
+    assert (summary["deleted"], summary["skipped_started"]) == (1, 1)
+    assert [e["Name"] for e in lsp.events.values()] == ["WSOC vs Texas"]
+
+
+def test_missing_warning_only_covers_the_shown_window(make_syncer, lsp):
+    s = make_syncer([sheet_event(pcr="B")])
+    s.run_once()
+    lsp.events.clear()  # deleted by hand in LSP
+    assert [m["name"] for m in s.scheduled_events()["missing"]] == ["WSOC vs Texas"]
+    _age(s, 10)
+    assert s.scheduled_events(past_days=7)["missing"] == []
+    assert len(s.scheduled_events(past_days=30)["missing"]) == 1

@@ -223,7 +223,9 @@ class SyncManager:
                 "in_allow_list": (name in allow) if allow else True,
                 "row_picks": len(ov.rows) if ov else 0,
             })
-        return {"spreadsheet_id": cfg.sheet.spreadsheet_id, "title": meta["title"], "tabs": out}
+        return {"spreadsheet_id": cfg.sheet.spreadsheet_id, "title": meta["title"], "tabs": out,
+                # every tab, hidden ones too: settings for others are dropped
+                "all_tabs": [t["name"] for t in meta["tabs"]]}
 
     def inspect_tab(self, tab: str, spreadsheet: Optional[str] = None,
                     rows: Optional[dict] = None, refresh: bool = False) -> dict:
