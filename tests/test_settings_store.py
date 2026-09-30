@@ -96,3 +96,14 @@ def test_load_safe_never_exposes_the_password(store):
     page = ui_copy(store)
     assert "password" not in page["lsp"] and "password_for" not in page["lsp"]
     assert page["lsp"]["password_set"] is True and page["_version"]
+
+
+def test_hand_typed_yaml_dates_reach_the_ui_as_iso(store):
+    text = open(store.path).read() + (
+        "event_overrides:\n  Football:\n  - date: 2026-10-03\n    event: FB vs UCF\n"
+        "    ignore: true\n")
+    open(store.path, "w").write(text)
+    [ov] = ui_copy(store)["event_overrides"]["Football"]
+    assert ov["date"] == "2026-10-03"
+    store.save_from_ui(ui_copy(store))
+    assert yaml.safe_load(open(store.path))["event_overrides"]["Football"][0]["date"] == "2026-10-03"

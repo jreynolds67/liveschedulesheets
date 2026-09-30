@@ -175,7 +175,7 @@ preview. **Times need AM/PM** unless they're unambiguous 24-hour times
 cells): a bare `7:00` could be morning or evening, so it's skipped and flagged
 “Start time has no AM/PM” instead of guessed. In a cell with notes, the first
 time is used, taking a later AM/PM if it has none (`6:30 & 9:00 PM` → 6:30
-PM); `NOON` counts as PM. Blank cells or `TBD`/`TBA` are skipped. If its
+PM); `Noon`, `12 NOON` and `12:00 NOON` are 12:00 PM. Blank cells or `TBD`/`TBA` are skipped. If its
 PCR is blank the event still shows in Preview flagged **no PCR**, so
 an engineer can assign one via the inline selector (saved as an event fix).
 
@@ -401,10 +401,13 @@ channel) as LSP reported it right after the tool last wrote it.
    event fixes): a changed **start time** or **PCR**;
 2. otherwise the same tab + name, when only one unmatched event and one
    unmatched record share it: a changed **date**;
-3. otherwise the same tab + column + date, likewise: a changed **name**.
+3. otherwise the same tab + column + date, likewise: a changed **name**;
+4. otherwise the same name + date + sheet start time on another tab, likewise:
+   a **renamed tab**, or a game moved to another tab.
 
-Steps 2–3 only match events that haven't started, so a finished game never
-swallows a later rematch. For a matched event that hasn't started, the tool
+Step 2 only matches events that haven't started, so a finished game never
+swallows a later rematch. Steps 3–4 also match a game in progress, so fixing
+its name after kickoff doesn't record it a second time. For a matched event that hasn't started, the tool
 updates the LSP event's name/start/end in place (`PatchEvent`), and when the PCR
 changes it removes the bookings on the old PCR's channels and creates them on
 the new ones. A new channel that matches the PCR gets a booking on the next
@@ -413,12 +416,18 @@ has started, sheet changes are no longer applied to it (and it's no longer
 checked for hand edits, since LSP may change a recording's end itself when it's
 stopped); its record keeps the times it started with, so a later time change
 in the sheet (a weather delay) can't make it look unstarted and move an event
-that is recording. Schedule the delayed game by hand in LSP.
+that is recording. Schedule the delayed game by hand in LSP. If an update
+reaches some channels but fails on others, the record keeps the times LSP
+still has (retried next pass), and the event counts as started from the
+earliest start on any of its channels.
 
 **No double bookings.** The tool never moves or creates an event onto a channel
 where LSP already has one with the same name and start minute: a new event
 (or a new channel after a PCR change) records that one as made by hand, and an
-update that would land on it is skipped and shown in Preview.
+update that would land on it is skipped and shown in Preview. An event another
+tracked sheet event owns is never taken for a hand-made one. A hand-made event
+is never changed, and Preview says when it differs from the sheet; if it's
+deleted from LSP, the tool books that channel itself on the next pass.
 
 **Suspicious changes are held.** If the sheet moves a tracked event outside
 the active window (into the past, or beyond `horizon_days`, usually a typo in

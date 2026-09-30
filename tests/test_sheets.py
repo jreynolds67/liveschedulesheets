@@ -76,6 +76,9 @@ def test_inspect_grid_flags_missing_year(tmp_path):
     ("17:30", "17:30"),              # 24-hour
     ("9:00:00", "9:00"),             # 24-hour with seconds, as Sheets formats it
     ("12:00 NOON", "12:00 PM"),
+    ("12 NOON", "12:00 PM"),
+    ("Noon", "12:00 PM"),
+    ("11:00 & 12 NOON", None),       # noon says nothing about the 11
     ("PRACTICE STARTS @2", None),    # bare number
     ("7:00", None),                  # 7 AM or 7 PM? refuse, don't guess
     ("7:00 ET", None),

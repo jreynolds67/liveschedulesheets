@@ -604,19 +604,21 @@ def _event_date_key(dt: datetime) -> str:
 _TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?(:\d{2})?\s*([AaPp]\.?[Mm]\.?)?(?![\w:])")
 _AMPM_RE = re.compile(r"\b([AaPp])\.?[Mm]\b\.?")
 _NOON_RE = re.compile(r"\bnoon\b", re.IGNORECASE)
+# "Noon" / "12 Noon" / "12:00 noon", written out as "12:00 NOON"
+_NOON_TIME_RE = re.compile(r"(?:\b12(?::00)?\s*)?\bnoon\b", re.IGNORECASE)
 
 
 def _first_time_token(text: str) -> Optional[str]:
     """Pull the first usable clock time out of a messy cell.
 
     "7 PM" -> "7:00 PM"; "6:30 & 9:00 PM" -> "6:30 PM" (the AM/PM later in the
-    cell applies); "17:30" and "9:00:00" -> 24-hour; "12:00 NOON" -> "12:00 PM".
+    cell applies); "17:30" and "9:00:00" -> 24-hour; "12 NOON" / "Noon" -> "12:00 PM".
     Returns None when there's no time, for a bare number ("@2"), and for an
     hour 1-12 with no AM/PM anywhere in the cell ("7:00 ET"): that could be
     morning or evening, and guessing morning is how a 7 PM game gets recorded
     at 7 AM.
     """
-    t = text.strip()
+    t = _NOON_TIME_RE.sub("12:00 NOON", text.strip())
     for m in _TIME_RE.finditer(t):
         hour, minute, seconds, ampm = m.group(1), m.group(2), m.group(3), m.group(4)
         if minute is None and ampm is None:

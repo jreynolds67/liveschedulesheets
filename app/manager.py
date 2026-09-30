@@ -56,6 +56,8 @@ class SyncManager:
         self._on_unhealthy = on_unhealthy
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # Set when the settings are saved, so the loop re-reads the interval.
+        self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
         self._cache_hash: Optional[str] = None
@@ -392,6 +394,7 @@ class SyncManager:
         """Ask the loop to stop and wait (up to `timeout`) for a pass in
         progress to finish its current LSP write and save state."""
         self._stop.set()
+        self._wake.set()
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout)
             if self._thread.is_alive():
@@ -415,10 +418,31 @@ class SyncManager:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 log.exception("Unhandled error during sync pass")
 
-            # Interruptible sleep.
-            self._heartbeat = time.monotonic()
-            self._stop.wait(timeout=max(60, interval))
+            self._sleep(interval)
         log.info("Background sync loop stopped")
+
+    def settings_saved(self) -> None:
+        """The settings were saved: a new poll interval applies to the wait
+        already under way, not only from the next pass on."""
+        self._wake.set()
+
+    def _sleep(self, interval: int) -> None:
+        """Wait `interval` seconds from now, or until shutdown. Re-reads the
+        saved interval whenever the settings are saved."""
+        self._heartbeat = began = time.monotonic()
+        # A save during the pass leaves _wake set, so it is read at once.
+        deadline = began + max(60, interval)
+        while not self._stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._wake.wait(remaining):
+                return
+            self._wake.clear()
+            try:
+                interval = parse_lsp_settings(self.store.load()).runtime.poll_interval_seconds
+            except (ConfigError, OSError):
+                continue  # keep the wait as it was
+            self._interval = interval
+            deadline = began + max(60, interval)
 
 
 def _service_account_email(cfg) -> str:

@@ -339,6 +339,13 @@ async function saveConfig(){
   }
   if (!r.saved){ toast("Save failed: " + (r.error || "unknown error"), 5000); return null; }
   cfg._version = r.version;
+  if (cfg.lsp && cfg.lsp.password){
+    // Saved: don't send it again with every later save (it's re-bound to
+    // the server URL each time, which would defeat clearing it when the URL
+    // changes without the password being entered again).
+    delete cfg.lsp.password; $("lsp_password").value = "";
+    $("pwSet").textContent = "(set)"; cfg.lsp.password_set = true;
+  }
   if (r.password_cleared){
     $("pwSet").textContent = "(not set)"; cfg.lsp.password_set = false;
     toast("LSP server changed, so the saved password was cleared - enter it again", 6000);

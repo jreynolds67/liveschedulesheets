@@ -398,3 +398,131 @@ def test_dry_run_does_not_record_hand_made_events(key_file, state_path, lsp):
     assert statuses(s) == [EXISTS]
     s.run_once()
     assert s.state.events == {}
+
+
+# -- matching a sheet event to what the tool already made ------------------------
+
+def test_renamed_tab_keeps_its_events(make_syncer, lsp):
+    make_syncer([sheet_event(tab="Fall Olympic")]).run_once()
+    s = make_syncer([sheet_event(tab="Fall Olympics")])
+    assert statuses(s) == [EXISTS]
+    s.run_once()
+    [rec] = s.state.events.values()
+    assert rec["tab"] == "Fall Olympics"
+    assert all(b["by_tool"] for b in rec["bookings"].values())
+    # ...so a later time change is still applied.
+    s = make_syncer([sheet_event(tab="Fall Olympics", hour=21)])
+    assert statuses(s) == [UPDATE]
+    s.run_once()
+    assert all("T20:50:00" in e["Start"] for e in lsp.events.values())
+
+
+def test_another_sheet_events_booking_is_never_taken_for_a_hand_made_one(make_syncer, lsp):
+    make_syncer([sheet_event(tab="Football")]).run_once()
+    # The same game also listed on another tab.
+    s = make_syncer([sheet_event(tab="Football"), sheet_event(tab="Composite")])
+    items = s.plan()
+    assert [i.status for i in items] == [EXISTS, EXISTS]
+    assert "another sheet event" in items[1].message
+    s.run_once()
+    assert len(s.state.events) == 1 and len(lsp.events) == 2
+
+
+def test_rename_after_kickoff_does_not_record_it_twice(key_file, state_path, lsp):
+    from datetime import datetime
+    from app.config import parse_config
+    from app.models import ScheduledEvent
+    from app.sync import Syncer
+    from .conftest import TZ, raw_config
+
+    def game(name):
+        # Started 5 minutes ago: inside the 30-minute grace for new events.
+        start = datetime.now(TZ).replace(second=0, microsecond=0) + timedelta(minutes=5)
+        return ScheduledEvent(name=name, pcr="A", start=start, end=start + timedelta(hours=3),
+                              source_tab="Football", source_column=2,
+                              event_date=start.date().isoformat(),
+                              sheet_start=start.strftime("%Y-%m-%dT%H:%M"))
+
+    cfg = parse_config(raw_config(key_file, state_path))
+    Syncer(cfg, FakeReader([game("FB vs UCF")]), lsp, State(state_path)).run_once()
+    for e in lsp.events.values():  # it has started
+        e["Start"] = (datetime.fromisoformat(e["Start"]) - timedelta(minutes=10)).isoformat()
+    state = State(state_path)
+    for rec in state.events.values():
+        rec["start"] = (datetime.fromisoformat(rec["start"]) - timedelta(minutes=10)).isoformat()
+    s = Syncer(cfg, FakeReader([game("FB vs UCF (Homecoming)")]), lsp, state)
+    [item] = s.plan()
+    assert item.status == EXISTS and item.started
+    s.run_once()
+    assert len(lsp.events) == 2
+
+
+# -- hand-made bookings -------------------------------------------------------
+
+def test_deleted_hand_made_event_is_booked_again(make_syncer, lsp):
+    ev = sheet_event(pcr="B")
+    hand = lsp.add_hand_made("b1", ev.name, ev.start, ev.end)
+    make_syncer([ev]).run_once()
+    del lsp.events[hand["Id"]]
+    s = make_syncer([ev])
+    assert statuses(s) == [UPDATE]
+    assert s.run_once()["created"] == 1
+    [e] = lsp.events.values()
+    [rec] = s.state.events.values()
+    assert rec["bookings"]["b1"] == {**rec["bookings"]["b1"], "event_id": e["Id"], "by_tool": True}
+
+
+def test_hand_made_event_that_differs_from_the_sheet_says_so(make_syncer, lsp):
+    ev = sheet_event(pcr="B", hour=19)
+    lsp.add_hand_made("b1", ev.name, ev.start, ev.end)
+    make_syncer([ev]).run_once()
+    [item] = make_syncer([sheet_event(pcr="B", hour=21)]).plan()
+    assert item.status == EXISTS
+    assert "differs from the sheet" in item.message
+
+
+# -- writes that fail or find LSP changed ---------------------------------------
+
+def test_failed_update_keeps_the_times_lsp_has(make_syncer, lsp):
+    make_syncer([sheet_event(hour=19)]).run_once()
+    [rid] = make_syncer([]).state.events
+
+    def fail(*_a, **_k):
+        raise LspError("timed out")
+
+    real, lsp.patch_event = lsp.patch_event, fail
+    s = make_syncer([sheet_event(hour=21)])
+    assert s.run_once()["errors"] == 2
+    assert "T18:50:00" in s.state.events[rid]["start"]
+    lsp.patch_event = real
+    assert make_syncer([sheet_event(hour=21)]).run_once()["updated"] == 2
+
+
+def test_partial_update_counts_as_started_from_the_earliest_channel(make_syncer, lsp):
+    from app.state import record_start
+    make_syncer([sheet_event(hour=19)]).run_once()
+    real = lsp.patch_event
+
+    def fail_a2(event_id, *a, **k):
+        if lsp.events[event_id]["ChannelId"] == "a2":
+            raise LspError("timed out")
+        return real(event_id, *a, **k)
+
+    lsp.patch_event = fail_a2
+    s = make_syncer([sheet_event(hour=17)])  # moved earlier; only a1 takes it
+    s.run_once()
+    [rec] = s.state.events.values()
+    assert "T18:50:00" in rec["start"]
+    assert "T16:50:00" in record_start(rec).astimezone(sheet_event().start.tzinfo).isoformat()
+
+
+def test_pcr_change_removes_an_event_lsp_gave_a_new_id(make_syncer, lsp):
+    import uuid
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    old = next(k for k, v in lsp.events.items() if v["ChannelId"] == "a1")
+    e = lsp.events.pop(old)
+    e["Id"] = str(uuid.uuid4())
+    lsp.events[e["Id"]] = e
+    s = make_syncer([sheet_event(pcr="B")])
+    s.run_once()
+    assert [v["ChannelId"] for v in lsp.events.values()] == ["b1"]

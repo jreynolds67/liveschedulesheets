@@ -100,6 +100,7 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
             saved = store.save_from_ui(incoming)
         except ConfigConflict as exc:
             return jsonify({"saved": False, "conflict": True, "error": str(exc)}), 409
+        manager.settings_saved()
         # Report whether the saved config is fully valid (loop tolerates invalid).
         result = {"saved": True, "valid": True, "error": None, "version": saved["version"],
                   "password_cleared": saved["password_cleared"]}

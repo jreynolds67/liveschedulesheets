@@ -6,6 +6,7 @@ with a sensible, editable config.
 from __future__ import annotations
 
 import copy
+import datetime
 import hashlib
 import json
 import logging
@@ -47,6 +48,19 @@ def config_version(raw: dict) -> str:
     (view.get("runtime") or {}).pop("live", None)
     blob = json.dumps(view, sort_keys=True, default=str).encode()
     return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _iso_dates(value):
+    """`value` with YAML dates / timestamps (an unquoted `date: 2026-10-03`
+    typed into config.yaml) as ISO text. JSON would send them as HTTP dates
+    ("Sat, 03 Oct 2026 00:00:00 GMT"), and the UI saves back what it got."""
+    if isinstance(value, dict):
+        return {k: _iso_dates(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_iso_dates(v) for v in value]
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    return value
 
 
 def _placeholder_url(url: str) -> bool:
@@ -100,7 +114,7 @@ class SettingsStore:
 
     def load_safe(self) -> dict:
         """Config for the browser: password removed, replaced with a 'set' flag."""
-        raw = copy.deepcopy(self.load())
+        raw = _iso_dates(copy.deepcopy(self.load()))
         version = config_version(raw)
         lsp = raw.get("lsp") or {}
         lsp["password_set"] = bool(effective_password(lsp))

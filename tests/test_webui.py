@@ -22,6 +22,9 @@ class StubManager:
     def health(self):
         return self.healthy
 
+    def settings_saved(self):
+        pass
+
 
 @pytest.fixture
 def client():

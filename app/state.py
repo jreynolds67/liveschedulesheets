@@ -90,7 +90,8 @@ class State:
                         "pcr": rec.get("pcr"), "source_tab": rec.get("tab"),
                         "channel_id": cid, "channel_name": b.get("channel_name"),
                         "event_id": b["event_id"], "created_at": b.get("created_at"),
-                        "start": rec.get("start"), "end": rec.get("end"),
+                        "start": (s.isoformat() if (s := record_start(rec)) else rec.get("start")),
+                        "end": rec.get("end"),
                         "locked": bool(rec.get("locked")),
                     }))
         return out
@@ -135,6 +136,18 @@ class State:
         except OSError:
             log.exception("Could not write state file %s", self.path)
             raise
+
+
+def record_start(rec: dict) -> Optional[datetime]:
+    """When a record's event starts in LSP: the earliest of the record's
+    start and the start last written to each of its channels. They differ
+    after a pass whose update reached some channels but not others; a
+    channel that starts sooner counts, so a recording is never changed."""
+    starts = [_parse_time(rec.get("start"))]
+    starts += [_parse_time((b.get("written") or {}).get("Start"))
+               for b in (rec.get("bookings") or {}).values() if b.get("by_tool")]
+    starts = [s for s in starts if s is not None]
+    return min(starts) if starts else None
 
 
 def _parse_time(value) -> Optional[datetime]:

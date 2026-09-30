@@ -164,3 +164,18 @@ def test_pass_progress_keeps_the_loop_healthy(tmp_path, key_file, monkeypatch):
     m._heartbeat = 0
     syncer.heartbeat()
     assert time.monotonic() - m._heartbeat < 1
+
+
+def test_saving_a_shorter_interval_cuts_the_wait_short(tmp_path, key_file, monkeypatch):
+    m = manager(tmp_path, key_file, monkeypatch)
+    clock = [1000.0]
+    monkeypatch.setattr("app.manager.time.monotonic", lambda: clock[0])
+    done = threading.Event()
+    threading.Thread(target=lambda: (m._sleep(86400), done.set()), daemon=True).start()
+    time.sleep(0.05)
+    assert not done.is_set()
+    clock[0] += 120  # two minutes later, the interval is saved as one minute
+    m.store.update(lambda raw: raw["runtime"].update(poll_interval_seconds=60))
+    m.settings_saved()
+    assert done.wait(2)
+    assert m._interval == 60
