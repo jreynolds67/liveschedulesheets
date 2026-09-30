@@ -4,7 +4,8 @@ Works out how the server wants to be authenticated on first use:
   1. no auth -- some servers (Basic auth provider) accept anonymous API calls;
   2. bearer token from /api/v1/auth/login, refreshed / re-obtained on 401;
   3. HTTP Basic auth header with the username and password.
-Also handles channel lookup and creating, updating and removing events.
+Also handles channel lookup, linking a channel's event-name variable, and
+creating, updating and removing events.
 """
 from __future__ import annotations
 
@@ -133,6 +134,39 @@ class LspClient:
         if resp.status_code != 200:
             raise LspError(f"GetAllChannels failed ({resp.status_code}): {resp.text[:300]}")
         return resp.json()
+
+    def get_event_name_variables(self, channel_id: str) -> list[dict]:
+        """The labels on a channel whose parameters can hold the event name:
+        [{Identifier, Name, Parameters: [{Identifier, Name}]}]."""
+        resp = self._request(
+            "GET", "/api/v1/GetAvailableSyncEventNameLabelsParametersForChannel",
+            params={"channelId": channel_id},
+        )
+        if resp.status_code != 200:
+            raise LspError(
+                f"Listing label parameters failed for {channel_id} "
+                f"({resp.status_code}): {resp.text[:300]}"
+            )
+        return resp.json() or []
+
+    def link_event_name(self, channel_id: str, parameter_id: str, force: bool = False) -> None:
+        """Have LSP copy each event's name into this label parameter for every
+        event on the channel (the channel's "sync event name" setting)."""
+        self._check_writable(f"link the event name variable on channel {channel_id}", force)
+        body = {"ChannelId": channel_id, "SyncEventNameWithLabelParameter": True,
+                "LabelParameterId": parameter_id}
+        resp = self._request("POST", "/api/v1/SetSyncEventNameLabelParametersForChannel", json=body)
+        if resp.status_code != 200:
+            raise LspError(
+                f"Linking the event name variable failed for {channel_id} "
+                f"({resp.status_code}): {resp.text[:300]}"
+            )
+        try:
+            kind = resp.json().get("ResultKind")
+        except (ValueError, AttributeError):
+            kind = None
+        if kind and kind != "Success":
+            raise LspError(f"Linking the event name variable on {channel_id} returned {kind}")
 
     # -- events -------------------------------------------------------------
 

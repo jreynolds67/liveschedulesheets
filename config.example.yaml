@@ -114,6 +114,11 @@ event_overrides: {}
 lsp:
   base_url: "https://live-schedule-pro.example.com"   # no trailing slash
   verify_ssl: true                                     # false only for self-signed certs
+  # The label parameter ("variable") on each PCR channel that LSP fills with the
+  # event name, e.g. "VB STANFORD PITT". Every sync sets each PCR channel's
+  # "sync event name with label parameter" option to the parameter with this
+  # name (ignoring case). Blank = leave the channels' setting alone.
+  event_name_variable: "Event Name"
 
 runtime:
   poll_interval_seconds: 900   # 15 minutes

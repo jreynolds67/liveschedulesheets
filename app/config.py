@@ -122,6 +122,9 @@ class LspConfig:
     verify_ssl: bool
     username: str
     password: str
+    # Name of the label parameter ("variable") on each PCR channel that LSP
+    # fills with the event name; "" = leave the channels' setting alone.
+    event_name_variable: str = "Event Name"
 
 
 @dataclass
@@ -334,6 +337,7 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
         verify_ssl=bool(lsp_raw.get("verify_ssl", True)),
         username=username,
         password=password,
+        event_name_variable=str(lsp_raw.get("event_name_variable", "Event Name") or "").strip(),
     )
 
     rt_raw = raw.get("runtime", {}) or {}

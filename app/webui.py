@@ -101,6 +101,24 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.get("/api/event-name-links")
+    @require_auth
+    def event_name_links():
+        """Which PCR channels copy the event name into their event-name variable."""
+        try:
+            return jsonify({"ok": True, **manager.event_name_links()})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
+    @app.post("/api/event-name-links")
+    @require_auth
+    def link_event_names():
+        """Link the event-name variable on every PCR channel now (even in dry run)."""
+        try:
+            return jsonify({"ok": True, **manager.event_name_links(apply=True)})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     @app.get("/api/tabs")
     @require_auth
     def tabs():

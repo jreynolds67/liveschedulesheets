@@ -207,6 +207,14 @@
     <div id="pcrRows"></div>
     <div class="row"><button id="btnAddPcr" class="ghost">+ Add PCR</button>
       <span class="hint" id="channelHint"></span></div>
+    <div><label>Event name variable</label>
+      <input type="text" id="lsp_event_var" placeholder="Event Name" />
+      <div class="hint" style="margin-top:6px">The label parameter on each PCR channel that gets the event's name
+        (e.g. “VB STANFORD PITT”). Every sync sets each channel's <i>sync event name</i> option to it, so LSP
+        fills it in for every event on that channel. Leave blank to leave the channels alone.</div></div>
+    <div id="varBox" class="hint"></div>
+    <div class="row"><button id="btnCheckVar" class="ghost">Check channels</button>
+      <button id="btnLinkVar" class="ghost">Link now</button></div>
   </div></section>
 
   <!-- Scheduling -->
@@ -323,6 +331,7 @@ function fillForm(){
   $("lsp_username").value = get(cfg,"lsp.username","");
   $("lsp_password").value = "";
   $("pwSet").textContent = get(cfg,"lsp.password_set",false) ? "(set)" : "(not set)";
+  $("lsp_event_var").value = get(cfg,"lsp.event_name_variable","Event Name");
   loadGoogleKey();
 
   const sid = get(cfg,"sheet.spreadsheet_id","");
@@ -411,6 +420,7 @@ function gather(){
   const pw = $("lsp_password").value;
   if (pw) cfg.lsp.password = pw;            // only send when changed
   delete cfg.lsp.password_set;
+  cfg.lsp.event_name_variable = $("lsp_event_var").value.trim();
 
   cfg.sheet = cfg.sheet || {};
   cfg.sheet.spreadsheet_id = currentSheet() || $("sheet_id").value.trim();
@@ -984,7 +994,30 @@ async function loadChannels(){
   }
 }
 
+const VAR_STATUS = {linked:["exists","linked"], linked_now:["create","linked now"], needs_link:["update","not linked"],
+  missing:["no_channel","no variable"], error:["error","error"], off:["ignore","off"]};
+function renderVarLinks(r){
+  if (!r.ok){ $("varBox").innerHTML = `<span style="color:var(--err)">${esc(r.error||"")}</span>`; return; }
+  if (!r.channels.length){ $("varBox").textContent = "No PCR channels found in LSP."; return; }
+  $("varBox").innerHTML = `<div style="overflow-x:auto"><table><thead><tr><th>Channel</th><th>PCR</th><th>Status</th><th></th></tr></thead><tbody>`
+    + r.channels.map(c => { const [cls, txt] = VAR_STATUS[c.status] || ["exists", c.status];
+      return `<tr><td>${esc(c.name)}</td><td>${esc(c.pcr)}</td><td><span class="pill ${cls}">${txt}</span></td><td class="hint">${esc(c.message||"")}</td></tr>`; }).join("")
+    + `</tbody></table></div>`;
+}
+async function checkVarLinks(){
+  await api("POST","/api/config", gather());
+  $("varBox").textContent = "Checking channels…";
+  renderVarLinks(await api("GET","/api/event-name-links"));
+}
+
 // Wire up buttons
+$("btnCheckVar").onclick = checkVarLinks;
+$("btnLinkVar").onclick = async () => {
+  if (!confirm("Set every PCR channel in Live Schedule Pro to copy the event name into this variable?\n\nThis changes the channels' settings in LSP now, even with dry run on.")) return;
+  await api("POST","/api/config", gather());
+  $("varBox").textContent = "Linking…";
+  renderVarLinks(await api("POST","/api/event-name-links"));
+};
 $("btnAddPcr").onclick = () => addPcrRow();
 $("btnAddCap").onclick = () => addCapRow();
 $("btnRefreshTabs").onclick = () => loadTabs();
@@ -1056,6 +1089,7 @@ $("btnRun").onclick = async () => {
   await loadConfig();
   await refreshStatus();
   loadChannels();
+  api("GET","/api/event-name-links").then(renderVarLinks);
   loadTabs();
   loadScheduled();
   setInterval(refreshStatus, 15000);

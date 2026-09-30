@@ -9,7 +9,9 @@ one *booking* per LSP channel. A pass keeps LSP in step with the sheet:
   channels when its PCR changes;
 - a tracked event that someone changed in LSP by hand (edited, deleted, or
   moved to another channel) is *locked*: the tool never changes it again until
-  an engineer unlocks it in the UI.
+  an engineer unlocks it in the UI;
+- each PCR channel is set to copy the event name into its event-name
+  variable (the label parameter named `lsp.event_name_variable`).
 
 `plan()` is read-only and classifies every event; `run_once()` executes the
 plan. The web UI uses `plan()` for its preview so what you see is exactly what
@@ -421,6 +423,8 @@ class Syncer:
         """Execute the plan. Counts are per channel, except `parsed` / window /
         no-channel / locked / not-in-sheet, which count sheet events."""
         summary = _summary(self.cfg.runtime.dry_run)
+        # Link the channels first, so events created this pass get the name.
+        self._link_for_pass(summary, apply=not self.cfg.runtime.dry_run)
         try:
             items = self.plan()
         except LspError:
@@ -458,6 +462,8 @@ class Syncer:
             raise LspError(f"Nothing to send: {item.message or item.status}")
         summary = _summary(False)
         summary["name"] = item.lsp_name
+        chans = {t.channel_id for t in item.targets if t.status in (CREATE, UPDATE)}
+        self._link_for_pass(summary, apply=True, force=True, channel_ids=chans)
         self._execute([item], summary, live=True, force=True)
         self.state.save()
         log.info("Sent %r to LSP from preview: created=%d updated=%d removed=%d errors=%d",
@@ -635,6 +641,88 @@ class Syncer:
                 b["snapshot"] = _snapshot(hit[1])
             # Otherwise keep what the write returned (or None: baseline next pass).
 
+    # -- event name variable ------------------------------------------------
+
+    def event_name_links(self, apply: bool = False, force: bool = False,
+                         channel_ids: Optional[set[str]] = None) -> dict:
+        """For each mapped PCR channel (or just `channel_ids`): whether LSP
+        copies the event name into the channel's event-name variable, i.e. its
+        "sync event name" setting points at the label parameter named
+        `lsp.event_name_variable`. With `apply`, links the channels that
+        aren't. Returns {"variable", "channels": [{id, name, pcr, status,
+        message}]}; status is linked / linked_now / needs_link / missing /
+        error, or off when no variable is configured."""
+        variable = self.cfg.lsp.event_name_variable
+        channels = self.lsp.get_all_channels()
+        by_id = {c["Id"]: c for c in channels if c.get("Id")}
+        pcrs: dict[str, list[str]] = {}
+        for pcr, found in self._resolve_channels(channels).items():
+            for cid, _ in found:
+                if channel_ids is None or cid in channel_ids:
+                    pcrs.setdefault(cid, []).append(pcr)
+
+        out = []
+        for cid, pcr_list in sorted(pcrs.items(), key=lambda kv: (by_id[kv[0]].get("Name") or "").lower()):
+            ch = by_id[cid]
+            row = {"id": cid, "name": ch.get("Name") or cid, "pcr": "/".join(sorted(pcr_list))}
+            out.append(row)
+            if not variable:
+                row.update(status="off", message="No event name variable set")
+                continue
+            try:
+                param, others = _find_variable(self.lsp.get_event_name_variables(cid), variable)
+            except LspError as exc:
+                log.warning("Could not read label parameters for %s: %s", row["name"], exc)
+                row.update(status=ERROR, message="Could not read its labels from LSP")
+                continue
+            if param is None:
+                row.update(status="missing", message=(
+                    f"No “{variable}” variable in this channel's labels"
+                    + (f" (has: {', '.join(others)})" if others else " (it has no label parameters)")))
+                continue
+            if ch.get("SyncEventNameWithLabelParameter") and \
+                    str(ch.get("SyncLabelParameterId") or "").lower() == param["id"].lower():
+                row.update(status="linked", message=f"Event name → {param['label']} / {param['name']}")
+                continue
+            was = "currently fills another variable" if ch.get("SyncEventNameWithLabelParameter") \
+                else "not linked yet"
+            if not apply:
+                row.update(status="needs_link", message=f"{was}; will use {param['label']} / {param['name']}")
+                continue
+            try:
+                self.lsp.link_event_name(cid, param["id"], force=force)
+            except LspError as exc:
+                log.warning("Could not link %r on %s: %s", variable, row["name"], exc)
+                row.update(status=ERROR, message=str(exc))
+                continue
+            log.info("Linked %s: LSP now copies the event name into %s / %s",
+                     row["name"], param["label"], param["name"])
+            row.update(status="linked_now", message=f"Event name → {param['label']} / {param['name']}")
+        return {"variable": variable, "channels": out}
+
+    def _link_for_pass(self, summary: dict, apply: bool, force: bool = False,
+                       channel_ids: Optional[set[str]] = None) -> None:
+        """Link the event-name variable as part of a pass / send; problems are
+        logged and counted but never stop the events being scheduled."""
+        if not self.cfg.lsp.event_name_variable:
+            return
+        try:
+            rows = self.event_name_links(apply=apply, force=force, channel_ids=channel_ids)["channels"]
+        except LspError:
+            log.exception("Could not check the event name variable on the channels")
+            summary["errors"] += 1
+            return
+        summary["variable_linked"] = sum(r["status"] == "linked_now" for r in rows)
+        pending = [r["name"] for r in rows if r["status"] == "needs_link"]
+        if pending:
+            log.info("[DRY RUN] would link the %r variable on %s",
+                     self.cfg.lsp.event_name_variable, ", ".join(pending))
+        missing = [r["name"] for r in rows if r["status"] == "missing"]
+        if missing:
+            log.warning("No %r variable on %s: LSP can't fill it with the event name there",
+                        self.cfg.lsp.event_name_variable, ", ".join(missing))
+        summary["errors"] += sum(r["status"] == ERROR for r in rows)
+
     # -- cleanup (testing) --------------------------------------------------
 
     def created_events(self) -> list[dict]:
@@ -783,7 +871,23 @@ _COUNTER = {CREATE: "created", UPDATE: "updated", DELETE: "deleted"}
 def _summary(dry_run: bool) -> dict:
     return {"parsed": 0, "created": 0, "updated": 0, "deleted": 0, "skipped_existing": 0,
             "locked": 0, "not_in_sheet": 0, "skipped_window": 0, "no_channel": 0,
-            "errors": 0, "dry_run": dry_run}
+            "errors": 0, "variable_linked": 0, "dry_run": dry_run}
+
+
+def _find_variable(labels: list[dict], variable: str) -> tuple[Optional[dict], list[str]]:
+    """The label parameter named `variable` (ignoring case and spacing) among
+    a channel's labels, as {id, name, label}, and every parameter name seen."""
+    want = " ".join(variable.split()).lower()
+    seen = []
+    for label in labels or []:
+        for p in label.get("Parameters") or []:
+            name = (p.get("Name") or "").strip()
+            if name and name not in seen:
+                seen.append(name)
+            if " ".join(name.split()).lower() == want and p.get("Identifier"):
+                return {"id": str(p["Identifier"]), "name": name,
+                        "label": (label.get("Name") or "").strip() or "label"}, seen
+    return None, seen
 
 
 def _record_fields(item: PlanItem) -> dict:
