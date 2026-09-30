@@ -1,9 +1,11 @@
 """Sheet parsing (pure; no Google calls)."""
 from __future__ import annotations
 
+import pytest
+
 from app.config import parse_config
-from app.sheets import (_first_time_token, _normalize_room, a1_tab, inspect_grid, locate_rows,
-                        parse_grid)
+from app.sheets import (SheetError, SheetReader, _first_time_token, _normalize_room, a1_tab,
+                        inspect_grid, locate_rows, parse_grid)
 
 from .conftest import raw_config
 
@@ -66,10 +68,78 @@ def test_inspect_grid_flags_missing_year(tmp_path):
     assert out["summary"]["ready"] == 2
 
 
-def test_time_tokens():
-    assert _first_time_token("6:30 & 9:00 PM") == "6:30"
-    assert _first_time_token("7 PM") == "7:00 PM"
-    assert _first_time_token("PRACTICE STARTS @2") is None
+@pytest.mark.parametrize("cell, want", [
+    ("6:30 & 9:00 PM", "6:30 PM"),   # the AM/PM later in the cell applies
+    ("7 PM", "7:00 PM"),
+    ("7 p.m.", "7:00 PM"),
+    ("Kickoff 3:30 PM (ESPN2)", "3:30 PM"),
+    ("17:30", "17:30"),              # 24-hour
+    ("9:00:00", "9:00"),             # 24-hour with seconds, as Sheets formats it
+    ("12:00 NOON", "12:00 PM"),
+    ("PRACTICE STARTS @2", None),    # bare number
+    ("7:00", None),                  # 7 AM or 7 PM? refuse, don't guess
+    ("7:00 ET", None),
+])
+def test_time_tokens(cell, want):
+    assert _first_time_token(cell) == want
+
+
+def test_inspect_grid_flags_missing_am_pm(tmp_path):
+    grid = [["DATE", "9/12/2026"], ["EVENT", "FB vs UCF"], ["GAME START", "7:00"],
+            ["CONTROL ROOM", "A"]]
+    col = inspect_grid("Fall", grid, cfg_for(tmp_path))["columns"][0]
+    assert col["status"] == "no_start" and "AM/PM" in col["problem"]
+    assert parse_grid("Fall", grid, cfg_for(tmp_path)) == []
+
+
+def test_doubleheader_numbering_ignores_missing_times(tmp_path):
+    """Game 2 keeps occurrence 1 (and its fixes) while game 1's time is TBD."""
+    grid = [["DATE", "9/12/2026", "9/12/2026"], ["EVENT", "BSB vs Duke", "BSB vs Duke"],
+            ["GAME START", "TBD", "4:00 PM"], ["CONTROL ROOM", "A", "B"]]
+    [game2] = parse_grid("Spring", grid, cfg_for(tmp_path))
+    assert (game2.occurrence, game2.pcr) == (1, "B")
+    grid[2][1] = "1:00 PM"
+    assert [(e.occurrence, e.pcr) for e in parse_grid("Spring", grid, cfg_for(tmp_path))] == [
+        (0, "A"), (1, "B")]
+
+
+class _Google:
+    """Stands in for the Sheets service: metadata and tab reads can fail."""
+
+    def __init__(self, meta_error=None, bad_tabs=()):
+        self.meta_error, self.bad_tabs = meta_error, bad_tabs
+
+
+def _reader(tmp_path, google):
+    r = SheetReader.__new__(SheetReader)  # skip the Google client setup
+    r.cfg = cfg_for(tmp_path)
+
+    def meta():
+        if google.meta_error:
+            raise google.meta_error
+        return {"title": "t", "tabs": [{"name": n, "gid": 0, "hidden": False}
+                                       for n in ("Fall", "Spring")]}
+
+    def grid(tab):
+        if tab in google.bad_tabs:
+            raise RuntimeError("HttpError 500")
+        return GRID
+
+    r.sheet_meta, r.fetch_grid = meta, grid
+    return r
+
+
+def test_unreadable_sheet_is_an_error_not_an_empty_sheet(tmp_path):
+    r = _reader(tmp_path, _Google(meta_error=RuntimeError("HttpError 403 caller does not have "
+                                                           "permission")))
+    with pytest.raises(SheetError, match="403"):
+        r.read_events()
+
+
+def test_one_bad_tab_is_reported(tmp_path):
+    r = _reader(tmp_path, _Google(bad_tabs=("Spring",)))
+    assert len(r.read_events()) == 2
+    assert r.errors == ["Could not read tab 'Spring': HttpError 500"]
 
 
 def test_room_normalisation():

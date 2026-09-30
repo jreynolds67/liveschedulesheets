@@ -26,22 +26,37 @@ class State:
     def __init__(self, path: str):
         self.path = path
         self.events: dict[str, dict] = {}      # record id -> record
+        # Set when the file was unreadable JSON and had to be set aside.
+        self.load_error: Optional[str] = None
         self._load()
 
     def _load(self) -> None:
+        """Read the state file. A missing file is a fresh start. A file that
+        can't be read (permissions, I/O) raises OSError: starting empty and
+        then overwriting it would lose every record. A file that isn't valid
+        JSON is renamed aside (kept for inspection) and reported in
+        `load_error`, and the tool starts fresh."""
         if not os.path.exists(self.path):
             return
+        with open(self.path, "rb") as fh:
+            raw = fh.read()
         try:
-            with open(self.path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            self.events = data.get("events", {})
-            log.info("Loaded state: %d tracked event(s)", len(self.events))
-            if data.get("created"):
-                # The pre-2026-09-28 format; no longer read. Dropped on save.
-                log.info("Dropping %d booking(s) in the old state format", len(data["created"]))
-        except (OSError, ValueError):
-            log.exception("Could not read state file %s; starting fresh", self.path)
-            self.events = {}
+            data = json.loads(raw.decode("utf-8"))  # UnicodeDecodeError is a ValueError
+            if not isinstance(data, dict) or not isinstance(data.get("events", {}), dict):
+                raise ValueError("not a state file")
+        except ValueError as exc:
+            aside = f"{self.path}.corrupt-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+            os.replace(self.path, aside)
+            self.load_error = (f"The state file was unreadable ({exc}) and was moved to {aside}. "
+                               "Tracked events start fresh: existing LSP events are matched by "
+                               "name and start and treated as made by hand.")
+            log.error("%s", self.load_error)
+            return
+        self.events = data.get("events", {})
+        log.info("Loaded state: %d tracked event(s)", len(self.events))
+        if data.get("created"):
+            # The pre-2026-09-28 format; no longer read. Dropped on save.
+            log.info("Dropping %d booking(s) in the old state format", len(data["created"]))
 
     # -- records --------------------------------------------------------------
 

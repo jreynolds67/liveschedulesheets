@@ -52,12 +52,12 @@ date_parsing:
   skip_values: ["TBD", "TBA", "N/A", "-", "OFF"]
 
 scheduling:
-  # Begin recording this many minutes BEFORE the sheet's start time.
+  # Begin recording this many minutes BEFORE the sheet's start time (0-1440).
   # Changing this (or the caps below) also updates events already in LSP that
   # haven't started, unless they were changed by hand there (locked).
   lead_in_minutes: 10
   # LSP requires an End. An engineer normally stops recording manually; if not,
-  # the event auto-stops this many hours after it starts.
+  # the event auto-stops this many hours after it starts (up to 48).
   safety_cap_hours: 6
   # Per-sport caps that replace safety_cap_hours. A sport applies when its code
   # appears in the event name as a whole word, ignoring case ("WSOC" matches
@@ -65,7 +65,9 @@ scheduling:
   sport_safety_caps: []
     # - { sport: "WSOC", hours: 3 }
     # - { sport: "VB", hours: 3.5 }
-  # Only create events whose padded start is within this many days ahead.
+  # Only create events whose padded start is within this many days ahead
+  # (1-366). A tracked event the sheet moves outside this window (or into the
+  # past) is left as it is in LSP and flagged in Preview: usually a typo.
   horizon_days: 60
   # Skip events whose start is more than this many minutes in the past.
   past_grace_minutes: 30
@@ -120,11 +122,15 @@ lsp:
   # XX"). Matched by name, ignoring case. The tool sets it on every event it
   # creates or updates. Blank = off.
   event_name_variable: "Event Name"
+  # username / password are normally set in the UI. The password is only sent
+  # to the base_url it was entered for (recorded as password_for); changing
+  # base_url without re-entering it clears it.
 
 runtime:
-  poll_interval_seconds: 900   # 15 minutes
+  poll_interval_seconds: 900   # 15 minutes (60 or more)
   live: false                  # false = DRY RUN: syncs log what would be created and change
                                # nothing in LSP (Preview's per-event "Send to LSP" and the
-                               # cleanup button still act). Set by the UI's Dry run toggle.
+                               # cleanup button still act). Set only by the UI's Dry run
+                               # switch; the UI's Save leaves it as it is.
   state_file: "/data/state.json"   # tracked events + lock state; mount a volume so it
                                    # survives restarts. Log level: LOG_LEVEL env var.

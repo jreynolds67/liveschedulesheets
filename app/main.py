@@ -14,8 +14,9 @@ import time
 
 from .config import ConfigError
 from .manager import SyncManager
+from .runtime import setup_logging
 from .settings_store import SettingsStore
-from .webui import CONFIG_PATH, SEED_PATH
+from .webui import CONFIG_PATH, SEED_PATH, SHUTDOWN_WAIT_SECONDS
 
 _stop = False
 
@@ -27,10 +28,7 @@ def _handle_signal(signum, _frame):
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
+    setup_logging()
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
@@ -49,7 +47,7 @@ def main() -> int:
     manager.start_loop()
     while not _stop:
         time.sleep(1)
-    manager.stop()
+    manager.stop(timeout=SHUTDOWN_WAIT_SECONDS)
     return 0
 
 

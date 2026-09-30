@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -31,7 +32,8 @@ from dateutil import parser as dateparser
 from .config import Config
 from .lsp_client import LspClient, LspError
 from .models import ScheduledEvent
-from .sheets import SheetReader
+from .runtime import LOCAL_TZ
+from .sheets import SheetError, SheetReader
 from .state import State
 
 log = logging.getLogger(__name__)
@@ -132,18 +134,23 @@ class _LspView:
 
 
 class Syncer:
-    def __init__(self, cfg: Config, reader: Optional[SheetReader], lsp: LspClient, state: State):
+    def __init__(self, cfg: Config, reader: Optional[SheetReader], lsp: LspClient, state: State,
+                 stop: Optional[threading.Event] = None):
         # cfg may be an LspSettings and reader None for LSP-only use (channels,
         # scheduled view, cleanup) before the sheet side is configured.
         self.cfg = cfg
         self.reader = reader
         self.lsp = lsp
         self.state = state
+        # Set on shutdown: a pass stops between LSP writes (state saved).
+        self.stop = stop or threading.Event()
+        self.sheet_errors: list[str] = []
 
     # -- planning (read-only) ----------------------------------------------
 
     def plan(self) -> list[PlanItem]:
         events = self.reader.read_events()
+        self.sheet_errors = list(getattr(self.reader, "errors", None) or [])
         if not events and not self.state.events:
             return []
 
@@ -275,6 +282,12 @@ class Syncer:
             reason = rec.get("lock_reason") or "changed in LSP"
             return PlanItem(ev, name, LOCKED, as_is(LOCKED, reason), record_id=rid, locked=True,
                             message=f"Locked: {reason}. Sheet changes are not applied.")
+        # Started events are never changed, so there's no hand edit to look
+        # for (LSP itself may rewrite a recording's End when it's stopped).
+        started = _parse_utc(rec.get("start"))
+        if started and started <= now:
+            return PlanItem(ev, name, EXISTS, as_is(EXISTS, "Started"), record_id=rid,
+                            message="Started; sheet changes are no longer applied")
         edit = self._hand_edit(rec, view, now)
         if edit is None:
             return PlanItem(ev, name, ERROR, as_is(ERROR, "Could not read LSP"), record_id=rid,
@@ -282,10 +295,13 @@ class Syncer:
         if edit:
             return PlanItem(ev, name, LOCKED, as_is(LOCKED, edit), record_id=rid, new_lock=edit,
                             message=f"Will lock: {edit}. Sheet changes won't be applied.")
-        started = _parse_utc(rec.get("start"))
-        if started and started <= now:
-            return PlanItem(ev, name, EXISTS, as_is(EXISTS, "Started"), record_id=rid,
-                            message="Started; sheet changes are no longer applied")
+        if not self._within_window(ev):
+            # Most likely a typo (a year off): moving the booking there would
+            # silently drop the real recording. Leave LSP as it is; fixing
+            # the sheet brings the event back in line.
+            return PlanItem(ev, name, OUT_OF_WINDOW, as_is(EXISTS, "Left as is"), record_id=rid,
+                            message=f"Start {ev.start:%Y-%m-%d %H:%M} is outside the active "
+                                    "window; LSP left as it was. If that's a typo, fix the sheet.")
 
         chans = by_pcr.get(ev.pcr) or []
         if not chans:
@@ -321,9 +337,19 @@ class Syncer:
                                       f"Will update {', '.join(diffs)}" if diffs else "Up to date",
                                       event_id=hit[1].get("Id") if hit else b.get("event_id")))
         for cid, b in bookings.items():
-            if cid not in wanted and b.get("by_tool"):
+            if cid in wanted or not b.get("by_tool"):
+                continue
+            # The PCR the booking was made for (older bookings: the record's).
+            if (b.get("pcr") or rec.get("pcr") or "") != (ev.pcr or ""):
                 targets.append(Target(cid, cname(cid), DELETE,
                                       "PCR changed; will be removed from this channel",
+                                      event_id=b.get("event_id")))
+            else:
+                # Same PCR, but the channel no longer matches it (renamed in
+                # LSP, or the PCR's channel match was edited). Not a reason
+                # to delete a booking; an engineer can remove it in LSP.
+                targets.append(Target(cid, cname(cid), EXISTS,
+                                      f"No longer matches PCR {ev.pcr}; left in LSP",
                                       event_id=b.get("event_id")))
 
         counts = defaultdict(int)
@@ -348,7 +374,8 @@ class Syncer:
         targets = [Target(cid, names.get(cid) or b.get("channel_name") or cid, EXISTS,
                           "Left in LSP", event_id=b.get("event_id"))
                    for cid, b in rec.get("bookings", {}).items()]
-        edit = "" if rec.get("locked") else (self._hand_edit(rec, view, now) or "")
+        edit = ("" if rec.get("locked") or start <= now
+                else (self._hand_edit(rec, view, now) or ""))
         msg = "No longer in the sheet; left in LSP (delete it there if it's cancelled)"
         if rec.get("locked") or edit:
             msg += f". Locked: {rec.get('lock_reason') or edit}"
@@ -395,12 +422,15 @@ class Syncer:
         summary = _summary(self.cfg.runtime.dry_run)
         try:
             items = self.plan()
-        except LspError:
+        except (LspError, SheetError) as exc:
             log.exception("Could not build plan; aborting pass")
             summary["errors"] += 1
+            summary["problems"].append(str(exc))
             return summary
 
         summary["parsed"] = sum(i.status != NOT_IN_SHEET for i in items)
+        summary["errors"] += len(self.sheet_errors)
+        summary["problems"].extend(self.sheet_errors)
         try:
             self._execute(items, summary, live=not self.cfg.runtime.dry_run)
             self._prune()
@@ -477,6 +507,10 @@ class Syncer:
         touched: list[tuple[str, str]] = []  # (record id, channel id) to rebaseline
         now = _now_iso()
         for item in items:
+            if self.stop.is_set():
+                log.warning("Shutting down: stopping the pass before %r", item.lsp_name)
+                summary["problems"].append("Pass stopped early for shutdown")
+                break
             if item.new_lock and item.record_id:
                 # Observed, not an action, so it's recorded in dry run too.
                 self.state.lock(item.record_id, item.new_lock, now)
@@ -526,14 +560,24 @@ class Syncer:
                         rid, made = self._recover_create(item, t, rid, force, now, touched)
                         if made:
                             summary["created"] += 1
+                            self._record_write()
                             continue
                     summary["errors"] += 1
                     continue
                 summary[_COUNTER[t.status]] += 1
+                self._record_write()
 
             if live and rid:
                 self.state.events[rid].update(_record_fields(item))
         self._rebaseline(touched)
+
+    def _record_write(self) -> None:
+        """Save state right after each LSP write, so a restart mid-pass
+        can't leave events in LSP that the tool has no record of (the next
+        pass would take them for hand-made ones and stop updating them).
+        The record's own fields are only refreshed once the whole item is
+        done, so an interrupted PCR move still looks like one next pass."""
+        self.state.save()
 
     def _apply(self, item: PlanItem, t: Target, rid, force, now, touched) -> Optional[str]:
         """Carry out one CREATE / UPDATE / DELETE target; returns the record id."""
@@ -546,7 +590,7 @@ class Syncer:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
             b.update(event_id=t.event_id, name=item.lsp_name, snapshot=None,
-                     written=_written(item), updated_at=now)
+                     written=_written(item), updated_at=now, pcr=ev.pcr)
             touched.append((rid, t.channel_id))
             log.info("Updated %r on %s (%s) @ %s", item.lsp_name, t.channel_name,
                      t.message, ev.start.isoformat())
@@ -569,7 +613,7 @@ class Syncer:
         rid = rid or self._new_record(item)
         self.state.events[rid]["bookings"][t.channel_id] = {
             "event_id": event_id, "channel_name": t.channel_name, "by_tool": True,
-            "created_at": now, "name": item.lsp_name,
+            "created_at": now, "name": item.lsp_name, "pcr": item.event.pcr,
             "snapshot": _snapshot(created) if created else None,
             "written": _written(item),
         }
@@ -915,7 +959,7 @@ _COUNTER = {CREATE: "created", UPDATE: "updated", DELETE: "deleted"}
 def _summary(dry_run: bool) -> dict:
     return {"parsed": 0, "created": 0, "updated": 0, "deleted": 0, "skipped_existing": 0,
             "locked": 0, "not_in_sheet": 0, "skipped_window": 0, "no_channel": 0,
-            "errors": 0, "dry_run": dry_run}
+            "errors": 0, "dry_run": dry_run, "problems": []}
 
 
 def _event_id(result) -> Optional[str]:
@@ -1053,7 +1097,7 @@ def _booking(e: dict, channel_name: str, by_tool: bool) -> dict:
 
 def _same_instant(value, dt: datetime) -> bool:
     """Whether an LSP timestamp is the same minute as `dt`. A timestamp with
-    no offset is accepted as either UTC or this server's local time, since
+    no offset is accepted as either UTC or local time (the TZ env var), since
     the LSP API docs don't say which it returns."""
     try:
         parsed = dateparser.isoparse(value)
@@ -1062,7 +1106,7 @@ def _same_instant(value, dt: datetime) -> bool:
     target = _minute_key(dt)
     if parsed.tzinfo:
         return _minute_key(parsed) == target
-    return target in (_minute_key(parsed.replace(tzinfo=timezone.utc)), _minute_key(parsed.astimezone()))
+    return target in (_minute_key(parsed.replace(tzinfo=timezone.utc)), _minute_key(parsed.replace(tzinfo=LOCAL_TZ)))
 
 
 def _lsp_time(value):

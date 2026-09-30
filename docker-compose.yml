@@ -8,6 +8,15 @@ services:
     # image: your-registry/liveschedulesheets:latest
     container_name: liveschedulesheets
     restart: unless-stopped
+    # Time for a sync pass to finish its current LSP write and save state on
+    # shutdown / redeploy (the app waits up to 45 s).
+    stop_grace_period: 60s
+    # Bound the container log (Docker keeps it forever by default).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       TZ: America/New_York
       # Serve the UI on port 80 so the URL needs no port.
@@ -17,7 +26,8 @@ services:
       LSP_PASSWORD: ${LSP_PASSWORD:-}
       # Google service-account key path INSIDE the container (see volume below).
       GOOGLE_APPLICATION_CREDENTIALS: /secrets/service-account.json
-      # Optional HTTP Basic auth for the UI (leave unset to disable).
+      # HTTP Basic auth for the UI. Strongly recommended: without it anyone on
+      # the network can change settings and delete LSP events. (Unset = off.)
       UI_USER: ${UI_USER:-}
       UI_PASSWORD: ${UI_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

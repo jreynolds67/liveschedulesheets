@@ -2,6 +2,8 @@
 # in; regenerate it after changing this file (see README, "Updating
 # dependencies").
 requests==2.34.2
+# Imported directly (to quiet per-request TLS warnings); requests pulls it in.
+urllib3==2.8.0
 PyYAML==6.0.3
 python-dateutil==2.9.0.post0
 google-api-python-client==2.200.0

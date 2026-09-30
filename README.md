@@ -72,14 +72,18 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   updates events already created in LSP that haven't started and aren't locked.
   Preview shows each event's start and end. (In `config.yaml` these are still
   `safety_cap_hours` / `sport_safety_caps`.)
-- Toggle **Dry run** and set the **sync interval**: how often the tool reads the
-  sheet and pushes changes to LSP (one sync does both). Dry run is **on** until you
-  switch it off in the UI (the switch saves immediately and asks for
-  confirmation before going live). While it's on, a *DRY RUN* badge shows in the
-  header, and passes and **Run now** only report what they *would* create. The
-  only things that change LSP while it's on are the explicit one-off actions:
-  Preview's **SEND TO LSP** and the delete buttons. It's stored as `runtime.live`
-  (default `false`); a `DRY_RUN` env var, if set, overrides the toggle.
+- Toggle **Dry run** and set the **sync interval** (60 s or more): how often
+  the tool reads the sheet and pushes changes to LSP (one sync does both). Dry
+  run is **on** until you switch it off in the UI (the switch saves immediately,
+  on its own, and asks for confirmation before going live). While it's on, a
+  *DRY RUN* badge shows in the header, and passes and **Run now** only report
+  what they *would* create. The only things that change LSP while it's on are
+  the explicit one-off actions: Preview's **SEND TO LSP** and the delete
+  buttons. It's stored as `runtime.live` (default `false`) and only the switch
+  (`POST /api/dry-run` `{dry_run: true|false}`) changes it: Save, Preview and the
+  other buttons never do, and every open page shows the saved state, so a page
+  left open with an old setting can't flip it back. A `DRY_RUN` env var, if
+  set, overrides the toggle.
 - **Preview events** — see exactly what the next sync would do, with no changes
   made: **create**, **update** (the sheet changed), **exists** (up to date),
   **locked** (changed by hand in LSP), **not in sheet** (tracked, but gone from
@@ -115,11 +119,19 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   events are never touched.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
-picks up changes automatically. (Optional: protect the UI with HTTP Basic auth
-by setting `UI_USER` / `UI_PASSWORD`.) Changes (POSTs) coming from another
-site's web page are refused, so a page elsewhere on the LAN can't drive the
-API through someone's browser; scripts and tools such as curl or Companion,
-which send no `Origin` header, can still call it.
+picks up changes automatically. If the settings were saved from another
+browser window since this page loaded them, a save is refused (the page offers
+to reload them) instead of overwriting the other window's changes: the page
+sends the `_version` it loaded with `POST /api/config`, and gets `409` if it's
+out of date. Scripts that send no `_version` just save.
+
+**Protect the UI with a password**: set `UI_USER` / `UI_PASSWORD` (HTTP Basic
+auth). Without one, anyone who can reach the page can change settings and
+delete LSP events; the Status card and the log warn about it. Changes (POSTs)
+coming from another site's web page are refused either way, so a page
+elsewhere on the LAN can't drive the API through someone's browser; scripts and
+tools such as curl or Companion, which send no `Origin` header, can still call
+it.
 
 ---
 
@@ -157,9 +169,19 @@ The default labels:
 A column becomes a recording once it has an **event name** and a **valid start**
 (`DATE` + a game time). **Dates must include the year** (e.g. `9/12/2026`) —
 a date without one is skipped and flagged “Date has no year” in the sheet
-preview. Blank cells or `TBD`/`TBA` are skipped. If its
+preview. **Times need AM/PM** unless they're unambiguous 24-hour times
+(`17:30`, `0:30`, or with seconds like `9:00:00`, as Sheets formats time
+cells): a bare `7:00` could be morning or evening, so it's skipped and flagged
+“Start time has no AM/PM” instead of guessed. In a cell with notes, the first
+time is used, taking a later AM/PM if it has none (`6:30 & 9:00 PM` → 6:30
+PM); `NOON` counts as PM. Blank cells or `TBD`/`TBA` are skipped. If its
 PCR is blank the event still shows in Preview flagged **no PCR**, so
 an engineer can assign one via the inline selector (saved as an event fix).
+
+Same-named games on the same day (doubleheaders) are numbered in column order
+(the `occurrence` in event fixes), counting every column with that name and
+date, even one whose time is still TBD, so game 2 keeps its number and its
+fixes when game 1's time is filled in.
 
 **PCRs are letters `A`–`E` only** (bare or as `PCR A`). A stray value that isn't a letter
 (e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
@@ -234,7 +256,15 @@ The LSP base URL is the server's web address including its port (e.g.
 login is **optional**: the client first tries API calls with no login (LSP's
 *Basic* auth provider can allow that), then a token from `/api/v1/auth/login`,
 then HTTP Basic auth with the username & password. **Test connection** reports
-which one worked.
+which one worked. It only falls back to HTTP Basic when the login endpoint
+actually refuses the login; if the endpoint is down or erroring (e.g. LSP
+restarting), the next request simply tries again.
+
+The password is only ever sent to the server it was entered for. Changing the
+LSP URL without typing the password again clears it (the UI says so), and an
+`LSP_PASSWORD` env var stops being used too, so nobody who can reach the UI
+can point it at their own server to collect the login. Replacing the example
+config's placeholder URL the first time is exempt.
 
 ---
 
@@ -255,6 +285,14 @@ which one worked.
    Portainer checks out the repo in its own data folder. **Never commit a real
    key to a shared repo.**
 5. Deploy, then open `http://10.10.251.95` and finish configuration in the UI.
+
+**Health, logs and shutdown:** the image has a `HEALTHCHECK` (`GET /healthz`,
+no login needed) that marks the container unhealthy if the sync loop has died
+or a pass has been stuck for over half an hour past its interval; Portainer
+shows it. (Plain Docker doesn't restart unhealthy containers by itself.) The
+stack caps the container log at 5 × 10 MB. On stop or redeploy, the app
+finishes the LSP write in progress, saves `state.json` and exits (it waits up
+to 45 s; the stack's `stop_grace_period` is 60 s).
 
 **Networking:** the container joins the existing **Companion** `ipvlan`
 network (parent `eth0`, subnet `10.10.251.0/24`) as an external network, at a
@@ -354,7 +392,19 @@ updates the LSP event's name/start/end in place (`PatchEvent`), and when the PCR
 changes it removes the bookings on the old PCR's channels and creates them on
 the new ones. A new channel that matches the PCR gets a booking on the next
 pass. Lead-in and safety-cap changes are applied the same way. Once an event
-has started, sheet changes are no longer applied to it.
+has started, sheet changes are no longer applied to it (and it's no longer
+checked for hand edits, since LSP may change a recording's end itself when it's
+stopped).
+
+**Suspicious changes are held.** If the sheet moves a tracked event outside
+the active window (into the past, or beyond `horizon_days`, usually a typo in
+the year), LSP is left as it was and Preview shows it as **out of window** with
+the date the sheet now gives. Fixing the sheet brings it back in step.
+
+**Channels are only removed when the PCR changes.** When a tracked event's PCR
+changes, its bookings on the old PCR's channels are removed (retried next pass
+if a removal fails). A booking whose channel merely stops matching the same
+PCR (renamed in LSP, or the channel match edited) is left in LSP.
 
 **Locking.** Before changing anything, the tool compares each booking with its
 snapshot and with the values it last sent. If the name, start or end match
@@ -388,10 +438,24 @@ whose events ended longer ago than that, so `state.json` doesn't grow
 forever. If the setting can't be read (the login needs `lsp-config-read`), it
 keeps records for 365 days.
 
-If `state.json` is lost, the tool falls back to matching LSP events by
-channel + name + start minute, so unchanged events aren't duplicated (they are
-then treated as made by hand and no longer follow the sheet). Events edited or
-deleted in LSP would be created again, though, so keep the volume.
+`state.json` is saved after every change the tool makes in LSP, not just at the
+end of a pass, so a restart mid-pass can't leave events in LSP that the tool
+has no record of. If `state.json` isn't valid JSON when the tool starts, it's
+renamed to `state.json.corrupt-<time>` (kept for inspection) and the Status
+card says so; one that can't be read at all stops the sync with an error
+rather than being overwritten. If `state.json` is lost, the tool falls back to
+matching LSP events by channel + name + start minute, so unchanged events
+aren't duplicated (they are then treated as made by hand and no longer follow
+the sheet). Events edited or deleted in LSP would be created again, though, so
+keep the volume.
+
+**Errors show in the Status card.** If the Google Sheet can't be opened (unshared,
+key revoked, Google down), the pass fails with that error instead of reading as
+an empty sheet; a single tab that can't be read is skipped (its events show as
+**not in sheet**, which deletes nothing) and counted as an error. A request from
+the UI that would have to wait more than a few seconds for a running sync pass
+(Preview, the channel lists) says so instead of hanging; Run now and the other
+actions wait up to two minutes.
 
 ### Deleting tool-created events (testing)
 
@@ -444,6 +508,7 @@ app/
   web/index.html # the configuration page (single file, no build step)
   manager.py     # background sync loop + operations the UI calls
   main.py        # headless runner (RUN_ONCE / cron)
+  runtime.py     # logging + local time zone (TZ) shared by both entry points
   config.py      # config model, parse/validate, load/save
   settings_store.py # live config on /data, seeded from the example
   sheets.py      # Google fetch + pure parse_grid() / locate_rows() / inspect_grid()

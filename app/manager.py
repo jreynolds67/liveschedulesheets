@@ -8,6 +8,7 @@ sheet half of the config, so it works before the LSP login is set up.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -30,6 +31,13 @@ log = logging.getLogger(__name__)
 
 # How long a fetched tab is reused while the operator adjusts row picks.
 _GRID_CACHE_SECONDS = 120
+# How long a UI request waits for a running sync pass before giving up, so
+# slow LSP replies can't tie up every web server thread: quick looks...
+_READ_WAIT_SECONDS = 15
+# ...and actions the operator asked for and expects to happen.
+_WRITE_WAIT_SECONDS = 120
+# The loop counts as stuck when a pass runs this much longer than the interval.
+_STUCK_SECONDS = 30 * 60
 
 
 class ManagerError(Exception):
@@ -51,8 +59,12 @@ class SyncManager:
         self._lsp_only: Optional[Syncer] = None
 
         self._created_count = 0  # for status() while a sync holds the lock
+        self._state_error: Optional[str] = None
         self.last_run: Optional[dict] = None
         self.last_error: Optional[str] = None
+        # Loop liveness, for the container health check.
+        self._heartbeat = time.monotonic()
+        self._interval = 900
 
         # Sheet inspection (web UI) -- separate lock so it never waits on a sync.
         self._sheet_lock = threading.Lock()
@@ -72,8 +84,8 @@ class SyncManager:
             except Exception as exc:  # noqa: BLE001 -- e.g. a malformed key file
                 raise ConfigError(f"Could not load the Google service-account key: {exc}") from exc
             lsp = LspClient(cfg.lsp, read_only=cfg.runtime.dry_run)
-            state = State(cfg.runtime.state_file)
-            self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state)
+            state = self._load_state(cfg.runtime.state_file)
+            self._cfg, self._syncer = cfg, Syncer(cfg, reader, lsp, state, stop=self._stop)
             self._cache_hash = h
             self._lsp_only = self._lsp_hash = None
             log.info("Rebuilt sync components from updated config")
@@ -97,32 +109,56 @@ class SyncManager:
             h = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
             if h != self._lsp_hash or self._lsp_only is None:
                 self._lsp_only = Syncer(ls, None, LspClient(ls.lsp, read_only=ls.runtime.dry_run),
-                                        State(ls.runtime.state_file))
+                                        self._load_state(ls.runtime.state_file), stop=self._stop)
                 self._lsp_hash = h
             return self._lsp_only
+
+    def _load_state(self, path: str) -> State:
+        try:
+            state = State(path)
+        except OSError as exc:
+            raise ConfigError(f"Could not read the state file {path}: {exc}") from exc
+        if state.load_error:
+            self._state_error = state.load_error
+        return state
+
+    @contextlib.contextmanager
+    def _locked(self, wait: float):
+        """Hold the sync lock, waiting at most `wait` seconds for a pass."""
+        if not self._lock.acquire(timeout=wait):
+            raise ManagerError("A sync pass is running; try again in a moment")
+        try:
+            yield
+        finally:
+            self._lock.release()
+
+    def _finished(self, summary: dict, trigger: str) -> None:
+        self.last_run = {"time": _now_iso(), "summary": summary, "trigger": trigger}
+        # Problems that didn't raise (sheet unreadable, a tab failing, LSP
+        # unreachable) still belong in the status card's error line.
+        self.last_error = "; ".join(summary.get("problems") or []) or None
 
     # -- operations for the web UI -----------------------------------------
 
     def preview(self) -> list[dict]:
-        with self._lock:
+        with self._locked(_READ_WAIT_SECONDS):
             _, syncer = self._components()
             return [item.to_dict() for item in syncer.plan()]
 
     def run_now(self) -> dict:
-        with self._lock:
+        with self._locked(_WRITE_WAIT_SECONDS):
             _, syncer = self._components()
             summary = syncer.run_once()
-        self.last_run = {"time": _now_iso(), "summary": summary, "trigger": "manual"}
-        self.last_error = None
+        self._finished(summary, "manual")
         return summary
 
     def send_event(self, tab: str, event_date: str, event_name: str, occurrence: int = 0) -> dict:
-        with self._lock:
+        with self._locked(_WRITE_WAIT_SECONDS):
             _, syncer = self._components()
             return syncer.send_one(tab, event_date, event_name, occurrence)
 
     def unlock_event(self, record_id: str) -> dict:
-        with self._lock:
+        with self._locked(_WRITE_WAIT_SECONDS):
             _, syncer = self._components()
             return syncer.unlock(record_id)
 
@@ -130,7 +166,7 @@ class SyncManager:
         return self._channels()[0]
 
     def _channels(self) -> tuple[list[dict], Optional[str]]:
-        with self._lock:
+        with self._locked(_READ_WAIT_SECONDS):
             syncer = self._lsp_syncer()
             chans = syncer.lsp.get_all_channels()
             auth_mode = syncer.lsp.auth_mode
@@ -138,25 +174,25 @@ class SyncManager:
 
     def event_name_channels(self) -> dict:
         """Whether each PCR channel's events carry the event-name variable."""
-        with self._lock:
+        with self._locked(_READ_WAIT_SECONDS):
             return self._lsp_syncer().event_name_channels()
 
     def lsp_event(self, event_id: str) -> Optional[dict]:
-        with self._lock:
+        with self._locked(_READ_WAIT_SECONDS):
             return self._lsp_syncer().lsp.get_event(event_id)
 
     def scheduled_events(self, past_days: int = 0) -> dict:
-        with self._lock:
+        with self._locked(_READ_WAIT_SECONDS):
             syncer = self._lsp_syncer()
             return syncer.scheduled_events(past_days)
 
     def delete_created(self) -> dict:
-        with self._lock:
+        with self._locked(_WRITE_WAIT_SECONDS):
             syncer = self._lsp_syncer()
             return syncer.delete_created()
 
     def delete_events(self, event_ids: list[str]) -> dict:
-        with self._lock:
+        with self._locked(_WRITE_WAIT_SECONDS):
             syncer = self._lsp_syncer()
             return syncer.delete_events(event_ids)
 
@@ -238,7 +274,7 @@ class SyncManager:
             chans, auth_mode = self._channels()
             return {"ok": True, "channel_count": len(chans), "auth_mode": auth_mode,
                     "channels": [c["Name"] for c in chans if c.get("Name")]}
-        except (LspError, ConfigError) as exc:
+        except (LspError, ConfigError, ManagerError) as exc:
             return {"ok": False, "error": str(exc)}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -247,6 +283,7 @@ class SyncManager:
         cfg_ok, cfg_err = True, None
         interval = None
         dry_run = None
+        busy = False
         # Never wait on (or rebuild components under) a running sync: that
         # would swap in a Syncer whose State predates the pass's writes.
         if self._lock.acquire(blocking=False):
@@ -269,14 +306,15 @@ class SyncManager:
             # Busy: judge the saved config without building anything. The
             # state isn't read (a pass may be changing it); the count from the
             # last status call stands.
-            raw = self.store.load()
+            busy = True
             try:
+                raw = self.store.load()
                 cfg = parse_config(raw)
                 interval, dry_run = cfg.runtime.poll_interval_seconds, cfg.runtime.dry_run
             except ConfigError as exc:
                 cfg_ok, cfg_err = False, str(exc)
                 try:
-                    dry_run = parse_lsp_settings(raw).runtime.dry_run
+                    dry_run = parse_lsp_settings(self.store.load()).runtime.dry_run
                 except ConfigError:
                     pass
         created_count = self._created_count
@@ -289,9 +327,20 @@ class SyncManager:
             "dry_run_locked": os.environ.get("DRY_RUN") is not None,
             "created_count": created_count,
             "loop_running": bool(self._thread and self._thread.is_alive()),
+            "busy": busy,
             "last_run": self.last_run,
             "last_error": self.last_error,
+            "state_error": self._state_error,
         }
+
+    def health(self) -> tuple[bool, str]:
+        """For the container health check: is the loop alive and not stuck?"""
+        if not (self._thread and self._thread.is_alive()):
+            return False, "sync loop is not running"
+        age = time.monotonic() - self._heartbeat
+        if age > self._interval + _STUCK_SECONDS:
+            return False, f"no sync activity for {int(age)}s"
+        return True, "ok"
 
     # -- background loop ----------------------------------------------------
 
@@ -302,20 +351,26 @@ class SyncManager:
         self._thread = threading.Thread(target=self._loop, name="sync-loop", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: Optional[float] = None) -> None:
+        """Ask the loop to stop and wait (up to `timeout`) for a pass in
+        progress to finish its current LSP write and save state."""
         self._stop.set()
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout)
+            if self._thread.is_alive():
+                log.warning("Sync pass still running at shutdown")
 
     def _loop(self) -> None:
         log.info("Background sync loop started")
         while not self._stop.is_set():
             interval = 900
+            self._heartbeat = time.monotonic()
             try:
                 with self._lock:
                     cfg, syncer = self._components()
-                    interval = cfg.runtime.poll_interval_seconds
+                    interval = self._interval = cfg.runtime.poll_interval_seconds
                     summary = syncer.run_once()
-                self.last_run = {"time": _now_iso(), "summary": summary, "trigger": "scheduled"}
-                self.last_error = None
+                self._finished(summary, "scheduled")
             except ConfigError as exc:
                 self.last_error = str(exc)
                 log.warning("Config not ready: %s", exc)
@@ -324,7 +379,8 @@ class SyncManager:
                 log.exception("Unhandled error during sync pass")
 
             # Interruptible sleep.
-            self._stop.wait(timeout=max(5, interval))
+            self._heartbeat = time.monotonic()
+            self._stop.wait(timeout=max(60, interval))
         log.info("Background sync loop stopped")
 
 

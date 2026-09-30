@@ -6,13 +6,16 @@ with a sensible, editable config.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
 import shutil
 import threading
+from typing import Callable
+from urllib.parse import urlsplit
 
-from .config import load_raw, save_raw
+from .config import effective_password, load_raw, normalize_url, save_raw
 
 log = logging.getLogger(__name__)
 
@@ -21,15 +24,43 @@ GOOGLE_KEY_FILENAME = "google-service-account.json"
 _MAX_KEY_BYTES = 64 * 1024
 
 
+# Config sections the web UI edits (and sends back whole on every save).
+UI_SECTIONS = ("sheet", "date_parsing", "scheduling", "pcr_channel_map",
+               "lsp", "runtime", "tab_overrides", "event_overrides")
+
+
 class GoogleKeyError(ValueError):
     """An uploaded Google key was rejected."""
+
+
+class ConfigConflict(Exception):
+    """The UI's copy of the config is older than the saved one."""
+
+
+def config_version(raw: dict) -> str:
+    """A fingerprint of the settings a UI save would overwrite. Leaves out
+    what is saved on its own (the dry-run switch, the password, the Google
+    key), so changing those in one window doesn't invalidate another's."""
+    view = {k: copy.deepcopy(raw.get(k)) for k in UI_SECTIONS}
+    for k in ("password", "password_for"):
+        (view.get("lsp") or {}).pop(k, None)
+    (view.get("runtime") or {}).pop("live", None)
+    blob = json.dumps(view, sort_keys=True, default=str).encode()
+    return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _placeholder_url(url: str) -> bool:
+    """No URL yet, or the example config's reserved-domain placeholder."""
+    host = (urlsplit(url).hostname or "").lower()
+    return not url or host.endswith((".example.com", ".example", ".invalid"))
 
 
 class SettingsStore:
     def __init__(self, path: str, seed_path: str):
         self.path = path
         self.seed_path = seed_path
-        self._lock = threading.Lock()
+        # Re-entrant: update() holds it across load + save.
+        self._lock = threading.RLock()
         self._ensure()
 
     def _ensure(self) -> None:
@@ -52,15 +83,31 @@ class SettingsStore:
         with self._lock:
             save_raw(self.path, raw)
 
+    def update(self, change: Callable[[dict], None]) -> dict:
+        """Load, apply `change` (which edits the dict in place), and save, as
+        one step, so two saves at once can't drop each other's changes."""
+        with self._lock:
+            raw = self.load()
+            change(raw)
+            self.save(raw)
+            return raw
+
+    def set_live(self, live: bool) -> None:
+        """The dry-run switch, saved on its own: a general save never touches
+        it, so a page left open with an old setting can't flip it back."""
+        self.update(lambda raw: raw.setdefault("runtime", {}).update(live=bool(live)))
+        log.warning("Dry run turned %s from the web UI", "OFF (live)" if live else "ON")
+
     def load_safe(self) -> dict:
         """Config for the browser: password removed, replaced with a 'set' flag."""
         raw = copy.deepcopy(self.load())
+        version = config_version(raw)
         lsp = raw.get("lsp") or {}
-        pw = lsp.get("password")
-        env_pw = bool(os.environ.get("LSP_PASSWORD"))
+        lsp["password_set"] = bool(effective_password(lsp))
         lsp.pop("password", None)
-        lsp["password_set"] = bool(pw) or env_pw
+        lsp.pop("password_for", None)
         raw["lsp"] = lsp
+        raw["_version"] = version
         # never expose a stored key path beyond a boolean
         google = raw.get("google") or {}
         raw["google_credentials_set"] = bool(
@@ -97,9 +144,8 @@ class SettingsStore:
             fh.write(data)
         os.replace(tmp, path)
 
-        raw = self.load()
-        raw["google"] = {**(raw.get("google") or {}), "credentials_file": path}
-        self.save(raw)
+        self.update(lambda raw: raw.update(
+            google={**(raw.get("google") or {}), "credentials_file": path}))
         log.info("Stored uploaded Google service-account key for %s", key["client_email"])
         return self.key_info()
 
@@ -125,25 +171,71 @@ class SettingsStore:
             info["error"] = f"Key file unreadable: {exc}"
         return info
 
-    def merge_from_ui(self, incoming: dict) -> dict:
-        """Merge a UI payload onto the stored config, preserving the password
-        unless a new non-empty one was supplied."""
-        current = self.load()
+    def save_from_ui(self, incoming: dict) -> dict:
+        """Merge a UI payload onto the stored config and save it, atomically.
+
+        If the payload carries the `_version` it was loaded with and the
+        stored config has changed since (another browser window saved),
+        raises ConfigConflict instead of overwriting that change. Returns
+        {"raw", "version", "password_cleared"}.
+        """
+        out = {}
+
+        def change(raw):
+            expected = incoming.get("_version")
+            if expected and expected != config_version(raw):
+                raise ConfigConflict("The settings were changed in another browser window "
+                                     "since this page loaded them")
+            had_password = bool(effective_password(raw.get("lsp") or {}))
+            merged = self.merge_from_ui(incoming, raw)
+            raw.clear()
+            raw.update(merged)
+            out["password_cleared"] = had_password and not effective_password(raw.get("lsp") or {})
+
+        raw = self.update(change)
+        return {"raw": raw, "version": config_version(raw), **out}
+
+    def merge_from_ui(self, incoming: dict, current: dict) -> dict:
+        """A UI payload merged onto `current`.
+
+        - The password is kept unless a new non-empty one was supplied.
+        - Changing the LSP server URL without re-entering the password
+          drops it (and stops LSP_PASSWORD env following it), so whoever
+          can reach this UI can't point it at their own server to collect
+          the login. The first real URL replacing the example placeholder
+          is exempt.
+        - The dry-run switch (runtime.live) is never taken from a general
+          save; see set_live().
+        """
         merged = copy.deepcopy(current)
-
-        for section in ("sheet", "date_parsing", "scheduling", "pcr_channel_map",
-                        "lsp", "runtime", "tab_overrides", "event_overrides"):
+        for section in UI_SECTIONS:
             if section in incoming and incoming[section] is not None:
-                merged[section] = incoming[section]
+                merged[section] = copy.deepcopy(incoming[section])
 
-        # Preserve existing password if the UI sent an empty/blank one.
-        incoming_lsp = incoming.get("lsp") or {}
-        new_pw = incoming_lsp.get("password")
-        if not new_pw:
-            old_pw = (current.get("lsp") or {}).get("password")
-            if old_pw:
-                merged.setdefault("lsp", {})["password"] = old_pw
-            else:
-                merged.get("lsp", {}).pop("password", None)
-        merged.get("lsp", {}).pop("password_set", None)
+        old_lsp = current.get("lsp") or {}
+        lsp = merged.setdefault("lsp", {})
+        lsp.pop("password_set", None)
+        old_url, new_url = normalize_url(old_lsp.get("base_url")), normalize_url(lsp.get("base_url"))
+        new_pw = (incoming.get("lsp") or {}).get("password")
+        if new_pw:
+            lsp["password_for"] = new_url
+        else:
+            lsp.pop("password", None)
+            lsp.pop("password_for", None)
+            if old_lsp.get("password"):
+                lsp["password"] = old_lsp["password"]
+            if old_lsp.get("password_for"):
+                lsp["password_for"] = old_lsp["password_for"]
+            if (new_url != old_url and not _placeholder_url(old_url)
+                    and effective_password(old_lsp)):
+                lsp.pop("password", None)
+                lsp["password_for"] = normalize_url(old_lsp.get("password_for")) or old_url
+                log.warning("LSP server URL changed from %s to %s without the password being "
+                            "entered again; the password is cleared", old_url, new_url)
+
+        runtime = merged.setdefault("runtime", {})
+        if "live" in (current.get("runtime") or {}):
+            runtime["live"] = current["runtime"]["live"]
+        else:
+            runtime.pop("live", None)
         return merged

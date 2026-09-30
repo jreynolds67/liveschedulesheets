@@ -7,10 +7,11 @@ from datetime import timedelta
 import pytest
 
 from app.lsp_client import LspError
+from app.sheets import SheetError
 from app.state import State
-from app.sync import CREATE, EXISTS, LOCKED, NOT_IN_SHEET, UPDATE
+from app.sync import CREATE, EXISTS, LOCKED, NOT_IN_SHEET, OUT_OF_WINDOW, UPDATE
 
-from .conftest import sheet_event
+from .conftest import FakeReader, sheet_event
 
 
 def statuses(syncer):
@@ -207,3 +208,108 @@ def test_missing_warning_only_covers_the_shown_window(make_syncer, lsp):
     _age(s, 10)
     assert s.scheduled_events(past_days=7)["missing"] == []
     assert len(s.scheduled_events(past_days=30)["missing"]) == 1
+
+
+# -- safety ---------------------------------------------------------------------
+
+def test_sheet_typo_outside_the_window_leaves_lsp_alone(make_syncer, lsp):
+    good = sheet_event(days=3)
+    make_syncer([good]).run_once()
+    before = sorted(e["Start"] for e in lsp.events.values())
+    typo = sheet_event(days=3 - 365)  # the year typed as last year
+    s = make_syncer([typo])
+    assert statuses(s) == [OUT_OF_WINDOW]
+    s.run_once()
+    assert sorted(e["Start"] for e in lsp.events.values()) == before
+    # Fixing the sheet: back in step, nothing duplicated.
+    s = make_syncer([good])
+    assert statuses(s) == [EXISTS]
+    s.run_once()
+    assert len(lsp.events) == 2
+
+
+def test_started_event_changed_by_lsp_is_not_locked(make_syncer, lsp):
+    s = make_syncer([sheet_event()])
+    s.run_once()
+    for rec in s.state.events.values():
+        rec["start"] = "2020-01-01T12:00:00+00:00"  # it has started
+    s.state.save()
+    for e in lsp.events.values():  # LSP rewrote End when it was stopped
+        e["End"] = "2099-01-01T00:00:00+00:00"
+    s = make_syncer([sheet_event()])
+    assert statuses(s) == [EXISTS]
+    s.run_once()
+    assert not any(r["locked"] for r in s.state.events.values())
+
+
+def test_channel_that_stops_matching_its_pcr_is_not_deleted(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    lsp.channels[1]["Name"] = "02 - SPARE CLEAN"  # renamed in LSP
+    s = make_syncer([sheet_event(pcr="A")])
+    [item] = s.plan()
+    assert item.status == EXISTS
+    assert s.run_once()["deleted"] == 0 and len(lsp.events) == 2
+
+
+def test_interrupted_pcr_move_is_finished_next_pass(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    real_remove = lsp.remove_event
+
+    def fail_remove(*a, **k):
+        raise LspError("RemoveEvent failed (500)")
+
+    lsp.remove_event = fail_remove
+    summary = make_syncer([sheet_event(pcr="B")]).run_once()
+    assert (summary["created"], summary["errors"]) == (1, 2)
+    lsp.remove_event = real_remove
+    summary = make_syncer([sheet_event(pcr="B")]).run_once()
+    assert summary["deleted"] == 2
+    assert [e["ChannelId"] for e in lsp.events.values()] == ["b1"]
+
+
+def test_state_is_saved_after_each_write_and_shutdown_stops_the_pass(make_syncer, lsp, state_path):
+    s = make_syncer([sheet_event(pcr="A"), sheet_event(name="VB vs Duke", pcr="B", days=3)])
+    real_add = lsp.add_event
+
+    def add_then_shutdown(*args, **kwargs):
+        out = real_add(*args, **kwargs)
+        on_disk = json.load(open(state_path))["events"] if calls else {}
+        calls.append(sum(len(r["bookings"]) for r in on_disk.values()))
+        s.stop.set()  # SIGTERM arrives during the first event's writes
+        return out
+
+    calls = []
+    lsp.add_event = add_then_shutdown
+    summary = s.run_once()
+    assert calls == [0, 1]  # the first booking was on disk before the second write
+    assert summary["created"] == 2 and "shutdown" in summary["problems"][0]
+    assert [e["Name"] for e in lsp.events.values()] == ["WSOC vs Texas"] * 2  # Duke not started
+
+
+def test_unreadable_sheet_fails_the_pass(make_syncer, lsp):
+    class Broken(FakeReader):
+        def read_events(self):
+            raise SheetError("Could not open the Google Sheet: HttpError 403")
+
+    s = make_syncer([])
+    s.reader = Broken()
+    summary = s.run_once()
+    assert summary["errors"] == 1 and "403" in summary["problems"][0]
+
+
+def test_a_tab_that_fails_is_counted(make_syncer, lsp):
+    s = make_syncer([sheet_event()])
+    s.reader.errors = ["Could not read tab 'Football': HttpError 500"]
+    summary = s.run_once()
+    assert summary["created"] == 2 and summary["errors"] == 1
+    assert summary["problems"] == ["Could not read tab 'Football': HttpError 500"]
+
+
+def test_corrupt_state_file_is_set_aside(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"events": {"x": ')  # cut off mid-write
+    state = State(str(path))
+    assert state.events == {} and "moved to" in state.load_error
+    [aside] = [p for p in tmp_path.iterdir() if ".corrupt-" in p.name]
+    assert aside.read_text() == '{"events": {"x": '
+    assert not path.exists()

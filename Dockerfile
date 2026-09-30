@@ -22,5 +22,10 @@ USER appuser
 
 EXPOSE 8080
 
+# Unhealthy when the sync loop has died or a pass has been stuck for a long
+# time (see /healthz). slim images have no curl, so use Python.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+  CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('WEB_PORT', '8080'), timeout=8)"
+
 # Web UI + background sync loop in one process.
 CMD ["python", "-m", "app.webui"]

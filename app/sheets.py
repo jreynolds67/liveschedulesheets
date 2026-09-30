@@ -41,6 +41,10 @@ _ROOM_LETTERS = ["A", "B", "C", "D", "E"]
 _GOOGLE_RETRIES = 3
 
 
+class SheetError(Exception):
+    """The sheet couldn't be read (Google API / sharing / key problem)."""
+
+
 class SheetReader:
     def __init__(self, cfg: Config):
         # Imported lazily so the pure parser (parse_grid) is usable without the
@@ -56,6 +60,15 @@ class SheetReader:
         self.service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
     def read_events(self) -> list[ScheduledEvent]:
+        """Every schedulable event on the enabled tabs.
+
+        Raises SheetError if the sheet can't be opened at all (so a revoked
+        share or key fails the pass loudly instead of looking like an empty
+        sheet). A single tab that fails is skipped and named in
+        `self.errors`; its tracked events then show as "not in sheet", which
+        never deletes anything.
+        """
+        self.errors: list[str] = []
         events: list[ScheduledEvent] = []
         for tab in self._tabs_to_read():
             if not self._tab_enabled(tab):
@@ -64,8 +77,9 @@ class SheetReader:
             try:
                 grid = self.fetch_grid(tab)
                 events.extend(parse_grid(tab, grid, self.cfg))
-            except Exception:  # noqa: BLE001 - one bad tab shouldn't kill the run
+            except Exception as exc:  # noqa: BLE001 - one bad tab shouldn't kill the run
                 log.exception("Failed to read tab %r", tab)
+                self.errors.append(f"Could not read tab {tab!r}: {exc}")
         return events
 
     def _tabs_to_read(self) -> list[str]:
@@ -78,9 +92,8 @@ class SheetReader:
         """
         try:
             visible = self.visible_tabs()
-        except Exception:  # noqa: BLE001 - metadata call is best-effort
-            log.exception("Could not read tab metadata; falling back to configured tabs")
-            return list(self.cfg.sheet.tabs)
+        except Exception as exc:  # noqa: BLE001 - any Google failure
+            raise SheetError(f"Could not open the Google Sheet: {exc}") from exc
 
         configured = list(self.cfg.sheet.tabs)
         if not configured:
@@ -366,18 +379,23 @@ def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]
     if not name:
         return None  # empty column, not an event
 
+    # Number same-named games on a day (doubleheaders) BEFORE looking at the
+    # start time, so game 2 keeps its number (and its event fixes / tracked
+    # record) whether or not game 1's time is filled in yet.
+    date_str = _date_key(_cell(grid, row_of.get("date"), col), cfg)
+    occurrence = 0
+    if date_str:
+        bucket = (name.strip().lower(), date_str)
+        occurrence = seen.get(bucket, 0)
+        seen[bucket] = occurrence + 1
+
     start = _parse_start(grid, row_of, col, cfg)
     if start is None:
         log.debug("Tab %r col %d (%s): no usable start time; skipping", tab, col + 1, name)
         return None
+    date_str = date_str or _event_date_key(start)
 
     pcr = _normalize_room(_cell(grid, row_of.get("pcr"), col))  # None -> unassigned (fix in UI)
-
-    # A stable-ish source date string for override matching.
-    date_str = _event_date_key(start)
-    dedup_bucket = (name.strip().lower(), date_str)
-    occurrence = seen.get(dedup_bucket, 0)
-    seen[dedup_bucket] = occurrence + 1
 
     start = start - timedelta(minutes=cfg.scheduling.lead_in_minutes)
     end = start + timedelta(hours=cfg.scheduling.cap_hours_for(name))
@@ -410,6 +428,18 @@ def _parse_start(grid, row_of, col, cfg) -> Optional[datetime]:
     if not time_val:
         return None
     return _parse_datetime_string(f"{date_val} {time_val}", tz)
+
+
+def _date_key(date_val: str, cfg) -> Optional[str]:
+    """"YYYY-MM-DD" for a date cell on its own, or None if it has no usable
+    date (blank, TBD, no year)."""
+    if not date_val or date_val.upper() in cfg.date_parsing.skip_values:
+        return None
+    try:
+        dt, had_year = _parse_naive_with_year_flag(date_val)
+    except (ValueError, OverflowError):
+        return None
+    return _event_date_key(dt) if had_year else None
 
 
 def _parse_datetime_string(text: str, tz) -> Optional[datetime]:
@@ -512,8 +542,11 @@ def _describe_column(grid, row_of, col, cfg) -> dict:
     if start is None:
         raw = " ".join(x for x in (_cell(grid, row_of.get("date"), col),
                                    _cell(grid, row_of.get("time"), col)) if x)
+        time_raw = _cell(grid, row_of.get("time"), col)
         out["status"] = "no_start"
         out["problem"] = (f"Date has no year ({raw!r}) — add the year in the sheet" if _lacks_year(raw)
+                          else f"Start time has no AM/PM ({time_raw!r}) — add it in the sheet"
+                          if _lacks_ampm(time_raw)
                           else f"No usable start ({raw!r})" if raw else "No date/time")
         return out
     out["start"] = start.isoformat()
@@ -562,29 +595,46 @@ def _event_date_key(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
-_TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])?\b")
+_TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?(:\d{2})?\s*([AaPp]\.?[Mm]\.?)?(?![\w:])")
+_AMPM_RE = re.compile(r"\b([AaPp])\.?[Mm]\b\.?")
+_NOON_RE = re.compile(r"\bnoon\b", re.IGNORECASE)
 
 
 def _first_time_token(text: str) -> Optional[str]:
     """Pull the first usable clock time out of a messy cell.
 
-    "17:30:00" -> "17:30:00"; "6:30 & 9:00 PM" -> "6:30 PM"; free text with no
-    time -> None. A bare hour like "@2" is treated as no usable time.
+    "7 PM" -> "7:00 PM"; "6:30 & 9:00 PM" -> "6:30 PM" (the AM/PM later in the
+    cell applies); "17:30" and "9:00:00" -> 24-hour; "12:00 NOON" -> "12:00 PM".
+    Returns None when there's no time, for a bare number ("@2"), and for an
+    hour 1-12 with no AM/PM anywhere in the cell ("7:00 ET"): that could be
+    morning or evening, and guessing morning is how a 7 PM game gets recorded
+    at 7 AM.
     """
     t = text.strip()
-    # Fast path: looks like a plain HH:MM(:SS) or with AM/PM already.
-    m = _TIME_RE.search(t)
-    if not m:
-        return None
-    hour, minute, ampm = m.group(1), m.group(2), m.group(3)
-    if minute is None and ampm is None:
-        # Bare number (e.g. "@2") is too ambiguous to schedule on.
-        return None
-    minute = minute or "00"
-    out = f"{hour}:{minute}"
-    if ampm:
-        out += f" {ampm.upper()}"
-    return out
+    for m in _TIME_RE.finditer(t):
+        hour, minute, seconds, ampm = m.group(1), m.group(2), m.group(3), m.group(4)
+        if minute is None and ampm is None:
+            continue  # bare number (e.g. "@2") is too ambiguous to schedule on
+        h = int(hour)
+        if ampm is None:
+            later = _AMPM_RE.search(t, m.end())
+            if later:
+                ampm = later.group(1) + "M"
+            elif _NOON_RE.search(t) and h == 12:
+                ampm = "PM"
+            elif not (seconds or h == 0 or h >= 13):
+                return None  # 1-12 with no AM/PM: morning or evening?
+        out = f"{h}:{minute or '00'}"
+        if ampm:
+            out += f" {ampm[0].upper()}M"
+        return out
+    return None
+
+
+def _lacks_ampm(text: str) -> bool:
+    """True if a time cell holds a clock time we refuse for want of AM/PM."""
+    return bool(text) and _first_time_token(text) is None and bool(
+        re.search(r"\b\d{1,2}:\d{2}\b", text))
 
 
 def _parse_naive_with_year_flag(text: str) -> tuple[datetime, bool]:

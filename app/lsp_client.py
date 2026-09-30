@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Optional
 
 import requests
+import urllib3
 
 from .config import LspConfig
 from .models import ScheduledEvent
@@ -25,6 +26,11 @@ class LspError(Exception):
     pass
 
 
+class _LoginUnavailable(LspError):
+    """The login endpoint couldn't be reached or failed (network, 5xx): says
+    nothing about which auth the server wants, so it must not change it."""
+
+
 class LspClient:
     def __init__(self, cfg: LspConfig, timeout: int = 30, read_only: bool = False):
         self.cfg = cfg
@@ -33,6 +39,11 @@ class LspClient:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.verify = cfg.verify_ssl
+        if not cfg.verify_ssl:
+            # Said once here rather than as a warning on every request, which
+            # would fill the container log.
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            log.warning("LSP TLS certificate checks are off (lsp.verify_ssl: false)")
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         # "none" | "token" | "basic"; None until the first request decides it.
@@ -50,7 +61,9 @@ class LspClient:
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:
-            raise LspError(f"Login request failed: {exc}") from exc
+            raise _LoginUnavailable(f"Login request failed: {exc}") from exc
+        if resp.status_code >= 500:
+            raise _LoginUnavailable(f"Login failed ({resp.status_code}): {resp.text[:300]}")
         if resp.status_code != 200:
             raise LspError(f"Login failed ({resp.status_code}): {resp.text[:300]}")
         data = _json(resp, "Login")
@@ -102,7 +115,13 @@ class LspClient:
             raise LspError(f"{method} {url} failed: {exc}") from exc
 
     def _authenticate(self) -> None:
-        """After a 401: get a token, or fall back to HTTP Basic. Caller holds _lock."""
+        """After a 401: get a token, or fall back to HTTP Basic. Caller holds _lock.
+
+        Only a login the server actually refuses (4xx, or a 200 with no token)
+        means "use Basic instead". A login endpoint that is down or erroring
+        raises without changing the mode, so the next request tries again
+        rather than sticking with Basic auth the server never wanted.
+        """
         if not self._has_login():
             raise LspError(
                 "LSP requires a login: set the LSP username & password "
@@ -111,10 +130,15 @@ class LspClient:
         if self.auth_mode == "token" and self._refresh():
             return
         if self.auth_mode == "basic":
+            # Basic was refused too: start over on the next request, in case
+            # the server's auth (or the Basic decision) was only temporary.
+            self.auth_mode = None
             raise LspError("LSP rejected the username/password (HTTP Basic auth)")
         try:
             self.login()
             self.auth_mode = "token"
+        except _LoginUnavailable:
+            raise
         except LspError as exc:
             log.info("Token login failed (%s); trying HTTP Basic auth", exc)
             self.auth_mode = "basic"
@@ -130,6 +154,7 @@ class LspClient:
                 self._authenticate()
             resp = self._send(method, url, **kwargs)
             if resp.status_code == 401 and self.auth_mode == "basic":
+                self.auth_mode = None  # re-probe from scratch next time
                 raise LspError(
                     "LSP rejected the login: token login and HTTP Basic auth both failed "
                     "-- check the username & password"

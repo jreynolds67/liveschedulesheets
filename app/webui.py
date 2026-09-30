@@ -9,13 +9,15 @@ import functools
 import hmac
 import logging
 import os
+import signal
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .config import ConfigError, parse_config
 from .manager import SyncManager
-from .settings_store import GoogleKeyError, SettingsStore
+from .runtime import setup_logging
+from .settings_store import ConfigConflict, GoogleKeyError, SettingsStore
 
 log = logging.getLogger(__name__)
 
@@ -26,10 +28,14 @@ CONFIG_PATH = os.environ.get("CONFIG_PATH", "/data/config.yaml")
 SEED_PATH = os.environ.get("CONFIG_SEED", os.path.join(os.path.dirname(HERE), "config.example.yaml"))
 
 
+def _auth_enabled() -> bool:
+    return bool(os.environ.get("UI_USER") or os.environ.get("UI_PASSWORD"))
+
+
 def _check_auth() -> bool:
     user = os.environ.get("UI_USER")
     pw = os.environ.get("UI_PASSWORD")
-    if not user and not pw:
+    if not _auth_enabled():
         return True  # auth disabled
     auth = request.authorization
     return bool(auth
@@ -85,17 +91,34 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     @app.post("/api/config")
     @require_auth
     def post_config():
+        """Save the UI's settings. A body carrying the `_version` it was
+        loaded with gets 409 if the saved settings changed since (another
+        window), instead of overwriting them. The dry-run switch is not
+        saved here: see /api/dry-run."""
         incoming = request.get_json(force=True, silent=True) or {}
-        merged = store.merge_from_ui(incoming)
-        store.save(merged)
-        # Report whether the saved config is fully valid (loop tolerates invalid).
-        result = {"saved": True, "valid": True, "error": None}
         try:
-            parse_config(merged)
+            saved = store.save_from_ui(incoming)
+        except ConfigConflict as exc:
+            return jsonify({"saved": False, "conflict": True, "error": str(exc)}), 409
+        # Report whether the saved config is fully valid (loop tolerates invalid).
+        result = {"saved": True, "valid": True, "error": None, "version": saved["version"],
+                  "password_cleared": saved["password_cleared"]}
+        try:
+            parse_config(saved["raw"])
         except ConfigError as exc:
             result["valid"] = False
             result["error"] = str(exc)
         return jsonify(result)
+
+    @app.post("/api/dry-run")
+    @require_auth
+    def set_dry_run():
+        """The dry-run safety switch. Body: {dry_run: bool}"""
+        body = request.get_json(force=True, silent=True) or {}
+        if not isinstance(body.get("dry_run"), bool):
+            return jsonify({"ok": False, "error": "dry_run (true/false) is required"})
+        store.set_live(not body["dry_run"])
+        return jsonify({"ok": True, **manager.status()})
 
     @app.get("/api/google-key")
     @require_auth
@@ -114,7 +137,13 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     @app.get("/api/status")
     @require_auth
     def status():
-        return jsonify(manager.status())
+        return jsonify({**manager.status(), "ui_auth": _auth_enabled()})
+
+    @app.get("/healthz")
+    def healthz():
+        """Container health check (no auth; says only ok / why not)."""
+        ok, why = manager.health()
+        return Response(why, 200 if ok else 503, mimetype="text/plain")
 
     @app.get("/api/channels")
     @require_auth
@@ -255,11 +284,22 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     return app
 
 
+# How long shutdown waits for a sync pass to reach a safe stopping point.
+# Keep it under the container's stop_grace_period (docker-compose.yml).
+SHUTDOWN_WAIT_SECONDS = 45
+
+
+def _exit_on_sigterm(signum, _frame):
+    # Docker stops the container with SIGTERM, which by default kills Python
+    # without running `finally` blocks. Turn it into SystemExit so serve()
+    # returns and main() stops the sync loop cleanly.
+    log.info("Signal %s; shutting down", signum)
+    raise SystemExit(0)
+
+
 def main() -> int:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
+    setup_logging()
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     store = SettingsStore(CONFIG_PATH, SEED_PATH)
     manager = SyncManager(store)
     manager.start_loop()
@@ -268,6 +308,9 @@ def main() -> int:
     host = os.environ.get("WEB_HOST", "0.0.0.0")
     port = int(os.environ.get("WEB_PORT", "8080"))
     log.info("Web UI on http://%s:%d", host, port)
+    if not _auth_enabled():
+        log.warning("The web UI has no password: anyone who can reach it can change settings "
+                    "and delete LSP events. Set UI_USER / UI_PASSWORD.")
 
     try:
         from waitress import serve
@@ -275,7 +318,7 @@ def main() -> int:
     except ImportError:
         app.run(host=host, port=port)
     finally:
-        manager.stop()
+        manager.stop(timeout=SHUTDOWN_WAIT_SECONDS)
     return 0
 
 

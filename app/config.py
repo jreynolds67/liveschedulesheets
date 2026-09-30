@@ -179,7 +179,13 @@ def load_raw(path: str) -> dict:
     if not os.path.exists(path):
         raise ConfigError(f"Config file not found: {path}")
     with open(path, "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+        try:
+            raw = yaml.safe_load(fh) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"{path} is not valid YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path} does not hold a settings mapping")
+    return raw
 
 
 def save_raw(path: str, raw: dict) -> None:
@@ -243,10 +249,10 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
 
     sc_raw = raw.get("scheduling", {}) or {}
     scheduling = SchedulingConfig(
-        lead_in_minutes=int(sc_raw.get("lead_in_minutes", 0)),
-        safety_cap_hours=float(sc_raw.get("safety_cap_hours", 6)),
-        horizon_days=int(sc_raw.get("horizon_days", 60)),
-        past_grace_minutes=int(sc_raw.get("past_grace_minutes", 30)),
+        lead_in_minutes=_number(sc_raw, "lead_in_minutes", 0, "scheduling", int, 0, 24 * 60),
+        safety_cap_hours=_number(sc_raw, "safety_cap_hours", 6, "scheduling", float, 0.25, 48),
+        horizon_days=_number(sc_raw, "horizon_days", 60, "scheduling", int, 1, 366),
+        past_grace_minutes=_number(sc_raw, "past_grace_minutes", 30, "scheduling", int, 0, 24 * 60),
         event_name_prefix=str(sc_raw.get("event_name_prefix", "")),
         sport_safety_caps=_parse_sport_caps(sc_raw.get("sport_safety_caps")),
     )
@@ -319,20 +325,21 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
 
     lsp_raw = _require(raw, "lsp", "root")
     username = (lsp_raw.get("username") or os.environ.get("LSP_USERNAME", "")).strip()
-    password = lsp_raw.get("password") or os.environ.get("LSP_PASSWORD", "")
     # Login is optional: some LSP servers (Basic auth provider) accept API calls
     # without one. The client works out what the server needs (see lsp_client).
     lsp = LspConfig(
-        base_url=str(_require(lsp_raw, "base_url", "lsp")).rstrip("/"),
+        base_url=normalize_url(_require(lsp_raw, "base_url", "lsp")),
         verify_ssl=bool(lsp_raw.get("verify_ssl", True)),
         username=username,
-        password=password,
+        password=effective_password(lsp_raw),
         event_name_variable=str(lsp_raw.get("event_name_variable", "Event Name") or "").strip(),
     )
 
     rt_raw = raw.get("runtime", {}) or {}
     runtime = RuntimeConfig(
-        poll_interval_seconds=int(rt_raw.get("poll_interval_seconds", 900)),
+        # A floor, so a blank field can't turn into a sweep every few seconds.
+        poll_interval_seconds=_number(rt_raw, "poll_interval_seconds", 900, "runtime", int,
+                                      60, 24 * 3600),
         # Dry run unless the UI's toggle has explicitly gone live (runtime.live).
         # DRY_RUN env overrides (headless / docker run testing).
         dry_run=_env_bool("DRY_RUN", not bool(rt_raw.get("live", False))),
@@ -353,8 +360,8 @@ def _parse_sport_caps(raw) -> list[tuple[str, float]]:
             hours = float(item.get("hours"))
         except (TypeError, ValueError):
             raise ConfigError(f"Safety cap for {sport} needs a number of hours") from None
-        if hours <= 0:
-            raise ConfigError(f"Safety cap for {sport} must be more than 0 hours")
+        if not 0 < hours <= 48:
+            raise ConfigError(f"Safety cap for {sport} must be more than 0 and at most 48 hours")
         out.append((sport, hours))
     return out
 
@@ -399,7 +406,11 @@ def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, dict[tuple, Eve
             name = str(item.get("event", "")).strip().lower()
             if not date or not name:
                 continue  # need both to match an event
-            occ = int(item.get("occurrence", 0))
+            try:
+                occ = int(item.get("occurrence") or 0)
+            except (TypeError, ValueError):
+                raise ConfigError(f"Event fix for {name!r} on {date} has a bad occurrence "
+                                  f"{item.get('occurrence')!r}") from None
             start = None
             start_raw = item.get("start")
             if start_raw:
@@ -425,6 +436,25 @@ _SHEET_URL_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 _SHEET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
 
 
+def normalize_url(url) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def effective_password(lsp_raw: dict) -> str:
+    """The LSP password to use: the stored one, else LSP_PASSWORD env.
+
+    `lsp.password_for` names the server URL the password was entered for.
+    When it's set and differs from `lsp.base_url`, no password is sent: the
+    URL was changed without re-entering the password, and sending it on to a
+    server nobody vouched for would hand the login to whoever runs that
+    server (see SettingsStore.merge_from_ui).
+    """
+    bound = normalize_url(lsp_raw.get("password_for"))
+    if bound and bound != normalize_url(lsp_raw.get("base_url")):
+        return ""
+    return lsp_raw.get("password") or os.environ.get("LSP_PASSWORD", "")
+
+
 def extract_spreadsheet_id(text: str) -> str:
     """Accept a full Google Sheets link or a bare ID; return the ID ('' if neither).
 
@@ -435,6 +465,25 @@ def extract_spreadsheet_id(text: str) -> str:
     if m:
         return m.group(1)
     return t if _SHEET_ID_RE.match(t) else ""
+
+
+def _number(d: dict, key: str, default, ctx: str, cast, minimum, maximum):
+    """d[key] as `cast` (int / float), within [minimum, maximum]."""
+    value = d.get(key)
+    if value is None or value == "":
+        value = default
+    try:
+        if isinstance(value, bool):
+            raise TypeError
+        num = cast(value)
+        if cast is int and num != float(value):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ConfigError(f"{ctx}.{key} must be a {'whole ' if cast is int else ''}number "
+                          f"(got {value!r})") from None
+    if num != num or not minimum <= num <= maximum:  # num != num: NaN
+        raise ConfigError(f"{ctx}.{key} must be between {minimum} and {maximum} (got {num})")
+    return num
 
 
 def _require(d: dict, key: str, ctx: str):
