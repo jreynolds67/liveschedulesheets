@@ -730,6 +730,24 @@ class Syncer:
         log.info("Cleanup complete: deleted=%d failed=%d", summary["deleted"], summary["failed"])
         return summary
 
+    def delete_events(self, event_ids: list[str]) -> dict:
+        """Delete these LSP events (one sheet event's bookings, from the
+        Scheduled list) and stop tracking them. Runs even with dry run on:
+        it's an explicit operator action, like cleanup."""
+        summary = {"deleted": 0, "failed": 0, "errors": []}
+        for event_id in event_ids:
+            try:
+                self.lsp.remove_event(event_id, force=True)
+                self.state.forget_event(event_id)
+                summary["deleted"] += 1
+                log.info("Deleted event %s from LSP (Scheduled list)", event_id)
+            except LspError as exc:
+                summary["failed"] += 1
+                summary["errors"].append(str(exc))
+                log.warning("Could not delete event %s: %s", event_id, exc)
+        self.state.save()
+        return summary
+
     # -- helpers ------------------------------------------------------------
 
     def _resolve_channels(self, channels: Optional[list[dict]] = None) -> dict[str, list[tuple[str, str]]]:

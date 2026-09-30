@@ -205,6 +205,20 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
+    @app.post("/api/delete-events")
+    @require_auth
+    def delete_events():
+        """Delete one event from LSP (all its channel bookings).
+        Body: {event_ids: [...]}"""
+        body = request.get_json(force=True, silent=True) or {}
+        ids = [i for i in (body.get("event_ids") or []) if isinstance(i, str) and i]
+        if not ids:
+            return jsonify({"ok": False, "error": "event_ids is required"})
+        try:
+            return jsonify({"ok": True, "summary": manager.delete_events(ids)})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
     return app
 
 

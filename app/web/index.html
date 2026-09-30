@@ -21,7 +21,7 @@
   .badge.ok { background:rgba(59,209,136,.15); color:var(--accent2); }
   .badge.bad { background:rgba(255,107,107,.15); color:var(--err); }
   .badge.warn { background:rgba(245,181,68,.15); color:var(--warn); }
-  main { max-width:960px; margin:0 auto; padding:22px; display:grid; gap:18px; }
+  main { max-width:1400px; margin:0 auto; padding:22px; display:grid; gap:18px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); min-width:0; }
   .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
     margin:0; padding:14px 18px; border-bottom:1px solid var(--line); }
@@ -48,7 +48,8 @@
   table { width:100%; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:600; font-size:12px; }
-  .pill { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap; }
+  .pill { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; white-space:nowrap;
+    text-transform:uppercase; letter-spacing:.3px; }
   .pill.create { background:rgba(79,140,255,.18); color:var(--accent); }
   .pill.exists { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.out_of_window { background:rgba(245,181,68,.16); color:var(--warn); }
@@ -57,7 +58,7 @@
   .pill.locked { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.not_in_sheet { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.error { background:rgba(255,107,107,.16); color:var(--err); }
-  .filebtn { display:inline-block; cursor:pointer; padding:7px 14px; border-radius:8px; border:1px solid var(--line); font-size:13px; font-weight:600; margin:0; }
+  .filebtn { display:inline-block; white-space:nowrap; cursor:pointer; padding:7px 14px; border-radius:8px; border:1px solid var(--line); font-size:13px; font-weight:600; margin:0; }
   .pcr-row { display:grid; grid-template-columns:70px 1fr 34px; gap:10px; align-items:end; margin-bottom:10px; }
   .pcr-row .pcr-hits { grid-column:1 / -1; margin-top:-4px; }
   .pcr-row .rm { background:transparent; border:1px solid var(--line); color:var(--err);
@@ -72,7 +73,9 @@
   .mini { padding:4px 8px; font-size:12px; }
   .roomsel { background:var(--panel2); color:var(--text); border:1px solid var(--line);
     border-radius:6px; padding:4px 6px; font-size:12px; }
-  td .inline { display:flex; gap:6px; align-items:center; }
+  td .inline { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  #previewBox .roomsel { min-width:110px; padding:6px 8px; font-size:13px; }
+  .nowrap { white-space:nowrap; }
   .ov-row { display:grid; grid-template-columns:1fr 1fr 90px 70px auto auto; gap:10px;
     align-items:center; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px; }
   .ov-row:last-child { border-bottom:none; }
@@ -132,7 +135,7 @@
 <header>
   <h1>Live Schedule&nbsp;Sheets</h1>
   <span id="statusBadge" class="badge warn">loading…</span>
-  <span id="dryBadge" class="badge warn" style="display:none" title="Syncs don't create anything in Live Schedule Pro. Only Preview's Send to LSP and the cleanup button change it.">DRY RUN — LSP is not changed</span>
+  <span id="dryBadge" class="badge warn" style="display:none" title="Syncs don't create anything in Live Schedule Pro. Only Preview's SEND TO LSP and the delete buttons change it.">DRY RUN - LSP is not changed</span>
   <div class="spacer"></div>
   <div class="btns">
     <button id="btnTest" class="ghost">Test connection</button>
@@ -172,14 +175,13 @@
       <input type="text" id="sheet_id" placeholder="Paste the sheet's link (https://docs.google.com/spreadsheets/d/…) or its ID" />
       <div class="hint" id="sheetInfo" style="margin-top:6px"></div></div>
     <div class="grid2">
-      <div><label>Header column</label><input type="text" id="sheet_header_col" value="A" /></div>
       <div><label>Timezone (IANA)</label><input type="text" id="sheet_tz" placeholder="America/New_York" /></div>
+      <div><label>Google service-account key</label>
+        <div class="row">
+          <label class="ghost filebtn">Upload key (.json)<input type="file" id="googleKeyFile" accept=".json,application/json" hidden /></label>
+          <span class="hint" id="googleSet">…</span>
+        </div></div>
     </div>
-    <div><label>Google service-account key</label>
-      <div class="row">
-        <label class="ghost filebtn">Upload key (.json)<input type="file" id="googleKeyFile" accept=".json,application/json" hidden /></label>
-        <span class="hint" id="googleSet">…</span>
-      </div></div>
   </div></section>
 
   <!-- Sheet tabs, preview & row mapping -->
@@ -199,7 +201,7 @@
   <!-- PCR mapping -->
   <section class="card"><h2>PCR → channel mapping</h2><div class="body">
     <div class="hint">Each PCR letter from the sheet records on <b>every</b> LSP channel whose name contains
-      the match text as a whole word — e.g. “PCR A” matches “01 - PCR A PGM (x264)” and
+      the match text as a whole word - e.g. “PCR A” matches “01 - PCR A PGM (x264)” and
       “02 - PCR A CLEAN (ProRes422)”, but not “PCR AB”. Channels are looked up live on every pass, so
       added or renamed channels are picked up automatically.</div>
     <div id="pcrRows"></div>
@@ -211,17 +213,17 @@
   <section class="card"><h2>Scheduling</h2><div class="body">
     <div class="grid3">
       <div><label>Lead-in (minutes before start)</label><input type="number" id="lead_in" min="0" /></div>
-      <div><label>Default safety cap (hours)</label><input type="number" id="safety_cap" min="0" step="0.5" /></div>
+      <div><label>Default record length (hours)</label><input type="number" id="safety_cap" min="0" step="0.5" /></div>
       <div><label>Event name prefix</label><input type="text" id="name_prefix" placeholder="(optional)" /></div>
     </div>
     <div class="grid2">
       <div><label>Only schedule within (days ahead)</label><input type="number" id="horizon" min="1" /></div>
       <div><label>Ignore starts older than (minutes)</label><input type="number" id="past_grace" min="0" /></div>
     </div>
-    <div><label>Safety cap by sport</label>
-      <div class="hint" style="margin-bottom:8px">Replaces the default cap for events whose name contains the sport
-        code as a whole word, ignoring case — e.g. “WSOC” matches “WSOC vs Texas”. The first matching row wins.
-        Events already created in LSP keep their end time.</div>
+    <div><label>Record length by sport</label>
+      <div class="hint" style="margin-bottom:8px">Replaces the default record length for events whose name contains the sport
+        code as a whole word, ignoring case - e.g. “WSOC” matches “WSOC vs Texas”. The first matching row wins.
+        Changing a length also updates events already in LSP that haven't started (unless they're locked).</div>
       <div id="capRows"></div>
       <button id="btnAddCap" class="ghost">+ Add sport</button></div>
   </div></section>
@@ -229,9 +231,11 @@
   <!-- Runtime -->
   <section class="card"><h2>Runtime</h2><div class="body">
     <div class="grid2">
-      <div><label>Sync interval (seconds)</label><input type="number" id="poll_interval" min="60" /></div>
+      <div><label>Sync interval (seconds)</label><input type="number" id="poll_interval" min="60" />
+        <div class="hint" style="margin-top:6px">How often the tool reads the Google Sheet and pushes any changes to
+          Live Schedule Pro (one sync does both). <b>Run now</b> does it immediately.</div></div>
       <div><label>Dry run</label>
-        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: syncs only log what they would create. Only Preview's <b>Send to LSP</b> and the cleanup button change LSP. Applies immediately.</span></div></div>
+        <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: syncs only log what they would create. Only Preview's <b>SEND TO LSP</b> and the delete buttons change LSP. Applies immediately.</span></div></div>
     </div>
     <details><summary>Advanced: labels &amp; date parsing</summary>
       <div class="body" style="padding:14px 0 0;">
@@ -255,27 +259,29 @@
   <!-- Preview -->
   <section class="card"><h2>Preview</h2><div class="body">
     <div class="hint">What the next sync would do (no changes made). Use the PCR selector to
-      assign a missing/wrong PCR, or Ignore to drop an event. Staged fixes appear below
-      under “Manual overrides” — click <b>Save</b> to apply them. Events already scheduled follow the
+      assign a missing/wrong PCR, or Ignore to drop an event. Those fixes are listed below
+      under “Event fixes” - click <b>Save</b> to apply them. Events already scheduled follow the
       sheet (<b>update</b>) until someone changes them in LSP; then they're <b>locked</b> and left alone
-      until you <b>Unlock</b> them.</div>
+      until you <b>UNLOCK</b> them.</div>
     <div id="previewBox" class="hint">Click “Preview events” to see the plan.</div>
   </div></section>
 
   <!-- Overrides -->
-  <section class="card"><h2>Manual overrides</h2><div class="body">
-    <div class="hint">Per-event fixes, matched by tab + date + event name. These override what the
-      sheet says (or fill in what it is missing).</div>
-    <div id="overridesBox" class="hint">No overrides staged.</div>
+  <section class="card"><h2>Event fixes</h2><div class="body">
+    <div class="hint">Changes you made to single events in <b>Preview</b>: a PCR assigned when the sheet has
+      none (or the wrong one), or an event set to <b>ignore</b> so it's never scheduled. They're applied
+      on top of the sheet on every sync, matched by tab, date and event name. <b>REMOVE</b> one to go back
+      to what the sheet says.</div>
+    <div id="overridesBox" class="hint">No event fixes.</div>
   </div></section>
 
   <!-- Cleanup / testing -->
   <section class="card"><h2>Scheduled in Live Schedule Pro</h2><div class="body">
     <div class="hint">Live from LSP: events on the mapped PCR channels. Events tagged
-      <span class="pill tool">this tool</span> were created by this tool. <b>Delete</b> removes only
-      those — events already in Live Schedule Pro (or made by hand) and <span class="pill locked">locked</span>
-      events (changed by hand in LSP) are never touched. Useful for
-      cleaning up between test runs.</div>
+      <span class="pill tool">this tool</span> were created by this tool; <span class="pill locked">locked</span>
+      ones were changed by hand in LSP, so the tool leaves them alone. <b>DELETE</b> on a row removes that
+      event from LSP on all its channels. <b>Delete tool-created events</b> removes every event this tool
+      created (except locked ones), for cleaning up between test runs.</div>
     <div class="schedbar hint">
       <label><input type="checkbox" id="schedToolOnly"> Only events created by this tool</label>
       <label>Show <select id="schedPast">
@@ -321,7 +327,6 @@ function fillForm(){
 
   const sid = get(cfg,"sheet.spreadsheet_id","");
   $("sheet_id").value = sid ? sheetUrl(sid) : "";
-  $("sheet_header_col").value = get(cfg,"sheet.header_column","A");
   $("sheet_tz").value = get(cfg,"sheet.timezone","America/New_York");
 
   cfg.tab_overrides = cfg.tab_overrides || {};
@@ -392,7 +397,7 @@ function addCapRow(sport="", hours=""){
   const div = document.createElement("div"); div.className = "cap-row";
   div.innerHTML = `
     <div><label>Sport</label><input type="text" class="cap-sport" placeholder="e.g. WSOC" value="${esc(sport)}" /></div>
-    <div><label>Safety cap (hours)</label><input type="number" class="cap-hours" min="0.5" step="0.5" value="${esc(hours)}" /></div>
+    <div><label>Record length (hours)</label><input type="number" class="cap-hours" min="0.5" step="0.5" value="${esc(hours)}" /></div>
     <button class="rm" title="Remove">✕</button>`;
   div.querySelector(".rm").onclick = () => div.remove();
   $("capRows").appendChild(div);
@@ -410,7 +415,7 @@ function gather(){
   cfg.sheet = cfg.sheet || {};
   cfg.sheet.spreadsheet_id = currentSheet() || $("sheet_id").value.trim();
   cfg.sheet.tabs = [];  // auto-discover visible tabs; disable via tab_overrides
-  cfg.sheet.header_column = $("sheet_header_col").value.trim() || "A";
+  cfg.sheet.header_column = cfg.sheet.header_column || "A";  // not in the UI; row labels are in column A
   cfg.sheet.timezone = $("sheet_tz").value.trim();
   cfg.sheet.labels = {
     event_name: fromCsv($("lbl_event").value),
@@ -512,8 +517,8 @@ const FIELDS = [
   {key:"time",       name:"Start time",   tag:"START", color:"#3bd188", fill:"rgba(59,209,136,.18)"},
   {key:"pcr",        name:"PCR",          tag:"PCR",   color:"#f5b544", fill:"rgba(245,181,68,.18)"},
 ];
-const METHOD_TXT = {label:"matched by label", keyword:"guessed from header — please confirm",
-  content:"guessed from cell contents — please confirm", manual:"chosen by you",
+const METHOD_TXT = {label:"matched by label", keyword:"guessed from header - please confirm",
+  content:"guessed from cell contents - please confirm", manual:"chosen by you",
   moved:"chosen by you", stale:"", none:"set to no row"};
 
 let insp = {tab:null, data:null};
@@ -588,10 +593,10 @@ function fieldStatus(f, d){
     return [(e.method === "keyword" || e.method === "content") ? "warn" : "", txt];
   }
   switch (f.key){
-    case "event_name": return ["err", "Not found — choose the row with event names"];
-    case "date": return ["err", "Not found — choose the row with dates"];
-    case "time": return ["err", "Not found — choose the row with start times"];
-    case "pcr": return ["warn", "No row — events need a PCR assigned in Preview"];
+    case "event_name": return ["err", "Not found - choose the row with event names"];
+    case "date": return ["err", "Not found - choose the row with dates"];
+    case "time": return ["err", "Not found - choose the row with start times"];
+    case "pcr": return ["warn", "No row - events need a PCR assigned in Preview"];
     default: return ["", e.method === "none" ? "Set to no row" : "Not used"];
   }
 }
@@ -606,7 +611,7 @@ function renderMapper(){
   const pickers = FIELDS.map(f => {
     const pick = picks[f.key], auto = d.auto[f.key];
     const val = !pick ? "auto" : pick.none ? "none" : String(pick.row);
-    const opts = [`<option value="auto">Auto — ${auto.row ? `row ${auto.row} · ${esc(auto.label)}` : "not found"}</option>`,
+    const opts = [`<option value="auto">Auto - ${auto.row ? `row ${auto.row} · ${esc(auto.label)}` : "not found"}</option>`,
                   `<option value="none">No row</option>`];
     const rowsForSelect = labeled.slice();
     if (pick && pick.row && !rowsForSelect.some(r => r.row === pick.row)) rowsForSelect.push({row:pick.row, cells:[]});
@@ -623,7 +628,7 @@ function renderMapper(){
   let sum = `<b>${s.ready}</b> event(s) ready`;
   if (s.no_room) sum += ` · <span class="ps-warn">${s.no_room} without a PCR</span>`;
   if (s.no_start) sum += ` · <span class="ps-warn">${s.no_start} without a usable start</span>`;
-  if (s.missing.length) sum = `<span class="err">Missing: ${s.missing.join(", ")} — nothing on this tab will be scheduled.</span>`;
+  if (s.missing.length) sum = `<span class="err">Missing: ${s.missing.join(", ")} - nothing on this tab will be scheduled.</span>`;
 
   // Grid
   const byRow = {};
@@ -639,8 +644,8 @@ function renderMapper(){
     if (!ci || ci.status === "empty") return `<th></th>`;
     if (ci.status === "no_start") return `<th class="ps-err" title="${esc(ci.name)}: ${esc(ci.problem)}">✗ no start</th>`;
     const when = shortWhen(ci.start);
-    if (ci.status === "no_room") return `<th class="ps-warn" title="${esc(ci.name)} — ${esc(when)}, no PCR">⚠ no PCR · ${esc(when)}</th>`;
-    return `<th class="ps-ok" title="${esc(ci.name)} — ${esc(when)}, PCR ${ci.room}">✓ PCR ${ci.room} · ${esc(when)}</th>`;
+    if (ci.status === "no_room") return `<th class="ps-warn" title="${esc(ci.name)} - ${esc(when)}, no PCR">⚠ no PCR · ${esc(when)}</th>`;
+    return `<th class="ps-ok" title="${esc(ci.name)} - ${esc(when)}, PCR ${ci.room}">✓ PCR ${ci.room} · ${esc(when)}</th>`;
   }).join("") + `</tr>`;
   const body = d.rows.map(r => {
     const fs = byRow[r.row] || [];
@@ -661,7 +666,7 @@ function renderMapper(){
   const on = tabEnabled(tab);
   box.innerHTML = `
     <label class="tabon"><input type="checkbox" id="tabOn" ${on?"checked":""}/> Include this tab
-      <span class="hint">${on ? "" : "— left out: nothing on it will be scheduled"}</span></label>
+      <span class="hint">${on ? "" : "- left out: nothing on it will be scheduled"}</span></label>
     <div class="fieldgrid">${pickers}</div>
     <div class="row" style="justify-content:space-between;flex-wrap:wrap;margin:14px 0 10px">
       <div class="mapsum">${sum}</div>
@@ -683,6 +688,11 @@ function renderMapper(){
   $("btnMapReload").onclick = () => inspectTab(tab, true);
   $("tabOn").onchange = (e) => { setTabEnabled(tab, e.target.checked); renderMapper(); };
   box.querySelectorAll("tr.srow").forEach(tr => tr.onclick = (e) => showRowMenu(e, +tr.dataset.row));
+}
+
+// "Sat, Sep 5, 12:30 PM" in the browser's time zone.
+function fmtWhen(iso){
+  return iso ? new Date(iso).toLocaleString([], {weekday:"short", month:"short", day:"numeric", hour:"numeric", minute:"2-digit"}) : "";
 }
 
 // "Sat 9/5 12:30 PM" in the sheet's own wall-clock time (not the browser's zone).
@@ -755,16 +765,16 @@ function renderOverrides(){
   const entries = [];
   Object.keys(cfg.event_overrides||{}).forEach(tab =>
     (cfg.event_overrides[tab]||[]).forEach(o => entries.push({tab, ...o})));
-  if (!entries.length){ box.className="hint"; box.textContent = "No overrides staged."; return; }
+  if (!entries.length){ box.className="hint"; box.textContent = "No event fixes."; return; }
   box.className = "";
   box.innerHTML = entries.map((o,i) => `
     <div class="ov-row" data-i="${i}">
       <div><div class="k">${o.tab}</div>${o.event}</div>
       <div class="mono">${o.date}${o.occurrence?` #${o.occurrence}`:""}</div>
-      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`PCR ${o.control_room}`:"—")}</div>
+      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`PCR ${o.control_room}`:"-")}</div>
       <div class="mono hint">${o.start?o.start.replace("T"," "):""}</div>
       <div class="hint">${o.ignore?"drop":(o.control_room?"PCR":"")}${o.start?" · start":""}</div>
-      <button class="rm mini ghost" data-tab="${o.tab}" data-date="${o.date}" data-ev="${encodeURIComponent(o.event)}" data-occ="${o.occurrence||0}">remove</button>
+      <button class="rm mini ghost" data-tab="${o.tab}" data-date="${o.date}" data-ev="${encodeURIComponent(o.event)}" data-occ="${o.occurrence||0}">REMOVE</button>
     </div>`).join("");
   box.querySelectorAll(".rm").forEach(b => b.onclick = () =>
     removeOv(b.dataset.tab, b.dataset.date, decodeURIComponent(b.dataset.ev), +b.dataset.occ));
@@ -782,7 +792,7 @@ async function refreshStatus(){
   $("dryBadge").style.display = s.dry_run ? "" : "none";
   if (s.dry_run_locked){
     $("dry_run").checked = !!s.dry_run; $("dry_run").disabled = true;
-    $("dryHint").textContent = `Forced ${s.dry_run?"ON":"OFF"} by the DRY_RUN environment variable — remove it to use this toggle`;
+    $("dryHint").textContent = `Forced ${s.dry_run?"ON":"OFF"} by the DRY_RUN environment variable - remove it to use this toggle`;
   }
   let html = "";
   if (s.config_error) html += `<div style="color:var(--err)">⚠ ${s.config_error}</div>`;
@@ -801,42 +811,43 @@ function renderPreview(items){
   lastPreview = items || [];
   if (!items.length){ $("previewBox").innerHTML = "No schedulable events found."; return; }
   $("previewBox").innerHTML = `<table><thead><tr>
-    <th>Status</th><th>Event</th><th>Tab</th><th>PCR</th><th>Start</th><th>Fix</th>
+    <th>Status</th><th>Event</th><th>Tab</th><th>PCR</th><th>Start</th><th>End</th><th>Fix</th>
     </tr></thead><tbody></tbody></table>`;
   const tb = $("previewBox").querySelector("tbody");
   items.forEach((i, idx) => {
     const noRoom = !i.pcr;
     const statusCls = noRoom ? "no_room" : i.status;
-    const statusTxt = noRoom ? "no PCR" : i.status.replace(/_/g,' ');
+    const statusTxt = noRoom ? "no PCR" : i.status.replace(/_/g,' ');  // pills are shown in caps
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><span class="pill ${statusCls}">${statusTxt}</span></td>
-      <td>${esc(i.event_name)}<div class="hint" title="${esc((i.channels||[]).map(c=>`${c.name} — ${c.status.replace(/_/g,' ')}`).join("\n"))}">${esc(i.message||"")}</div></td>
-      <td class="hint">${i.source_tab}</td>
+      <td>${esc(i.event_name)}<div class="hint" title="${esc((i.channels||[]).map(c=>`${c.name} - ${c.status.replace(/_/g,' ')}`).join("\n"))}">${esc(i.message||"")}</div></td>
+      <td class="hint nowrap">${esc(i.source_tab)}</td>
       <td></td>
-      <td class="mono">${new Date(i.start).toLocaleString()}<div class="hint">stops after ${+((new Date(i.end) - new Date(i.start)) / 36e5).toFixed(2)} h</div></td>
+      <td class="mono nowrap">${fmtWhen(i.start)}</td>
+      <td class="mono nowrap">${fmtWhen(i.end)}</td>
       <td></td>`;
     // Gone from the sheet: nothing to override here.
     if (i.status === "not_in_sheet"){ tr.children[3].textContent = i.pcr ? `PCR ${i.pcr}` : ""; tb.appendChild(tr); return; }
     // Room selector
     const sel = document.createElement("select");
     sel.className = "roomsel";
-    sel.innerHTML = `<option value="">— none —</option>` +
+    sel.innerHTML = `<option value="">None</option>` +
       ROOMS.map(l=>`<option value="${l}" ${i.pcr===l?"selected":""}>PCR ${l}</option>`).join("");
-    sel.onchange = () => { upsertOv(i, {control_room: sel.value || null}); toast("PCR staged — Save to apply"); };
+    sel.onchange = () => { upsertOv(i, {control_room: sel.value || null}); toast("PCR staged - Save to apply"); };
     tr.children[3].appendChild(sel);
     // Ignore toggle
     const wrap = document.createElement("div"); wrap.className = "inline";
     const cb = document.createElement("input"); cb.type = "checkbox";
     const existing = findOv(i.source_tab, i.event_date, i.event_name, i.occurrence||0);
     cb.checked = !!(existing && existing.ignore);
-    cb.onchange = () => { upsertOv(i, {ignore: cb.checked || null}); toast(cb.checked?"Will be ignored — Save to apply":"Ignore cleared"); };
+    cb.onchange = () => { upsertOv(i, {ignore: cb.checked || null}); toast(cb.checked?"Will be ignored - Save to apply":"Ignore cleared"); };
     const lbl = document.createElement("span"); lbl.className = "hint"; lbl.textContent = "ignore";
     wrap.appendChild(cb); wrap.appendChild(lbl);
     // Send just this event to LSP now (testing) -- works even in dry run.
     if (i.status === "create" || i.status === "update"){
       const send = document.createElement("button");
-      send.className = "ghost mini"; send.textContent = "Send to LSP";
+      send.className = "ghost mini"; send.textContent = "SEND TO LSP";
       send.title = "Create just this event in Live Schedule Pro now, even with dry run on";
       send.onclick = () => sendEvent(i, send);
       wrap.appendChild(send);
@@ -844,12 +855,12 @@ function renderPreview(items){
     // Locked by a hand edit in LSP: let the tool manage it again.
     if (i.locked && i.record_id){
       const un = document.createElement("button");
-      un.className = "ghost mini"; un.textContent = "Unlock";
+      un.className = "ghost mini"; un.textContent = "UNLOCK";
       un.title = "Let this tool manage the event again: the next sync re-applies the sheet over the LSP edits";
       un.onclick = () => unlockEvent(i, un);
       wrap.appendChild(un);
     }
-    tr.children[5].appendChild(wrap);
+    tr.children[6].appendChild(wrap);
     tb.appendChild(tr);
   });
 }
@@ -867,9 +878,9 @@ async function sendEvent(i, btn){
   if (r.ok){ const s = r.summary;
     toast(`Sent "${s.name}": ` + [["created",s.created],["updated",s.updated],["removed",s.deleted]]
       .filter(x => x[1]).map(x => `${x[0]} on ${x[1]}`).join(", ") + " channel(s)"
-      + `${s.errors?`, ${s.errors} failed — see log`:""}`, 4000);
+      + `${s.errors?`, ${s.errors} failed - see log`:""}`, 4000);
     $("btnPreview").click();
-  } else { toast("Send failed: " + r.error, 5000); btn.disabled = false; btn.textContent = "Send to LSP"; }
+  } else { toast("Send failed: " + r.error, 5000); btn.disabled = false; btn.textContent = "SEND TO LSP"; }
   refreshStatus(); loadScheduled();
 }
 
@@ -902,37 +913,53 @@ function renderScheduled(){
   const groups = new Map();
   for (const e of r.events){
     const k = [e.name, e.start, e.end, e.pcr].join("|");
-    if (!groups.has(k)) groups.set(k, {...e, channels: [], statuses: new Set(), creators: new Set(), tool: 0});
+    if (!groups.has(k)) groups.set(k, {...e, channels: [], ids: [], statuses: new Set(), creators: new Set(), tool: 0});
     const g = groups.get(k);
-    g.channels.push(e.channel); if (e.status) g.statuses.add(e.status);
+    g.channels.push(e.channel); g.ids.push(e.id); if (e.status) g.statuses.add(e.status);
     if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++; if (e.locked) g.locked = true;
   }
   let rows = [...groups.values()];
   if ($("schedToolOnly").checked) rows = rows.filter(g => g.tool);
-  const fmt = (iso) => iso ? new Date(iso).toLocaleString([], {weekday:"short", month:"short", day:"numeric", hour:"numeric", minute:"2-digit"}) : "";
   let html = `<div class="hint" style="margin-bottom:8px">${groups.size} event(s) across ${r.channels} mapped channel(s) · <b>${toolCount}</b> channel booking(s) created by this tool</div>`;
-  if (!r.channels) html = `<div class="hint">No LSP channels match any PCR — check the PCR → channel mapping above.</div>`;
+  if (!r.channels) html = `<div class="hint">No LSP channels match any PCR - check the PCR → channel mapping above.</div>`;
   else if (!rows.length) html += `<div class="hint">No events to show.</div>`;
-  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th></tr></thead><tbody>`
-    + rows.map(g => `<tr>
+  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th><th></th></tr></thead><tbody>`
+    + rows.map((g, gi) => `<tr>
       <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
-      <td class="mono">${fmt(g.start)}</td><td class="mono">${fmt(g.end)}</td>
-      <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td></tr>`).join("")
+      <td class="mono nowrap">${fmtWhen(g.start)}</td><td class="mono nowrap">${fmtWhen(g.end)}</td>
+      <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td>
+      <td><button class="danger mini" data-g="${gi}">DELETE</button></td></tr>`).join("")
     + `</tbody></table></div>`;
   if (r.missing.length) html += `<div class="hint" style="margin-top:10px;color:var(--warn)">⚠ ${r.missing.length} channel booking(s) this tool created are no longer on any mapped channel in LSP (deleted or moved by hand): ${[...new Set(r.missing.map(m=>m.name))].map(esc).join(", ")}</div>`;
   box.className = ""; box.innerHTML = html;
+  box.querySelectorAll("button[data-g]").forEach(b => b.onclick = () => deleteScheduled(rows[+b.dataset.g], b));
+}
+
+async function deleteScheduled(g, btn){
+  const where = g.channels.length > 1 ? `all ${g.channels.length} channels:\n  • ${g.channels.join("\n  • ")}` : g.channels[0];
+  const who = g.tool ? (g.locked ? "\n\nIt's locked (changed by hand in LSP)." : "")
+                     : "\n\nThis event was NOT created by this tool.";
+  const again = g.tool ? "\n\nIf it's still in the sheet, the next sync creates it again. Tick ignore on it in Preview (and Save) to stop that." : "";
+  if (!confirm(`Delete "${g.name}" (${fmtWhen(g.start)}) from Live Schedule Pro on ${where}?${who}${again}`)) return;
+  btn.disabled = true; btn.textContent = "Deleting…";
+  const r = await api("POST","/api/delete-events", {event_ids: g.ids});
+  if (r.ok){ const s = r.summary;
+    toast(`Deleted "${g.name}" from ${s.deleted} channel(s)${s.failed?`, ${s.failed} failed`:""}`, 4000);
+    if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
+  } else toast("Delete failed: " + r.error, 5000);
+  loadScheduled(); refreshStatus();
 }
 
 async function loadGoogleKey(){
   const r = await api("GET","/api/google-key");
   const el = $("googleSet");
   if (r.installed){
-    el.innerHTML = `<span style="color:var(--accent2)">✓ Installed${r.uploaded?" (uploaded)":""}</span> — share the sheet (Viewer) with
+    el.innerHTML = `<span style="color:var(--accent2)">✓ Installed${r.uploaded?" (uploaded)":""}</span> - share the sheet (Viewer) with
       <b class="mono">${esc(r.client_email)}</b> <button class="ghost" id="btnCopyEmail" style="padding:2px 8px;font-size:11px">Copy</button>`;
     $("btnCopyEmail").onclick = () => navigator.clipboard.writeText(r.client_email).then(() => toast("Copied"));
   } else {
-    el.innerHTML = `<span style="color:var(--warn)">Not installed</span> — upload the service account's JSON key to read the sheet.`;
+    el.innerHTML = `<span style="color:var(--warn)">Not installed</span> - upload the service account's JSON key to read the sheet.`;
   }
 }
 $("googleKeyFile").onchange = async (e) => {
@@ -988,7 +1015,7 @@ $("btnTest").onclick = async () => {
   $("testResult").textContent = "Testing…";
   const r = await api("POST","/api/test");
   const how = {none:"no login needed", token:"logged in (token)", basic:"logged in (HTTP Basic)"}[r.auth_mode] || "";
-  if (r.ok){ $("testResult").innerHTML = `<span style="color:var(--accent2)">✓ Connected${how?` (${how})`:""} — ${r.channel_count} channel(s): ${esc(r.channels.join(", "))}</span>`;
+  if (r.ok){ $("testResult").innerHTML = `<span style="color:var(--accent2)">✓ Connected${how?` (${how})`:""} - ${r.channel_count} channel(s): ${esc(r.channels.join(", "))}</span>`;
     loadChannels(); }
   else $("testResult").innerHTML = `<span style="color:var(--err)">✗ ${r.error}</span>`;
 };
@@ -1006,20 +1033,20 @@ $("dry_run").onchange = async () => {
     cb.checked = true; return;
   }
   const r = await api("POST","/api/config", gather());
-  toast(cb.checked ? "Dry run ON — LSP will not be changed" : "Dry run OFF — syncs will create events in LSP", 4000);
+  toast(cb.checked ? "Dry run ON - LSP will not be changed" : "Dry run OFF - syncs will create events in LSP", 4000);
   if (!r.valid) console.warn("Config incomplete:", r.error);
   refreshStatus();
 };
 $("btnRun").onclick = async () => {
   const dry = lastStatus?.dry_run;
-  if (!confirm(dry ? "Run a sync now? Dry run is ON — nothing will be created in LSP."
-                   : "Run a sync now? Dry run is OFF — this WILL create and update events in LSP.")) return;
+  if (!confirm(dry ? "Run a sync now? Dry run is ON - nothing will be created in LSP."
+                   : "Run a sync now? Dry run is OFF - this WILL create and update events in LSP.")) return;
   await api("POST","/api/config", gather());
   $("btnRun").disabled = true; $("btnRun").textContent = "Running…";
   const r = await api("POST","/api/run");
   $("btnRun").disabled = false; $("btnRun").textContent = "Run now";
   if (r.ok){ const s=r.summary;
-    toast(s.dry_run ? `Dry run: would create ${s.created}, update ${s.updated}, remove ${s.deleted} — nothing sent to LSP`
+    toast(s.dry_run ? `Dry run: would create ${s.created}, update ${s.updated}, remove ${s.deleted} - nothing sent to LSP`
                     : `Created ${s.created}, updated ${s.updated}, removed ${s.deleted}${s.locked?`, ${s.locked} locked`:""}`, 4000); }
   else toast("Run failed: " + r.error, 5000);
   refreshStatus(); loadScheduled();

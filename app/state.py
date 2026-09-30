@@ -112,6 +112,20 @@ class State:
         if not rec.get("bookings"):
             self.events.pop(rid, None)
 
+    def forget_event(self, event_id: str) -> None:
+        """Drop every booking of this LSP event id (tool-made or not); a record
+        left with none is dropped too."""
+        for key, info in list(self.created.items()):
+            if isinstance(info, dict) and info.get("event_id") == event_id:
+                del self.created[key]
+        for rid, rec in list(self.events.items()):
+            bookings = rec.get("bookings", {})
+            for cid, b in list(bookings.items()):
+                if b.get("event_id") == event_id:
+                    del bookings[cid]
+            if not bookings:
+                del self.events[rid]
+
     def save(self) -> None:
         directory = os.path.dirname(self.path) or "."
         try:

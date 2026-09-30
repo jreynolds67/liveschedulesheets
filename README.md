@@ -56,42 +56,49 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   No row, or any labelled row), or click a row in the grid and choose what it is
   for. Rows detected by guesswork, rather than an exact label, are flagged
   **please confirm**.
-- Adjust **lead-in**, **safety-cap hours**, the active window, and the event
-  name prefix. Under **Safety cap by sport**, add a sport code (`MSOC`, `VB`,
-  `WSOC`, …) with its own cap; it applies to events whose name contains that
-  code as a whole word (ignoring case), and the first matching row wins. Other
-  events use the default cap. Changing a cap (or the lead-in) also updates
-  events already created in LSP that haven't started and aren't locked.
-  Preview shows each event's cap.
-- Toggle **Dry run** and the **sync interval**. Dry run is **on** until you
+- Adjust **lead-in**, **record length** (hours), the active window, and the
+  event name prefix. Under **Record length by sport**, add a sport code (`MSOC`,
+  `VB`, `WSOC`, …) with its own length; it applies to events whose name contains
+  that code as a whole word (ignoring case), and the first matching row wins.
+  Other events use the default length. Changing a length (or the lead-in) also
+  updates events already created in LSP that haven't started and aren't locked.
+  Preview shows each event's start and end. (In `config.yaml` these are still
+  `safety_cap_hours` / `sport_safety_caps`.)
+- Toggle **Dry run** and set the **sync interval**: how often the tool reads the
+  sheet and pushes changes to LSP (one sync does both). Dry run is **on** until you
   switch it off in the UI (the switch saves immediately and asks for
   confirmation before going live). While it's on, a *DRY RUN* badge shows in the
   header, and passes and **Run now** only report what they *would* create. The
   only things that change LSP while it's on are the explicit one-off actions:
-  Preview's **Send to LSP** and the cleanup button. It's stored as `runtime.live`
+  Preview's **SEND TO LSP** and the delete buttons. It's stored as `runtime.live`
   (default `false`); a `DRY_RUN` env var, if set, overrides the toggle.
 - **Preview events** — see exactly what the next sync would do, with no changes
   made: **create**, **update** (the sheet changed), **exists** (up to date),
   **locked** (changed by hand in LSP), **not in sheet** (tracked, but gone from
   the sheet), out of window, or no channel. Each row has an inline **PCR
   selector** and an **Ignore** checkbox for fixing individual events; locked
-  rows have an **Unlock** button.
+  rows have an **UNLOCK** button.
 - **Send one event to LSP** — rows that would be created or updated have a
-  **Send to LSP** button that applies just that event now, on all its channels,
+  **SEND TO LSP** button that applies just that event now, on all its channels,
   so you can test one at a time. It works **even with dry run on** (the
   scheduled sync stays dry), is recorded in `state.json` like any sync (so a
   later pass won't repeat it), and can be removed with the cleanup button.
   Also available as `POST /api/send-event` with
   `{source_tab, event_date, event_name, occurrence}` from a preview row.
-- Stage **Manual overrides** — per-event fixes (matched by tab + date + event
-  name): assign/correct the PCR, override the start time, or ignore an
-  event. They persist in the overrides list until removed.
+- **Event fixes** — the PCR you pick or the **Ignore** you tick on a Preview
+  row is saved as a per-event fix (matched by tab + date + event name) and
+  applied on top of the sheet on every sync. The *Event fixes* card lists them;
+  remove one to go back to what the sheet says. (Stored as `event_overrides`.)
 - **Run now**, and see the **last-run status** (the *Status* card at the top).
 - **See what's scheduled in LSP** — the *Scheduled in Live Schedule Pro* card
   lists, live from LSP, the upcoming and in-progress events on the mapped PCR
   channels (optionally the last 24 h / 7 days too). Events this tool created are
   tagged, with a filter to show only those, and it warns about tool-created
   events that have disappeared from LSP.
+- **Delete an event** — each row of that card has a **DELETE** button that
+  removes the event from LSP on all its channels (any event, with a
+  confirmation) and stops tracking it. If it's still in the sheet the next sync
+  creates it again, so tick **Ignore** on it in Preview to keep it out.
 - **Clean up test events** — the same card can **delete just the events this
   tool created** from LSP in one click. Events already in LSP (or created by
   hand), and locked events, are never touched.
@@ -138,11 +145,11 @@ A column becomes a recording once it has an **event name** and a **valid start**
 a date without one is skipped and flagged “Date has no year” in the sheet
 preview. Blank cells or `TBD`/`TBA` are skipped. If its
 PCR is blank the event still shows in Preview flagged **no PCR**, so
-an engineer can assign one via the inline selector or a manual override.
+an engineer can assign one via the inline selector (saved as an event fix).
 
 **PCRs are letters `A`–`E` only** (bare or as `PCR A`). A stray value that isn't a letter
 (e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
-or with a manual override.
+or with the PCR selector in Preview.
 
 **Which tabs are read:** all **visible** tabs by default (hidden tabs skipped).
 Leave `sheet.tabs` empty to auto-discover, or list specific tabs as an
@@ -317,6 +324,10 @@ entries in `state.json` and deleted via `DELETE /api/v1/RemoveEvent`. After a
 delete they are forgotten from state, so a later pass will re-create them. This
 lets you iterate during testing without wiping hand-made events in LSP. It works
 with dry run on too, to clean up events sent one at a time from Preview.
+
+A row's **DELETE** button calls `POST /api/delete-events` with
+`{event_ids: [...]}` (the event's id on each channel); it works on any event and
+also forgets it from `state.json`.
 
 The card's event list comes from `GET /api/scheduled?past_days=N`, which calls
 `GetEvents` for each mapped PCR channel and marks events whose id matches a

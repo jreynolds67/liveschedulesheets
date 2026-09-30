@@ -150,6 +150,11 @@ class SyncManager:
             syncer = self._lsp_syncer()
             return syncer.delete_created()
 
+    def delete_events(self, event_ids: list[str]) -> dict:
+        with self._lock:
+            syncer = self._lsp_syncer()
+            return syncer.delete_events(event_ids)
+
     # -- sheet inspection (web UI row mapping) -------------------------------
 
     def _sheet_reader(self, spreadsheet: Optional[str]) -> SheetReader:
