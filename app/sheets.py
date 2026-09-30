@@ -38,6 +38,9 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 # bare ("A") or prefixed ("PCR A").
 _ROOM_LETTERS = ["A", "B", "C", "D", "E"]
 
+# Retries (with backoff) on Google 5xx / rate-limit replies.
+_GOOGLE_RETRIES = 3
+
 
 class SheetReader:
     def __init__(self, cfg: Config):
@@ -105,7 +108,7 @@ class SheetReader:
                 spreadsheetId=self.cfg.sheet.spreadsheet_id,
                 fields="properties.title,sheets.properties(sheetId,title,hidden,index)",
             )
-            .execute()
+            .execute(num_retries=_GOOGLE_RETRIES)
         )
         sheets = sorted(
             (s.get("properties", {}) for s in resp.get("sheets", [])),
@@ -130,11 +133,11 @@ class SheetReader:
             .values()
             .get(
                 spreadsheetId=self.cfg.sheet.spreadsheet_id,
-                range=f"'{tab}'",
+                range=a1_tab(tab),
                 valueRenderOption="FORMATTED_VALUE",
                 dateTimeRenderOption="FORMATTED_STRING",
             )
-            .execute()
+            .execute(num_retries=_GOOGLE_RETRIES)
         )
         return resp.get("values", [])
 
@@ -233,6 +236,7 @@ _DATE_RE = re.compile(
     r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b",
     re.IGNORECASE,
 )
+_ROOM_JOINED_RE = re.compile(r"(?:PCR|CONTROLROOM|CR)?([A-E])")
 _ROOM_CELL_RE = re.compile(r"^(?:(?:PCR|CONTROL ROOM|CR)\s*)?[A-E]$")
 _CONTENT_CHECKS = {
     "date": lambda v: bool(_DATE_RE.search(v)),
@@ -549,6 +553,12 @@ def _apply_event_overrides(tab, events, cfg) -> list[ScheduledEvent]:
 
 # -- small helpers ----------------------------------------------------------
 
+def a1_tab(tab: str) -> str:
+    """A whole-tab A1 range: the name quoted, with any ' doubled, so tabs
+    like "Women's Basketball" parse."""
+    return "'" + tab.replace("'", "''") + "'"
+
+
 def _event_date_key(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
@@ -616,9 +626,10 @@ def _normalize_room(value: str) -> Optional[str]:
     for tok in v.replace("-", " ").split():
         if len(tok) == 1 and tok in _ROOM_LETTERS:
             return tok
-    # Last resort: a trailing A..E letter.
-    letters = [c for c in v if c in _ROOM_LETTERS]
-    return letters[-1] if letters else None
+    # Run together ("PCRA"). Nothing looser: picking any A..E letter out of
+    # the cell turned "CR3" into C and "HOME" into E.
+    m = _ROOM_JOINED_RE.fullmatch(re.sub(r"[\s-]", "", v))
+    return m.group(1) if m else None
 
 
 def _col_index_to_letter(idx: int) -> str:

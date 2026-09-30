@@ -43,14 +43,19 @@ class LspClient:
 
     def login(self) -> None:
         url = f"{self.cfg.base_url}/api/v1/auth/login"
-        resp = self.session.post(
-            url,
-            json={"Username": self.cfg.username, "Password": self.cfg.password},
-            timeout=self.timeout,
-        )
+        try:
+            resp = self.session.post(
+                url,
+                json={"Username": self.cfg.username, "Password": self.cfg.password},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise LspError(f"Login request failed: {exc}") from exc
         if resp.status_code != 200:
             raise LspError(f"Login failed ({resp.status_code}): {resp.text[:300]}")
-        data = resp.json()
+        data = _json(resp, "Login")
+        if not isinstance(data, dict):
+            raise LspError("Login response missing AccessToken")
         self._access_token = data.get("AccessToken")
         self._refresh_token = data.get("RefreshToken")
         if not self._access_token:
@@ -69,8 +74,11 @@ class LspClient:
             return False
         if resp.status_code != 200:
             return False
-        data = resp.json()
-        if data.get("AccessToken"):
+        try:
+            data = resp.json()
+        except ValueError:
+            return False
+        if isinstance(data, dict) and data.get("AccessToken"):
             self._access_token = data["AccessToken"]
             self._refresh_token = data.get("RefreshToken", self._refresh_token)
             log.debug("Refreshed access token")
@@ -86,7 +94,12 @@ class LspClient:
             headers["Authorization"] = f"Bearer {self._access_token}"
         elif self.auth_mode == "basic":
             auth = (self.cfg.username, self.cfg.password)
-        return self.session.request(method, url, headers=headers, auth=auth, **kwargs)
+        try:
+            return self.session.request(method, url, headers=headers, auth=auth, **kwargs)
+        except requests.RequestException as exc:
+            # Timeouts / connection errors are LSP failures like any other, so
+            # callers that handle LspError (and save state) handle these too.
+            raise LspError(f"{method} {url} failed: {exc}") from exc
 
     def _authenticate(self) -> None:
         """After a 401: get a token, or fall back to HTTP Basic. Caller holds _lock."""
@@ -132,7 +145,7 @@ class LspClient:
         resp = self._request("GET", "/api/v1/GetAllChannels")
         if resp.status_code != 200:
             raise LspError(f"GetAllChannels failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
+        return _json(resp, "GetAllChannels")
 
     # -- events -------------------------------------------------------------
 
@@ -145,7 +158,7 @@ class LspClient:
             raise LspError(
                 f"GetEvents failed for {channel_id} ({resp.status_code}): {resp.text[:300]}"
             )
-        return resp.json()
+        return _json(resp, "GetEvents")
 
     def get_event(self, event_id: str) -> Optional[dict]:
         """One event exactly as LSP returns it (GetFilteredEvents), or None."""
@@ -153,7 +166,7 @@ class LspClient:
         if resp.status_code != 200:
             raise LspError(f"GetFilteredEvents failed for {event_id} ({resp.status_code}): "
                            f"{resp.text[:300]}")
-        data = resp.json()
+        data = _json(resp, "GetFilteredEvents")
         items = data if isinstance(data, list) else [data]
         return next((e for e in items if isinstance(e, dict)
                      and str(e.get("Id") or "").lower() == event_id.lower()), None)
@@ -196,7 +209,7 @@ class LspClient:
             )
         try:
             kind = resp.json().get("ResultKind")
-        except ValueError:
+        except (ValueError, AttributeError):
             kind = None
         if kind and kind != "Success":
             raise LspError(f"PatchEvent for {name!r} returned {kind}: {resp.text[:400]}")
@@ -212,6 +225,13 @@ class LspClient:
             raise LspError(
                 f"RemoveEvent failed for {event_id} ({resp.status_code}): {resp.text[:300]}"
             )
+
+
+def _json(resp: requests.Response, what: str):
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise LspError(f"{what} returned a non-JSON reply: {resp.text[:300]}") from exc
 
 
 def _iso(dt: datetime) -> str:

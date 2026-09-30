@@ -296,6 +296,16 @@ docker run --rm -e RUN_ONCE=true -e DRY_RUN=true ... liveschedulesheets \
   python -m app.main
 ```
 
+### Unit tests
+
+The sheet parser, the sync logic (against an in-memory LSP) and the manager
+have a pytest suite in `tests/`; no Google key or LSP server is needed:
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
+
 ---
 
 ## How changes are tracked
@@ -413,6 +423,7 @@ app/
   sync.py        # plan() (read-only) + run_once() (creates / updates / locks)
   state.py       # tracked events, their LSP bookings and snapshots
   models.py      # ScheduledEvent
+tests/           # pytest suite (pure parsing + sync against a fake LSP)
 config.example.yaml   # seed / documented defaults
 Dockerfile
 docker-compose.yml

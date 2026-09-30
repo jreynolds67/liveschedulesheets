@@ -13,6 +13,7 @@ read to adopt those bookings into records, and to let cleanup delete them.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -127,12 +128,28 @@ class State:
                 del self.events[rid]
 
     def save(self) -> None:
-        directory = os.path.dirname(self.path) or "."
+        """Write the state atomically. Raises OSError (disk full, read-only
+        volume ...) so the failure reaches the UI's status instead of LSP
+        changes going unrecorded without a trace."""
         try:
-            os.makedirs(directory, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"created": self.created, "events": self.events}, fh, indent=2)
-            os.replace(tmp, self.path)
+            atomic_write(self.path, lambda fh: json.dump(
+                {"created": self.created, "events": self.events}, fh, indent=2))
         except OSError:
             log.exception("Could not write state file %s", self.path)
+            raise
+
+
+def atomic_write(path: str, write) -> None:
+    """Write a text file via a temp file + rename, so a crash never leaves it
+    half-written; the temp file is removed if writing fails."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            write(fh)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise

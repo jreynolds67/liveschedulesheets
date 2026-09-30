@@ -50,6 +50,7 @@ class SyncManager:
         self._lsp_hash: Optional[str] = None
         self._lsp_only: Optional[Syncer] = None
 
+        self._created_count = 0  # for status() while a sync holds the lock
         self.last_run: Optional[dict] = None
         self.last_error: Optional[str] = None
 
@@ -249,20 +250,34 @@ class SyncManager:
         cfg_ok, cfg_err = True, None
         interval = None
         dry_run = None
-        created_count = 0
-        try:
-            cfg, syncer = self._components()
-            interval = cfg.runtime.poll_interval_seconds
-            dry_run = cfg.runtime.dry_run
-            created_count = len(syncer.state.tool_created())
-        except ConfigError as exc:
-            cfg_ok, cfg_err = False, str(exc)
+        # Never wait on (or rebuild components under) a running sync: that
+        # would swap in a Syncer whose State predates the pass's writes.
+        if self._lock.acquire(blocking=False):
             try:
-                syncer = self._lsp_syncer()
-                created_count = len(syncer.state.tool_created())
-                dry_run = syncer.cfg.runtime.dry_run
-            except ConfigError:
-                pass
+                try:
+                    cfg, syncer = self._components()
+                    interval = cfg.runtime.poll_interval_seconds
+                except ConfigError as exc:
+                    cfg_ok, cfg_err = False, str(exc)
+                    try:
+                        syncer = self._lsp_syncer()
+                    except ConfigError:
+                        syncer = None
+                self._created_count = len(syncer.state.tool_created()) if syncer else 0
+            finally:
+                self._lock.release()
+        else:
+            # Busy: report the components that operation is using.
+            syncer = self._syncer or self._lsp_only
+            if self._syncer is not None:
+                interval = self._syncer.cfg.runtime.poll_interval_seconds
+            else:
+                cfg_ok, cfg_err = False, self.last_error or "Config incomplete"
+        if syncer is not None:
+            dry_run = syncer.cfg.runtime.dry_run
+        # The state is only read under the lock (a pass may be changing it);
+        # while busy, the count from the last status call stands.
+        created_count = self._created_count
         return {
             "config_ok": cfg_ok,
             "config_error": cfg_err,

@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
+from .state import atomic_write
+
 
 class ConfigError(Exception):
     """Raised when configuration is missing or invalid."""
@@ -183,14 +185,8 @@ def load_raw(path: str) -> dict:
 
 
 def save_raw(path: str, raw: dict) -> None:
-    import tempfile
-
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(raw, fh, sort_keys=False, default_flow_style=False)
-    os.replace(tmp, path)
+    atomic_write(path, lambda fh: yaml.safe_dump(raw, fh, sort_keys=False,
+                                                 default_flow_style=False))
 
 
 def load_config(path: str = "config.yaml") -> Config:

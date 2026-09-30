@@ -436,8 +436,10 @@ class Syncer:
             return summary
 
         summary["parsed"] = sum(i.status != NOT_IN_SHEET for i in items)
-        self._execute(items, summary, live=not self.cfg.runtime.dry_run)
-        self.state.save()
+        try:
+            self._execute(items, summary, live=not self.cfg.runtime.dry_run)
+        finally:
+            self.state.save()  # keep what was written even if the pass broke off
         log.info(
             "Pass complete: parsed=%(parsed)d created=%(created)d updated=%(updated)d "
             "removed=%(deleted)d existing=%(skipped_existing)d locked=%(locked)d "
@@ -465,8 +467,10 @@ class Syncer:
             raise LspError(f"Nothing to send: {item.message or item.status}")
         summary = _summary(False)
         summary["name"] = item.lsp_name
-        self._execute([item], summary, live=True, force=True)
-        self.state.save()
+        try:
+            self._execute([item], summary, live=True, force=True)
+        finally:
+            self.state.save()
         log.info("Sent %r to LSP from preview: created=%d updated=%d removed=%d errors=%d",
                  item.lsp_name, summary["created"], summary["updated"], summary["deleted"],
                  summary["errors"])
@@ -566,6 +570,11 @@ class Syncer:
                     rid = self._apply(item, t, rid, force, now, touched)
                 except LspError:
                     log.exception("Failed to %s %r on %s", t.status, item.lsp_name, t.channel_name)
+                    if t.status == CREATE:
+                        rid, made = self._recover_create(item, t, rid, force, now, touched)
+                        if made:
+                            summary["created"] += 1
+                            continue
                     summary["errors"] += 1
                     continue
                 summary[_COUNTER[t.status]] += 1
@@ -580,19 +589,7 @@ class Syncer:
         if t.status == CREATE:
             result = self.lsp.add_event(ev, t.channel_id, item.lsp_name, force=force)
             created = self._created_event(result, item, t)
-            event_id = created.get("Id") if created else None
-            rid = rid or self._new_record(item)
-            self.state.events[rid]["bookings"][t.channel_id] = {
-                "event_id": event_id, "channel_name": t.channel_name, "by_tool": True,
-                "created_at": now, "name": item.lsp_name,
-                "snapshot": _snapshot(created) if created else None,
-                "written": _written(item),
-            }
-            touched.append((rid, t.channel_id))
-            log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
-                     ev.pcr, ev.start.isoformat(), event_id)
-            if created:
-                self._fill_variable(item, t, event_id, created, rid, force)
+            rid = self._record_created(item, t, rid, created, force, now, touched)
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
@@ -611,6 +608,53 @@ class Syncer:
             log.info("Removed %r from %s (PCR now %s)", item.lsp_name, t.channel_name, ev.pcr)
         return rid
 
+    def _record_created(self, item: PlanItem, t: Target, rid, created: Optional[dict],
+                        force, now, touched) -> str:
+        """Record a booking for an event the tool just created (`created` is
+        it as LSP holds it, if found) and fill its variable; returns the
+        record id."""
+        event_id = created.get("Id") if created else None
+        rid = rid or self._new_record(item)
+        self.state.events[rid]["bookings"][t.channel_id] = {
+            "event_id": event_id, "channel_name": t.channel_name, "by_tool": True,
+            "created_at": now, "name": item.lsp_name,
+            "snapshot": _snapshot(created) if created else None,
+            "written": _written(item),
+        }
+        touched.append((rid, t.channel_id))
+        log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
+                 item.event.pcr, item.event.start.isoformat(), event_id)
+        if created:
+            self._fill_variable(item, t, event_id, created, rid, force)
+        return rid
+
+    def _recover_create(self, item: PlanItem, t: Target, rid, force, now,
+                        touched) -> tuple[Optional[str], bool]:
+        """After a failed AddEvent (e.g. a timeout), check whether LSP made
+        the event anyway. If it did, record it as the tool's, so a later pass
+        doesn't take it for a hand-made one. Returns (record id, found)."""
+        try:
+            found = self._find_new_event(item, t)
+        except LspError:
+            return rid, False
+        if found is None:
+            return rid, False
+        log.warning("AddEvent for %r on %s failed, but LSP created the event anyway; tracking it",
+                    item.lsp_name, t.channel_name)
+        return self._record_created(item, t, rid, found, force, now, touched), True
+
+    def _find_new_event(self, item: PlanItem, t: Target) -> Optional[dict]:
+        """The event on the channel with this name and start that wasn't
+        there when this pass read LSP."""
+        view = getattr(self, "_view", None)
+        known = {e.get("Id") for e in (view.by_channel.get(t.channel_id, []) if view else [])}
+        for e in self.lsp.get_events_for_channel(t.channel_id):
+            if (e.get("Id") not in known
+                    and (e.get("Name") or "").strip() == item.lsp_name.strip()
+                    and _same_instant(e.get("Start"), item.event.start)):
+                return e
+        return None
+
     def _created_event(self, result, item: PlanItem, t: Target) -> Optional[dict]:
         """The event AddEvent just made, as LSP now holds it: LSP copies the
         channel's workflow variables into it (e.g. Event Name = its default)
@@ -622,13 +666,9 @@ class Syncer:
                 return self.lsp.get_event(event_id) or (result if isinstance(result, dict) else None)
             log.warning("AddEvent's reply for %r on %s has no event id (%s); finding the new "
                         "event on the channel", item.lsp_name, t.channel_name, _describe(result))
-            view = getattr(self, "_view", None)
-            known = {e.get("Id") for e in (view.by_channel.get(t.channel_id, []) if view else [])}
-            for e in self.lsp.get_events_for_channel(t.channel_id):
-                if (e.get("Id") not in known
-                        and (e.get("Name") or "").strip() == item.lsp_name.strip()
-                        and _same_instant(e.get("Start"), item.event.start)):
-                    return e
+            found = self._find_new_event(item, t)
+            if found is not None:
+                return found
         except LspError as exc:
             log.warning("Could not read the new event %r on %s back from LSP: %s",
                         item.lsp_name, t.channel_name, exc)

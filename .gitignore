@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
 
 # Secrets & live config (only config.example.yaml is tracked)
 .env
