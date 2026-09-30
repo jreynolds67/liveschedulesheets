@@ -169,27 +169,25 @@ allow-list. Turn individual tabs off in the UI (**Include this tab** in the
 
 ## The Event Name variable
 
-Each event on a PCR channel has a text variable named **Event Name**
-(`lsp.event_name_variable`). Unless something fills it in, it keeps its
-default (e.g. `Event XX`). The tool fills it in two ways:
+Each PCR channel's workflow has a text variable named **Event Name**
+(`lsp.event_name_variable`). The channel stores it with no value and a default
+(e.g. `Event XX`). When an event is created, LSP copies the channel's
+variables into it, so a new event starts out holding that default. The tool
+replaces it with the event name in two ways:
 
-- **On each event (always).** After creating or updating an event, the tool
-  reads the event's variables. LSP adds the channel's workflow variables to
-  a new event a few seconds after creating it, so once a sync's (or a single
-  send's) events are created, the tool re-reads the new ones for up to about
-  15 seconds and sets each as its variables appear. One still without them
-  is set by the next sync (Preview shows it as **update**). These are its Vantage workflow variables
+- **On each event (always).** After creating an event, the tool reads it
+  back from LSP. It uses the id in LSP's `AddEvent` reply, or, if the reply
+  has none, finds the new event on its channel by name and start. It then
+  sets the variable in the event's Vantage workflow variables
   (`Customization.Conditions`, value in `ConditionValue.Text`; an empty value
-  means the variable's default), then any workflow or label parameters. If the one named `Event Name`
-  (ignoring case and spacing) doesn't hold the event name, the tool sets it
-  with `PATCH /api/v1/PatchEvent/{id}`, then reads the event back
-  (`GetFilteredEvents`). If LSP didn't keep the value, it sends the whole
-  event with `POST /api/v1/UpdateEvent` and checks again. The log says which
-  one worked, or what LSP still holds. Events the tool created earlier that
-  still hold the default show in Preview as **update** (`Will update Event
-  Name`) and are fixed on the next sync. Each booking is tried once per name
+  means the default), or in a workflow or label parameter of that name. It
+  sends one `PATCH /api/v1/PatchEvent/{id}`, then reads the event back
+  (`GetFilteredEvents`) to check LSP kept the value. An event updated from
+  the sheet gets the same. Events the tool created earlier that still hold
+  the default show in Preview as **update** (`Will update Event Name`) and
+  are fixed on the next sync. Each booking is tried once per name
   (`variable_sent` in `state.json`), so a value LSP won't keep isn't re-sent
-  every pass.
+  every pass; the log says `LSP didn't keep …` if that happens.
 - **Channel sync (where available).** If a channel's labels offer the
   parameter (`GET /api/v1/GetAvailableSyncEventNameLabelsParametersForChannel`),
   the channel's *sync event name with label parameter* option is pointed at it

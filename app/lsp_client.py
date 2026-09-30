@@ -188,7 +188,9 @@ class LspClient:
             raise LspError(f"GetFilteredEvents failed for {event_id} ({resp.status_code}): "
                            f"{resp.text[:300]}")
         data = resp.json()
-        return (data[0] if data else None) if isinstance(data, list) else data
+        items = data if isinstance(data, list) else [data]
+        return next((e for e in items if isinstance(e, dict)
+                     and str(e.get("Id") or "").lower() == event_id.lower()), None)
 
     def _check_writable(self, action: str, force: bool = False) -> None:
         # `force`: an explicit one-off operator action (Preview's per-event
@@ -210,7 +212,10 @@ class LspClient:
             raise LspError(
                 f"AddEvent failed for {name!r} ({resp.status_code}): {resp.text[:400]}"
             )
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            return resp.text
 
     def patch_event(self, event_id: str, name: str, start: datetime, end: datetime,
                     force: bool = False, extra: Optional[dict] = None) -> None:
@@ -229,36 +234,6 @@ class LspClient:
             kind = None
         if kind and kind != "Success":
             raise LspError(f"PatchEvent for {name!r} returned {kind}: {resp.text[:400]}")
-
-    def update_event(self, current: dict, name: str, start: datetime, end: datetime,
-                     customization: Optional[dict], force: bool = False) -> None:
-        """Replace an event that hasn't started (POST /api/v1/UpdateEvent),
-        keeping its other fields as LSP returned them in `current`."""
-        self._check_writable(f"update event {name!r}", force)
-        body = {
-            "EventId": current.get("Id"),
-            "ChannelId": current.get("ChannelId"),
-            "Name": name,
-            "Description": current.get("Description"),
-            "Color": current.get("Color"),
-            "SourceRouteIndex": current.get("SourceRouteIndex"),
-            "LockRouteOnRecording": bool(current.get("LockRouteOnRecording")),
-            "Start": _iso(start),
-            "End": _iso(end),
-            "Customization": customization if customization is not None else current.get("Customization"),
-            "Labels": current.get("Labels") or [],
-        }
-        resp = self._request("POST", "/api/v1/UpdateEvent", json=body)
-        if resp.status_code != 200:
-            raise LspError(
-                f"UpdateEvent failed for {name!r} ({resp.status_code}): {resp.text[:400]}"
-            )
-        try:
-            kind = resp.json().get("ResultKind")
-        except (ValueError, AttributeError):
-            kind = None
-        if kind and kind != "Success":
-            raise LspError(f"UpdateEvent for {name!r} returned {kind}: {resp.text[:400]}")
 
     def remove_event(self, event_id: str, force: bool = False) -> None:
         """Delete a single event by its LSP id (DELETE /api/v1/RemoveEvent)."""
