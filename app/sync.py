@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -511,6 +512,9 @@ class Syncer:
         the results in state and counting into `summary`. `force` lets the
         LSP client write even when it was built read-only."""
         touched: list[tuple[str, str]] = []  # (record id, channel id) to rebaseline
+        # Channels whose new events never showed the event-name variable this
+        # pass: don't wait for it again on each event created there.
+        self._no_variable_channels: set[str] = set()
         now = _now_iso()
         for item in items:
             if item.new_lock and item.record_id:
@@ -597,7 +601,8 @@ class Syncer:
             log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
                      ev.pcr, ev.start.isoformat(), event_id)
             if event_id:
-                self._fill_variable(item, t, event_id, result, rid, force)
+                self._fill_variable(item, t, event_id, self._created_event(result, t, event_id),
+                                    rid, force)
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
@@ -654,6 +659,28 @@ class Syncer:
         else:
             log.warning("LSP didn't keep %r = %r on %s: it still holds %r",
                         var, item.lsp_name, t.channel_name, now_holds)
+
+    def _created_event(self, result, t: Target, event_id: str):
+        """A just-created event with its workflow variables. AddEvent's reply
+        can come back before LSP has added them to the event, so when the
+        variable isn't in it, read the event back (once more after a second)."""
+        var = self.cfg.lsp.event_name_variable
+        if (not var or _variable(result, var) is not None
+                or t.channel_id in self._no_variable_channels):
+            return result
+        for delay in (0, 1):
+            time.sleep(delay)
+            try:
+                e = self.lsp.get_event(event_id)
+            except LspError as exc:
+                log.warning("Could not read new event %s back from LSP: %s", event_id, exc)
+                return result
+            if _variable(e, var) is not None:
+                return e
+        self._no_variable_channels.add(t.channel_id)
+        log.info("New events on %s don't show %r yet; a later sync sets it once they do",
+                 t.channel_name, var)
+        return result
 
     def _read_variable(self, event_id: str, variable: str) -> Optional[str]:
         """The event-name variable's value on an LSP event, read fresh."""
