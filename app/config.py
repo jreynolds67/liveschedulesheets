@@ -132,10 +132,8 @@ class LspConfig:
 @dataclass
 class RuntimeConfig:
     poll_interval_seconds: int
-    run_once: bool
     dry_run: bool
     state_file: str
-    log_level: str
 
 
 @dataclass
@@ -187,10 +185,6 @@ def load_raw(path: str) -> dict:
 def save_raw(path: str, raw: dict) -> None:
     atomic_write(path, lambda fh: yaml.safe_dump(raw, fh, sort_keys=False,
                                                  default_flow_style=False))
-
-
-def load_config(path: str = "config.yaml") -> Config:
-    return parse_config(load_raw(path))
 
 
 # --------------------------------------------------------------------------
@@ -339,13 +333,10 @@ def parse_lsp_settings(raw: dict) -> LspSettings:
     rt_raw = raw.get("runtime", {}) or {}
     runtime = RuntimeConfig(
         poll_interval_seconds=int(rt_raw.get("poll_interval_seconds", 900)),
-        run_once=_env_bool("RUN_ONCE", bool(rt_raw.get("run_once", False))),
         # Dry run unless the UI's toggle has explicitly gone live (runtime.live).
-        # The older runtime.dry_run key is ignored so existing configs start safe.
         # DRY_RUN env overrides (headless / docker run testing).
         dry_run=_env_bool("DRY_RUN", not bool(rt_raw.get("live", False))),
         state_file=str(rt_raw.get("state_file", "/data/state.json")),
-        log_level=os.environ.get("LOG_LEVEL", str(rt_raw.get("log_level", "INFO"))).upper(),
     )
 
     return LspSettings(pcr_channel_map=pcr_channel_map, lsp=lsp, runtime=runtime)

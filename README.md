@@ -361,10 +361,6 @@ Matching the values last sent covers LSP returning the old values on the
 re-read right after an update. If LSP gives an event a new id when it's updated,
 the tool finds it by those values on the same channel and follows the new id.
 
-State from older versions (one hashed key per booking) is adopted into
-records automatically on the first pass. A booking whose name or start had
-already been changed in LSP, or which was deleted, is adopted as locked.
-
 **Old records are pruned.** LSP deletes events some days after they end (its
 *Event cleanup threshold*, read each pass from `GET /api/v1/settings/general`
 → `EventCleanupThresholdInDays`). After each pass the tool forgets records
@@ -404,7 +400,7 @@ The UI covers everything; `config.example.yaml` documents every field inline
 `scheduling.safety_cap_hours`, `scheduling.horizon_days` / `past_grace_minutes`,
 `runtime.poll_interval_seconds`, `runtime.live`. Multi-tab settings:
 `sheet.tabs` (empty = auto-discover visible tabs), `tab_overrides`
-(enable/disable a tab, `default_control_room`, pinned `rows`), and `event_overrides` (per-event
+(enable/disable a tab, pinned `rows`), and `event_overrides` (per-event
 `control_room` / `start` / `ignore`, matched by tab + date + event name).
 
 ## Keeping docs current
@@ -439,5 +435,5 @@ tests/           # pytest suite (pure parsing + sync against a fake LSP)
 config.example.yaml   # seed / documented defaults
 Dockerfile
 docker-compose.yml
-swagger.json     # LSP API spec (reference)
+docs/lsp-swagger.json  # LSP API spec (reference)
 ```

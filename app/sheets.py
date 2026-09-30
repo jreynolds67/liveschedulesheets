@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date as date_cls
-from datetime import datetime, time as time_cls, timedelta
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional
 
@@ -410,10 +409,10 @@ def _parse_start(grid, row_of, col, cfg) -> Optional[datetime]:
     time_val = _first_time_token(time_val)
     if not time_val:
         return None
-    return _parse_datetime_string(f"{date_val} {time_val}", tz, cfg)
+    return _parse_datetime_string(f"{date_val} {time_val}", tz)
 
 
-def _parse_datetime_string(text: str, tz, cfg) -> Optional[datetime]:
+def _parse_datetime_string(text: str, tz) -> Optional[datetime]:
     try:
         dt, had_year = _parse_naive_with_year_flag(text)
     except (ValueError, OverflowError):

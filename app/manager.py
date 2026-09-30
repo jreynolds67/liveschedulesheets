@@ -145,11 +145,6 @@ class SyncManager:
         with self._lock:
             return self._lsp_syncer().lsp.get_event(event_id)
 
-    def created_events(self) -> list[dict]:
-        with self._lock:
-            syncer = self._lsp_syncer()
-            return syncer.created_events()
-
     def scheduled_events(self, past_days: int = 0) -> dict:
         with self._lock:
             syncer = self._lsp_syncer()
@@ -316,9 +311,6 @@ class SyncManager:
                     summary = syncer.run_once()
                 self.last_run = {"time": _now_iso(), "summary": summary, "trigger": "scheduled"}
                 self.last_error = None
-                if cfg.runtime.run_once:
-                    log.info("run_once set; stopping loop")
-                    break
             except ConfigError as exc:
                 self.last_error = str(exc)
                 log.warning("Config not ready: %s", exc)

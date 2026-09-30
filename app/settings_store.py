@@ -16,9 +16,6 @@ from .config import load_raw, save_raw
 
 log = logging.getLogger(__name__)
 
-# Keys under lsp that are secret and must never be sent to the browser as-is.
-_SECRET_LSP_KEYS = ("password",)
-
 # Google service-account key uploaded from the web UI, stored next to config.yaml.
 GOOGLE_KEY_FILENAME = "google-service-account.json"
 _MAX_KEY_BYTES = 64 * 1024

@@ -7,9 +7,6 @@ is on. A booking keeps a snapshot of the LSP event (Name/Start/End/ChannelId)
 exactly as LSP reported it after the tool last wrote it; if LSP later differs
 from that snapshot, someone changed it by hand and the record is *locked* so
 the tool never touches it again (until unlocked in the UI).
-
-`created` holds the pre-records format (one hash key per booking). It is only
-read to adopt those bookings into records, and to let cleanup delete them.
 """
 from __future__ import annotations
 
@@ -20,7 +17,7 @@ import os
 import tempfile
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +25,6 @@ log = logging.getLogger(__name__)
 class State:
     def __init__(self, path: str):
         self.path = path
-        self.created: dict[str, Any] = {}      # legacy booking cache
         self.events: dict[str, dict] = {}      # record id -> record
         self._load()
 
@@ -38,24 +34,14 @@ class State:
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            self.created = data.get("created", {})
             self.events = data.get("events", {})
-            log.info("Loaded state: %d tracked event(s), %d legacy booking(s)",
-                     len(self.events), len(self.created))
+            log.info("Loaded state: %d tracked event(s)", len(self.events))
+            if data.get("created"):
+                # The pre-2026-09-28 format; no longer read. Dropped on save.
+                log.info("Dropping %d booking(s) in the old state format", len(data["created"]))
         except (OSError, ValueError):
             log.exception("Could not read state file %s; starting fresh", self.path)
-            self.created, self.events = {}, {}
-
-    # -- legacy bookings ------------------------------------------------------
-
-    def has(self, key: str) -> bool:
-        return key in self.created
-
-    def mark(self, key: str, info: dict) -> None:
-        self.created[key] = info
-
-    def unmark(self, key: str) -> None:
-        self.created.pop(key, None)
+            self.events = {}
 
     # -- records --------------------------------------------------------------
 
@@ -81,17 +67,10 @@ class State:
         must never delete. `ref` is passed back to `forget`.
         """
         out = []
-        for key, info in self.created.items():
-            if not isinstance(info, dict):
-                continue
-            if info.get("existed") and not info.get("created_by_tool"):
-                continue
-            if info.get("event_id"):
-                out.append((("legacy", key), info))
         for rid, rec in self.events.items():
             for cid, b in rec.get("bookings", {}).items():
                 if b.get("by_tool") and b.get("event_id"):
-                    out.append((("record", rid, cid), {
+                    out.append(((rid, cid), {
                         "name": b.get("name") or rec.get("lsp_name"),
                         "pcr": rec.get("pcr"), "source_tab": rec.get("tab"),
                         "channel_id": cid, "channel_name": b.get("channel_name"),
@@ -113,10 +92,7 @@ class State:
     def forget(self, ref: tuple) -> None:
         """Drop one booking; a record left with none is dropped too, so the
         next pass schedules that sheet event afresh."""
-        if ref[0] == "legacy":
-            self.created.pop(ref[1], None)
-            return
-        _, rid, cid = ref
+        rid, cid = ref
         rec = self.events.get(rid)
         if rec is None:
             return
@@ -127,9 +103,6 @@ class State:
     def forget_event(self, event_id: str) -> None:
         """Drop every booking of this LSP event id (tool-made or not); a record
         left with none is dropped too."""
-        for key, info in list(self.created.items()):
-            if isinstance(info, dict) and info.get("event_id") == event_id:
-                del self.created[key]
         for rid, rec in list(self.events.items()):
             bookings = rec.get("bookings", {})
             for cid, b in list(bookings.items()):
@@ -143,8 +116,7 @@ class State:
         volume ...) so the failure reaches the UI's status instead of LSP
         changes going unrecorded without a trace."""
         try:
-            atomic_write(self.path, lambda fh: json.dump(
-                {"created": self.created, "events": self.events}, fh, indent=2))
+            atomic_write(self.path, lambda fh: json.dump({"events": self.events}, fh, indent=2))
         except OSError:
             log.exception("Could not write state file %s", self.path)
             raise

@@ -65,9 +65,8 @@ class Target:
     message: str = ""
     event_id: Optional[str] = None
     # For a new event: a booking to record without creating anything (a hand-
-    # made LSP event already there, or one adopted from the legacy state).
+    # made LSP event already there).
     adopt: Optional[dict] = None
-    legacy_key: Optional[str] = None
 
 
 @dataclass
@@ -233,15 +232,8 @@ class Syncer:
                             message="Start is outside the active window")
 
         key = (name.strip().lower(), _minute_key(ev.start))
-        targets, lock = [], ""
+        targets = []
         for cid, cname in chans:
-            legacy_key = ev.dedup_key(cid)
-            legacy = self.state.created.get(legacy_key)
-            if isinstance(legacy, dict):
-                t, why = self._adopt_legacy(legacy, legacy_key, cid, cname, name, ev, view)
-                targets.append(t)
-                lock = lock or why
-                continue
             if (cid, *key) in planned_keys:
                 targets.append(Target(cid, cname, EXISTS, "Same event earlier in the sheet"))
                 continue
@@ -257,9 +249,6 @@ class Syncer:
             planned_keys.add((cid, *key))
             targets.append(Target(cid, cname, CREATE, "Will be created"))
 
-        if lock:
-            return PlanItem(ev, name, LOCKED, targets, new_lock=lock,
-                            message=f"Locked: {lock}")
         if any(t.status == ERROR for t in targets):
             return PlanItem(ev, name, ERROR, targets, message="Could not read LSP; skipped this pass")
         to_create = sum(t.status == CREATE for t in targets)
@@ -268,34 +257,6 @@ class Syncer:
                    else f"Will be created on {to_create} of {len(targets)} channels")
             return PlanItem(ev, name, CREATE, targets, message=msg)
         return PlanItem(ev, name, EXISTS, targets, message=f"Already on all {len(targets)} channels")
-
-    def _adopt_legacy(self, legacy, legacy_key, cid, cname, name, ev, view) -> tuple[Target, str]:
-        """A booking from the old state format: track it as a record booking.
-        Returns the target and, if it was changed in LSP, a lock reason."""
-        if legacy.get("existed") and not legacy.get("created_by_tool"):
-            found = view.find(cid, name, ev.start)
-            return Target(cid, cname, EXISTS, "Already in LSP (made by hand; left alone)",
-                          adopt=_booking(found, cname, by_tool=False) if found
-                          else {"by_tool": False, "channel_name": cname},
-                          legacy_key=legacy_key), ""
-        eid = legacy.get("event_id")
-        hit = view.by_id.get(eid) if eid else None
-        if hit is None or hit[0] != cid:
-            b = {"event_id": eid, "channel_name": cname, "by_tool": True,
-                 "created_at": legacy.get("created_at"), "name": legacy.get("name")}
-            return Target(cid, cname, LOCKED, "Deleted or moved in LSP", event_id=eid,
-                          adopt=b, legacy_key=legacy_key), f"{cname}: deleted or moved in LSP"
-        e = hit[1]
-        b = _booking(e, cname, by_tool=True, created_at=legacy.get("created_at"))
-        # The legacy key embeds the sheet name and start, so any difference
-        # here was made in LSP. (End isn't compared: the cap may have changed.)
-        why = ""
-        if (e.get("Name") or "").strip() != name.strip():
-            why = f"{cname}: name changed in LSP"
-        elif not _same_instant(e.get("Start"), ev.start):
-            why = f"{cname}: start changed in LSP"
-        return Target(cid, cname, LOCKED if why else EXISTS, why or "Already created",
-                      event_id=eid, adopt=b, legacy_key=legacy_key), why
 
     def _plan_tracked(self, ev, rid, by_pcr, names, view: _LspView, now) -> PlanItem:
         """A sheet event the tool already scheduled: bring LSP in line with it."""
@@ -538,18 +499,8 @@ class Syncer:
             rid = item.record_id
             if rid and not (item.new_lock or item.locked):
                 self._refresh_baselines(rid)
-            if rid is None and item.new_lock:
-                # A legacy booking changed in LSP: track it, locked.
-                rid = self._new_record(item)
-                self.state.lock(rid, item.new_lock, now)
-                log.warning("Locked %r: %s", item.lsp_name, item.new_lock)
             if item.status == LOCKED:
                 summary["locked"] += 1
-                for t in item.targets:
-                    if t.adopt is not None and rid:
-                        self.state.events[rid]["bookings"][t.channel_id] = t.adopt
-                    if t.legacy_key:
-                        self.state.unmark(t.legacy_key)
                 continue
 
             for t in item.targets:
@@ -558,10 +509,6 @@ class Syncer:
                     if t.adopt is not None:
                         rid = rid or self._new_record(item)
                         self.state.events[rid]["bookings"][t.channel_id] = t.adopt
-                        if t.adopt.get("by_tool") and not t.adopt.get("snapshot"):
-                            touched.append((rid, t.channel_id))
-                    if t.legacy_key:
-                        self.state.unmark(t.legacy_key)
                     continue
                 if t.status not in (CREATE, UPDATE, DELETE):
                     continue
@@ -821,21 +768,6 @@ class Syncer:
         return {"variable": variable, "channels": out}
 
     # -- cleanup (testing) --------------------------------------------------
-
-    def created_events(self) -> list[dict]:
-        """The events this tool created (from local state), for display."""
-        out = []
-        for _ref, info in self.state.tool_created():
-            out.append({
-                "name": info.get("name"),
-                "pcr": info.get("pcr"),
-                "source_tab": info.get("source_tab"),
-                "channel_id": info.get("channel_id"),
-                "event_id": info.get("event_id"),
-                "created_at": info.get("created_at"),
-            })
-        out.sort(key=lambda e: e.get("created_at") or "")
-        return out
 
     def scheduled_events(self, past_days: int = 0) -> dict:
         """Live view of events in LSP on the mapped PCR channels.
@@ -1114,9 +1046,9 @@ def _locate(b: dict, cid: str, view: _LspView) -> Optional[tuple[str, dict]]:
     return None
 
 
-def _booking(e: dict, channel_name: str, by_tool: bool, created_at=None) -> dict:
+def _booking(e: dict, channel_name: str, by_tool: bool) -> dict:
     return {"event_id": e.get("Id"), "channel_name": channel_name, "by_tool": by_tool,
-            "created_at": created_at, "name": e.get("Name"), "snapshot": _snapshot(e)}
+            "created_at": None, "name": e.get("Name"), "snapshot": _snapshot(e)}
 
 
 def _same_instant(value, dt: datetime) -> bool:

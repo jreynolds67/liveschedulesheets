@@ -445,10 +445,8 @@ function gather(){
   cfg.runtime = cfg.runtime || {};
   cfg.runtime.poll_interval_seconds = +$("poll_interval").value;
   cfg.runtime.live = !$("dry_run").checked;
-  delete cfg.runtime.dry_run;
 
   cfg.date_parsing = cfg.date_parsing || {};
-  delete cfg.date_parsing.academic_year_start; delete cfg.date_parsing.rollover_month;
   cfg.date_parsing.skip_values = fromCsv($("dp_skip").value);
 
   const map = {};
@@ -517,7 +515,6 @@ function gatherTabs(){
   for (const [name, ov] of Object.entries(cfg.tab_overrides || {})){
     if (known && !known.has(name)) continue;
     const o = {...ov};
-    delete o.default_control_room;
     if (o.enabled !== false) delete o.enabled;
     if (!o.rows || !Object.keys(o.rows).length) delete o.rows;
     if (Object.keys(o).length) out[name] = o;

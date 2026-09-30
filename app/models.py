@@ -1,7 +1,6 @@
 """Shared data structures."""
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -22,14 +21,6 @@ class ScheduledEvent:
     def override_key(self) -> tuple[str, str, int]:
         """Stable identity for UI overrides: (date, name, occurrence)."""
         return (self.event_date, self.name.strip().lower(), self.occurrence)
-
-    def dedup_key(self, channel_id: str = "") -> str:
-        """Per-channel key of the pre-records state format; only used to adopt
-        those bookings (see State)."""
-        raw = f"{self.pcr}|{self.name.strip().lower()}|{self.start.astimezone().isoformat()}"
-        if channel_id:
-            raw += f"|{channel_id}"
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     def lsp_name(self, prefix: str = "") -> str:
         return f"{prefix}{self.name}".strip()

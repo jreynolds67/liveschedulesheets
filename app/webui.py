@@ -197,14 +197,6 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
-    @app.get("/api/created")
-    @require_auth
-    def created():
-        try:
-            return jsonify({"ok": True, "events": manager.created_events()})
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"ok": False, "error": str(exc)})
-
     @app.get("/api/scheduled")
     @require_auth
     def scheduled():

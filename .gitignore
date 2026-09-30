@@ -17,6 +17,10 @@ credentials*.json
 /data/
 state.json
 
+# Logs (LSP / Telestream exports, debug captures)
+*.log
+*-log-*.txt
+
 # macOS
 .DS_Store
 
