@@ -865,6 +865,16 @@ async function refreshStatus(){
 }
 
 let lastPreview = [];
+let previewShown = false;
+// Re-plan against the saved settings (no save): after anything that changes
+// LSP or tracking, so a preview on screen never shows an outdated plan.
+async function loadPreview(){
+  $("previewBox").textContent = "Loading preview…";
+  const r = await api("GET","/api/preview");
+  if (r.ok){ renderPreview(r.items); previewShown = true; }
+  else $("previewBox").innerHTML = `<span style="color:var(--err)">${esc(r.error)}</span>`;
+}
+function refreshPreviewIfShown(){ if (previewShown) loadPreview(); }
 function renderPreview(items){
   lastPreview = items || [];
   if (!items.length){ $("previewBox").innerHTML = "No schedulable events found."; return; }
@@ -887,11 +897,12 @@ function renderPreview(items){
       <td></td>`;
     // Gone from the sheet: nothing to override here.
     if (i.status === "not_in_sheet"){ tr.children[3].textContent = i.pcr ? `PCR ${i.pcr}` : ""; tb.appendChild(tr); return; }
-    // Room selector
+    // Room selector: a PCR picked but not saved yet stays shown on a refresh.
+    const room = findOv(i)?.control_room || i.pcr;
     const sel = document.createElement("select");
     sel.className = "roomsel";
     sel.innerHTML = `<option value="">None</option>` +
-      ROOMS.map(l=>`<option value="${l}" ${i.pcr===l?"selected":""}>PCR ${l}</option>`).join("");
+      ROOMS.map(l=>`<option value="${l}" ${room===l?"selected":""}>PCR ${l}</option>`).join("");
     sel.onchange = () => { upsertOv(i, {control_room: sel.value || null}); toast("PCR staged - Save to apply"); };
     tr.children[3].appendChild(sel);
     // Ignore toggle
@@ -1019,7 +1030,7 @@ async function deleteScheduled(g, btn){
     toast(`Deleted "${g.name}" from ${s.deleted} channel(s)${s.failed?`, ${s.failed} failed`:""}`, 4000);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);
-  loadScheduled(); refreshStatus();
+  loadScheduled(); refreshStatus(); refreshPreviewIfShown();
 }
 
 async function loadGoogleKey(){
@@ -1089,7 +1100,7 @@ $("btnDeleteCreated").onclick = async () => {
     toast(`Deleted ${s.deleted}${s.failed?`, ${s.failed} failed`:""}${kept.length?`; left alone: ${kept.join(", ")}`:""}`, 4000);
     if (s.errors && s.errors.length) console.warn("Delete errors:", s.errors);
   } else toast("Delete failed: " + r.error, 5000);
-  loadScheduled(); refreshStatus();
+  loadScheduled(); refreshStatus(); refreshPreviewIfShown();
 };
 $("btnSave").onclick = async () => {
   const r = await saveConfig();
@@ -1110,10 +1121,7 @@ $("btnTest").onclick = async () => {
 };
 $("btnPreview").onclick = async () => {
   if (!await saveConfig()) return;
-  $("previewBox").textContent = "Loading preview…";
-  const r = await api("GET","/api/preview");
-  if (r.ok) renderPreview(r.items);
-  else $("previewBox").innerHTML = `<span style="color:var(--err)">${esc(r.error)}</span>`;
+  loadPreview();
 };
 // Dry run is a safety switch: it saves as soon as it's flipped.
 $("dry_run").onchange = async () => {
@@ -1138,7 +1146,7 @@ $("btnRun").onclick = async () => {
     toast(s.dry_run ? `Dry run: would create ${s.created}, update ${s.updated}, remove ${s.deleted} - nothing sent to LSP`
                     : `Created ${s.created}, updated ${s.updated}, removed ${s.deleted}${s.locked?`, ${s.locked} locked`:""}`, 4000); }
   else toast("Run failed: " + r.error, 5000);
-  refreshStatus(); loadScheduled();
+  refreshStatus(); loadScheduled(); refreshPreviewIfShown();
 };
 
 (async function init(){
