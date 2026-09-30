@@ -260,20 +260,25 @@ class SyncManager:
                         syncer = self._lsp_syncer()
                     except ConfigError:
                         syncer = None
+                if syncer is not None:
+                    dry_run = syncer.cfg.runtime.dry_run
                 self._created_count = len(syncer.state.tool_created()) if syncer else 0
             finally:
                 self._lock.release()
         else:
-            # Busy: report the components that operation is using.
-            syncer = self._syncer or self._lsp_only
-            if self._syncer is not None:
-                interval = self._syncer.cfg.runtime.poll_interval_seconds
-            else:
-                cfg_ok, cfg_err = False, self.last_error or "Config incomplete"
-        if syncer is not None:
-            dry_run = syncer.cfg.runtime.dry_run
-        # The state is only read under the lock (a pass may be changing it);
-        # while busy, the count from the last status call stands.
+            # Busy: judge the saved config without building anything. The
+            # state isn't read (a pass may be changing it); the count from the
+            # last status call stands.
+            raw = self.store.load()
+            try:
+                cfg = parse_config(raw)
+                interval, dry_run = cfg.runtime.poll_interval_seconds, cfg.runtime.dry_run
+            except ConfigError as exc:
+                cfg_ok, cfg_err = False, str(exc)
+                try:
+                    dry_run = parse_lsp_settings(raw).runtime.dry_run
+                except ConfigError:
+                    pass
         created_count = self._created_count
         return {
             "config_ok": cfg_ok,

@@ -40,3 +40,14 @@ def test_status_reports_incomplete_config(tmp_path, key_file, monkeypatch):
     m.store.save(raw)
     s = m.status()
     assert not s["config_ok"] and "labels.date" in s["config_error"]
+
+
+def test_busy_status_still_reports_config_problems(tmp_path, key_file, monkeypatch):
+    m = manager(tmp_path, key_file, monkeypatch)
+    raw = m.store.load()
+    raw["sheet"]["labels"]["date"] = []
+    m.store.save(raw)
+    with m._lock:
+        s = m.status()
+    assert not s["config_ok"] and "labels.date" in s["config_error"]
+    assert s["dry_run"] is False  # from the LSP half, which is still valid
