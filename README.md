@@ -312,6 +312,23 @@ python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
 
+### Updating dependencies
+
+`requirements.in` lists the direct dependencies; `requirements.txt` pins them
+*and everything they pull in*, so every Portainer rebuild installs exactly
+the same packages. To upgrade, edit the versions in `requirements.in`, then
+regenerate `requirements.txt` for the image's platform (Linux, Python 3.12):
+
+```bash
+pip install --dry-run --ignore-installed --report report.json \
+  --python-version 3.12 --platform manylinux_2_17_x86_64 --only-binary=:all: \
+  -r requirements.in
+python -c "import json; [print(f\"{i['metadata']['name']}=={i['metadata']['version']}\") for i in sorted(json.load(open('report.json'))['install'], key=lambda i: i['metadata']['name'].lower())]"
+```
+
+Paste that list under the header comment in `requirements.txt`, and run the
+tests.
+
 ---
 
 ## How changes are tracked
@@ -435,6 +452,7 @@ app/
   state.py       # tracked events, their LSP bookings and snapshots
   models.py      # ScheduledEvent
 tests/           # pytest suite (pure parsing + sync against a fake LSP)
+requirements.in  # direct dependencies; requirements.txt is the full pinned set
 config.example.yaml   # seed / documented defaults
 Dockerfile
 docker-compose.yml
