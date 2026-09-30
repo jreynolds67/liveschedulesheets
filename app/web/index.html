@@ -371,7 +371,7 @@ function renderPcr(map){
 function addPcrRow(letter="", ref={}){
   const div = document.createElement("div"); div.className="pcr-row";
   div.innerHTML = `
-    <div><label>PCR</label><input type="text" class="pcr-letter" value="${letter}" maxlength="3" /></div>
+    <div><label>PCR</label><input type="text" class="pcr-letter" value="${esc(letter)}" maxlength="3" /></div>
     <div><label>Match channels containing</label><input type="text" class="pcr-name" value="${esc(ref.channel_match||ref.channel_name||(letter?`PCR ${letter}`:""))}" /></div>
     <button class="rm" title="Remove">✕</button>
     <div class="pcr-hits hint"></div>`;
@@ -790,12 +790,12 @@ function renderOverrides(){
   box.className = "";
   box.innerHTML = entries.map((o,i) => `
     <div class="ov-row" data-i="${i}">
-      <div><div class="k">${o.tab}</div>${o.event}</div>
-      <div class="mono">${o.date}${o.occurrence?` #${o.occurrence}`:""}</div>
-      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`PCR ${o.control_room}`:"-")}</div>
-      <div class="mono hint">${o.start?o.start.replace("T"," "):""}</div>
+      <div><div class="k">${esc(o.tab)}</div>${esc(o.event)}</div>
+      <div class="mono">${esc(o.date)}${o.occurrence?` #${esc(o.occurrence)}`:""}</div>
+      <div>${o.ignore ? `<span class="pill ignore">ignored</span>` : (o.control_room?`PCR ${esc(o.control_room)}`:"-")}</div>
+      <div class="mono hint">${o.start?esc(String(o.start).replace("T"," ")):""}</div>
       <div class="hint">${o.ignore?"drop":(o.control_room?"PCR":"")}${o.start?" · start":""}</div>
-      <button class="rm mini ghost" data-tab="${o.tab}" data-date="${o.date}" data-ev="${encodeURIComponent(o.event)}" data-occ="${o.occurrence||0}">REMOVE</button>
+      <button class="rm mini ghost" data-tab="${esc(o.tab)}" data-date="${esc(o.date)}" data-ev="${encodeURIComponent(o.event)}" data-occ="${esc(o.occurrence||0)}">REMOVE</button>
     </div>`).join("");
   box.querySelectorAll(".rm").forEach(b => b.onclick = () =>
     removeOv(b.dataset.tab, b.dataset.date, decodeURIComponent(b.dataset.ev), +b.dataset.occ));
@@ -816,14 +816,14 @@ async function refreshStatus(){
     $("dryHint").textContent = `Forced ${s.dry_run?"ON":"OFF"} by the DRY_RUN environment variable - remove it to use this toggle`;
   }
   let html = "";
-  if (s.config_error) html += `<div style="color:var(--err)">⚠ ${s.config_error}</div>`;
+  if (s.config_error) html += `<div style="color:var(--err)">⚠ ${esc(s.config_error)}</div>`;
   html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"} · tool-created events tracked: <b>${s.created_count??0}</b></div>`;
   if (s.last_run){ const su=s.last_run.summary;
     html += `<div>Last ${s.last_run.trigger} run ${new Date(s.last_run.time).toLocaleString()}: `
       + `${su.dry_run?"would create":"created"} <b>${su.created}</b>, ${su.dry_run?"would update":"updated"} <b>${su.updated||0}</b>, `
       + `${su.dry_run?"would remove":"removed"} ${su.deleted||0}, up to date ${su.skipped_existing}, locked ${su.locked||0}, `
       + `not in sheet ${su.not_in_sheet||0}, out-of-window ${su.skipped_window}, no-channel ${su.no_channel||0}, errors ${su.errors}</div>`; }
-  if (s.last_error) html += `<div style="color:var(--err)">Last error: ${s.last_error}</div>`;
+  if (s.last_error) html += `<div style="color:var(--err)">Last error: ${esc(s.last_error)}</div>`;
   $("statusBox").innerHTML = html;
 }
 
@@ -1068,14 +1068,14 @@ $("btnTest").onclick = async () => {
   const how = {none:"no login needed", token:"logged in (token)", basic:"logged in (HTTP Basic)"}[r.auth_mode] || "";
   if (r.ok){ $("testResult").innerHTML = `<span style="color:var(--accent2)">✓ Connected${how?` (${how})`:""} - ${r.channel_count} channel(s): ${esc(r.channels.join(", "))}</span>`;
     loadChannels(); }
-  else $("testResult").innerHTML = `<span style="color:var(--err)">✗ ${r.error}</span>`;
+  else $("testResult").innerHTML = `<span style="color:var(--err)">✗ ${esc(r.error)}</span>`;
 };
 $("btnPreview").onclick = async () => {
   await api("POST","/api/config", gather());
   $("previewBox").textContent = "Loading preview…";
   const r = await api("GET","/api/preview");
   if (r.ok) renderPreview(r.items);
-  else $("previewBox").innerHTML = `<span style="color:var(--err)">${r.error}</span>`;
+  else $("previewBox").innerHTML = `<span style="color:var(--err)">${esc(r.error)}</span>`;
 };
 // Dry run is a safety switch: it saves as soon as it's flipped.
 $("dry_run").onchange = async () => {

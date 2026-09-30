@@ -116,7 +116,10 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
 picks up changes automatically. (Optional: protect the UI with HTTP Basic auth
-by setting `UI_USER` / `UI_PASSWORD`.)
+by setting `UI_USER` / `UI_PASSWORD`.) Changes (POSTs) coming from another
+site's web page are refused, so a page elsewhere on the LAN can't drive the
+API through someone's browser; scripts and tools such as curl or Companion,
+which send no `Origin` header, can still call it.
 
 ---
 

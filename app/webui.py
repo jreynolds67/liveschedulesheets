@@ -6,8 +6,10 @@ Runs the background sync loop in-process. Serve with waitress:
 from __future__ import annotations
 
 import functools
+import hmac
 import logging
 import os
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
@@ -30,7 +32,20 @@ def _check_auth() -> bool:
     if not user and not pw:
         return True  # auth disabled
     auth = request.authorization
-    return bool(auth and auth.username == user and auth.password == pw)
+    return bool(auth
+                and hmac.compare_digest((auth.username or "").encode(), (user or "").encode())
+                and hmac.compare_digest((auth.password or "").encode(), (pw or "").encode()))
+
+
+def _cross_site() -> bool:
+    """Whether a request came from another site's page (CSRF). Browsers send
+    Origin on every cross-origin POST (and Sec-Fetch-Site), so a page
+    elsewhere on the LAN can't drive the API; clients that send neither
+    (curl, Companion, scripts) are unaffected."""
+    if request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+        return True
+    origin = request.headers.get("Origin")
+    return origin is not None and urlsplit(origin).netloc.lower() != request.host.lower()
 
 
 def require_auth(fn):
@@ -48,6 +63,14 @@ def require_auth(fn):
 def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # bounds uploads (Google key)
+
+    @app.before_request
+    def refuse_cross_site_writes():
+        if request.method not in ("GET", "HEAD", "OPTIONS") and _cross_site():
+            log.warning("Refused cross-site %s %s (Origin %s)", request.method, request.path,
+                        request.headers.get("Origin"))
+            return Response("Cross-site request refused", 403)
+        return None
 
     @app.get("/")
     @require_auth
