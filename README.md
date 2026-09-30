@@ -174,9 +174,11 @@ Each event on a PCR channel has a text variable named **Event Name**
 default (e.g. `Event XX`). The tool fills it in two ways:
 
 - **On each event (always).** After creating or updating an event, the tool
-  reads the event's variables. LSP's reply to AddEvent can come back before
-  the workflow variables are added to the event, so for a new event the tool
-  reads it back from LSP, once more after a second if needed. These are its Vantage workflow variables
+  reads the event's variables. LSP adds the channel's workflow variables to
+  a new event a few seconds after creating it, so once a sync's (or a single
+  send's) events are created, the tool re-reads the new ones for up to about
+  15 seconds and sets each as its variables appear. One still without them
+  is set by the next sync (Preview shows it as **update**). These are its Vantage workflow variables
   (`Customization.Conditions`, value in `ConditionValue.Text`; an empty value
   means the variable's default), then any workflow or label parameters. If the one named `Event Name`
   (ignoring case and spacing) doesn't hold the event name, the tool sets it

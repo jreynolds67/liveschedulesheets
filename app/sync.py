@@ -512,9 +512,9 @@ class Syncer:
         the results in state and counting into `summary`. `force` lets the
         LSP client write even when it was built read-only."""
         touched: list[tuple[str, str]] = []  # (record id, channel id) to rebaseline
-        # Channels whose new events never showed the event-name variable this
-        # pass: don't wait for it again on each event created there.
-        self._no_variable_channels: set[str] = set()
+        # New events whose event-name variable LSP hadn't added yet:
+        # (item, target, event id, record id), filled in after the loop.
+        self._pending_variables: list[tuple] = []
         now = _now_iso()
         for item in items:
             if item.new_lock and item.record_id:
@@ -582,6 +582,7 @@ class Syncer:
 
             if live and rid:
                 self.state.events[rid].update(_record_fields(item))
+        self._fill_pending_variables(force)
         self._rebaseline(touched)
 
     def _apply(self, item: PlanItem, t: Target, rid, force, now, touched) -> Optional[str]:
@@ -601,8 +602,7 @@ class Syncer:
             log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
                      ev.pcr, ev.start.isoformat(), event_id)
             if event_id:
-                self._fill_variable(item, t, event_id, self._created_event(result, t, event_id),
-                                    rid, force)
+                self._fill_created(item, t, event_id, result, rid, force)
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
@@ -660,27 +660,53 @@ class Syncer:
             log.warning("LSP didn't keep %r = %r on %s: it still holds %r",
                         var, item.lsp_name, t.channel_name, now_holds)
 
-    def _created_event(self, result, t: Target, event_id: str):
-        """A just-created event with its workflow variables. AddEvent's reply
-        can come back before LSP has added them to the event, so when the
-        variable isn't in it, read the event back (once more after a second)."""
+    def _fill_created(self, item: PlanItem, t: Target, event_id: str, result,
+                      rid: str, force: bool) -> None:
+        """Set a just-created event's event-name variable. LSP adds the
+        channel's workflow variables to a new event a few seconds after
+        AddEvent returns, so when neither the reply nor a fresh read has the
+        variable yet, the event waits for _fill_pending_variables."""
         var = self.cfg.lsp.event_name_variable
-        if (not var or _variable(result, var) is not None
-                or t.channel_id in self._no_variable_channels):
-            return result
-        for delay in (0, 1):
-            time.sleep(delay)
+        if not var:
+            return
+        current = result
+        if _variable(current, var) is None:
             try:
-                e = self.lsp.get_event(event_id)
+                current = self.lsp.get_event(event_id)
             except LspError as exc:
                 log.warning("Could not read new event %s back from LSP: %s", event_id, exc)
-                return result
-            if _variable(e, var) is not None:
-                return e
-        self._no_variable_channels.add(t.channel_id)
-        log.info("New events on %s don't show %r yet; a later sync sets it once they do",
-                 t.channel_name, var)
-        return result
+                current = None
+        if _variable(current, var) is None:
+            self._pending_variables.append((item, t, event_id, rid))
+            return
+        self._fill_variable(item, t, event_id, current, rid, force)
+
+    def _fill_pending_variables(self, force: bool) -> None:
+        """After the creates: wait (about 15 s at most, once per pass) for LSP
+        to add the workflow variables to the new events, setting each one's
+        event-name variable as it appears. Any still without it are set by a
+        later sync, which plans them as an update."""
+        pending = getattr(self, "_pending_variables", [])
+        var = self.cfg.lsp.event_name_variable
+        for delay in _VARIABLE_WAITS:
+            if not pending:
+                return
+            time.sleep(delay)
+            waiting = []
+            for item, t, event_id, rid in pending:
+                try:
+                    e = self.lsp.get_event(event_id)
+                except LspError as exc:
+                    log.warning("Could not read new event %s back from LSP: %s", event_id, exc)
+                    e = None
+                if _variable(e, var) is None:
+                    waiting.append((item, t, event_id, rid))
+                else:
+                    self._fill_variable(item, t, event_id, e, rid, force)
+            pending[:] = waiting
+        for item, t, _eid, _rid in pending:
+            log.info("%r on %s: LSP hasn't added %r to the new event yet; a later sync sets it",
+                     item.lsp_name, t.channel_name, var)
 
     def _read_variable(self, event_id: str, variable: str) -> Optional[str]:
         """The event-name variable's value on an LSP event, read fresh."""
@@ -986,6 +1012,10 @@ class Syncer:
 
 
 _COUNTER = {CREATE: "created", UPDATE: "updated", DELETE: "deleted"}
+
+# Seconds between re-reads of new events waiting for LSP to add their
+# workflow variables (about 15 s in all, once per pass or send).
+_VARIABLE_WAITS = (2, 3, 5, 5)
 
 
 def _summary(dry_run: bool) -> dict:
