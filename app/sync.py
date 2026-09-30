@@ -10,8 +10,10 @@ one *booking* per LSP channel. A pass keeps LSP in step with the sheet:
 - a tracked event that someone changed in LSP by hand (edited, deleted, or
   moved to another channel) is *locked*: the tool never changes it again until
   an engineer unlocks it in the UI;
-- each PCR channel is set to copy the event name into its event-name
-  variable (the label parameter named `lsp.event_name_variable`).
+- events the tool creates or updates get their event-name variable (the
+  workflow variable or label parameter named `lsp.event_name_variable`) set
+  to the event name; a channel whose labels offer that parameter is also set
+  to copy the name into it by itself.
 
 `plan()` is read-only and classifies every event; `run_once()` executes the
 plan. The web UI uses `plan()` for its preview so what you see is exactly what
@@ -19,6 +21,7 @@ a real pass would do.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -347,6 +350,10 @@ class Syncer:
                     diffs.append("start")
                 if not _same_instant(cur.get("End"), ev.end):
                     diffs.append("end")
+                var = self.cfg.lsp.event_name_variable
+                if (hit and var and b.get("variable_set") != name
+                        and _with_variable(hit[1], var, name) is not None):
+                    diffs.append(var)
                 targets.append(Target(cid, cn, UPDATE if diffs else EXISTS,
                                       f"Will update {', '.join(diffs)}" if diffs else "Up to date",
                                       event_id=hit[1].get("Id") if hit else b.get("event_id")))
@@ -589,6 +596,8 @@ class Syncer:
             touched.append((rid, t.channel_id))
             log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
                      ev.pcr, ev.start.isoformat(), event_id)
+            if event_id:
+                self._fill_variable(item, t, event_id, result, rid, force)
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
@@ -597,11 +606,35 @@ class Syncer:
             touched.append((rid, t.channel_id))
             log.info("Updated %r on %s (%s) @ %s", item.lsp_name, t.channel_name,
                      t.message, ev.start.isoformat())
+            view = getattr(self, "_view", None)
+            hit = view.by_id.get(t.event_id) if view else None
+            if hit:
+                self._fill_variable(item, t, t.event_id, hit[1], rid, force)
         elif t.status == DELETE:
             self.lsp.remove_event(t.event_id, force=force)
             self.state.events[rid]["bookings"].pop(t.channel_id, None)
             log.info("Removed %r from %s (PCR now %s)", item.lsp_name, t.channel_name, ev.pcr)
         return rid
+
+    def _fill_variable(self, item: PlanItem, t: Target, event_id: str, current,
+                       rid: str, force: bool) -> None:
+        """Set the event's event-name variable to its name, if the event has
+        that variable and it holds something else (e.g. its default). Tried
+        once per name, so a value LSP won't keep isn't re-sent every pass;
+        a failure is logged and never undoes the create / update."""
+        var = self.cfg.lsp.event_name_variable
+        fields = _with_variable(current, var, item.lsp_name) if var else None
+        if fields is None:
+            return
+        self.state.events[rid]["bookings"][t.channel_id]["variable_set"] = item.lsp_name
+        ev = item.event
+        try:
+            self.lsp.patch_event(event_id, item.lsp_name, ev.start, ev.end,
+                                 force=force, extra=fields)
+        except LspError as exc:
+            log.warning("Could not set %r on %r on %s: %s", var, item.lsp_name, t.channel_name, exc)
+            return
+        log.info("Set %r = %r on %s", var, item.lsp_name, t.channel_name)
 
     def _refresh_baselines(self, rid: str) -> None:
         """For an untouched record's bookings: follow an event LSP gave a new
@@ -649,8 +682,10 @@ class Syncer:
         copies the event name into the channel's event-name variable, i.e. its
         "sync event name" setting points at the label parameter named
         `lsp.event_name_variable`. With `apply`, links the channels that
-        aren't. Returns {"variable", "channels": [{id, name, pcr, status,
-        message}]}; status is linked / linked_now / needs_link / missing /
+        aren't. When the labels don't offer it, looks at the channel's events
+        instead: a workflow variable on them is set per event (per_event).
+        Returns {"variable", "channels": [{id, name, pcr, status, message}]};
+        status is linked / linked_now / needs_link / per_event / missing /
         error, or off when no variable is configured."""
         variable = self.cfg.lsp.event_name_variable
         channels = self.lsp.get_all_channels()
@@ -676,9 +711,7 @@ class Syncer:
                 row.update(status=ERROR, message="Could not read its labels from LSP")
                 continue
             if param is None:
-                row.update(status="missing", message=(
-                    f"No “{variable}” variable in this channel's labels"
-                    + (f" (has: {', '.join(others)})" if others else " (it has no label parameters)")))
+                row.update(self._variable_on_events(cid, variable, others))
                 continue
             if ch.get("SyncEventNameWithLabelParameter") and \
                     str(ch.get("SyncLabelParameterId") or "").lower() == param["id"].lower():
@@ -700,6 +733,34 @@ class Syncer:
             row.update(status="linked_now", message=f"Event name → {param['label']} / {param['name']}")
         return {"variable": variable, "channels": out}
 
+    def _variable_on_events(self, cid: str, variable: str, label_params: list[str]) -> dict:
+        """Status for a channel whose labels don't offer the variable: whether
+        its events carry it (e.g. as a workflow variable), and what they hold."""
+        try:
+            events = self.lsp.get_events_for_channel(cid)
+        except LspError:
+            return {"status": ERROR, "message": "Could not read its events from LSP"}
+        # Newest first: the likeliest to reflect the channel's current workflow.
+        events = sorted(events, key=lambda e: e.get("Start") or "", reverse=True)
+        for e in events:
+            p = _variable_param(e, variable)
+            if p is not None:
+                default = " ".join(t for t in ((p.get("Default") or {}).get("Text") or []) if t)
+                return {"status": "per_event", "message": (
+                    f"“{p.get('Name')}” is on its events"
+                    + (f" (default “{default}”)" if default else "")
+                    + "; the tool sets it on each event it creates or updates")}
+        seen = [n for n in dict.fromkeys(
+            n for e in events[:20] for n in _variable_names(e)) if n]
+        if not events:
+            where = "no events on this channel to check"
+        elif seen:
+            where = f"its events have: {', '.join(seen)}"
+        else:
+            where = "its events carry no variables"
+        labels = f"labels offer: {', '.join(label_params)}" if label_params else "labels offer none"
+        return {"status": "missing", "message": f"No “{variable}” found ({labels}; {where})"}
+
     def _link_for_pass(self, summary: dict, apply: bool, force: bool = False,
                        channel_ids: Optional[set[str]] = None) -> None:
         """Link the event-name variable as part of a pass / send; problems are
@@ -719,7 +780,7 @@ class Syncer:
                      self.cfg.lsp.event_name_variable, ", ".join(pending))
         missing = [r["name"] for r in rows if r["status"] == "missing"]
         if missing:
-            log.warning("No %r variable on %s: LSP can't fill it with the event name there",
+            log.warning("No %r variable found on %s (not in its labels or on its events)",
                         self.cfg.lsp.event_name_variable, ", ".join(missing))
         summary["errors"] += sum(r["status"] == ERROR for r in rows)
 
@@ -756,6 +817,7 @@ class Syncer:
                 pcrs_by_channel.setdefault(cid, []).append(pcr)
                 names[cid] = cname
         tool_ids = {info["event_id"]: info for _k, info in self.state.tool_created()}
+        variable = self.cfg.lsp.event_name_variable
         cutoff = datetime.now(timezone.utc) - timedelta(days=max(0, past_days))
 
         events, all_ids = [], set()
@@ -775,6 +837,7 @@ class Syncer:
                     "end": e.get("End"),
                     "status": e.get("Status"),
                     "created_by": e.get("CreatedByDisplayName"),
+                    "variable": _variable_value(e, variable),
                     "by_tool": info is not None,
                     "locked": bool(info and info.get("locked")),
                 })
@@ -788,7 +851,8 @@ class Syncer:
                 continue
             missing.append({"id": event_id, "name": info.get("name"),
                             "pcr": info.get("pcr"), "source_tab": info.get("source_tab")})
-        return {"events": events, "missing": missing, "channels": len(pcrs_by_channel)}
+        return {"events": events, "missing": missing, "channels": len(pcrs_by_channel),
+                "variable": variable}
 
     def delete_created(self) -> dict:
         """Delete from LSP every event this tool created, then forget them.
@@ -888,6 +952,51 @@ def _find_variable(labels: list[dict], variable: str) -> tuple[Optional[dict], l
                 return {"id": str(p["Identifier"]), "name": name,
                         "label": (label.get("Name") or "").strip() or "label"}, seen
     return None, seen
+
+
+def _parameter_lists(e: dict):
+    """Every parameter list on an LSP event that can hold a variable: its
+    workflow Customization's, then each of its labels'."""
+    cust = e.get("Customization") or {}
+    yield cust.get("Parameters") or []
+    for label in (e.get("Labels") or []) + (cust.get("Labels") or []):
+        yield (label or {}).get("Parameters") or []
+
+
+def _variable_param(e: dict, variable: str) -> Optional[dict]:
+    """The parameter named `variable` (ignoring case and spacing) on an event."""
+    want = " ".join((variable or "").split()).lower()
+    if not want or not isinstance(e, dict):
+        return None
+    for params in _parameter_lists(e):
+        for p in params:
+            if " ".join(((p or {}).get("Name") or "").split()).lower() == want:
+                return p
+    return None
+
+
+def _variable_names(e: dict) -> list[str]:
+    return [(p or {}).get("Name") or "" for params in _parameter_lists(e) for p in params]
+
+
+def _variable_value(e: dict, variable: str) -> Optional[str]:
+    """An LSP event's event-name variable value; None if it has no such variable."""
+    p = _variable_param(e, variable)
+    if p is None:
+        return None
+    return " ".join(t for t in (p.get("Text") or []) if t)
+
+
+def _with_variable(e, variable: str, value: str) -> Optional[dict]:
+    """PatchEvent fields (Customization and/or Labels, copied from the event)
+    that set its event-name variable to `value`; None if the event has no
+    such variable or it already holds `value`."""
+    current = _variable_value(e, variable) if isinstance(e, dict) else None
+    if current is None or current.strip() == value.strip():
+        return None
+    fields = {k: copy.deepcopy(e[k]) for k in ("Customization", "Labels") if e.get(k)}
+    _variable_param(fields, variable)["Text"] = [value]
+    return fields
 
 
 def _record_fields(item: PlanItem) -> dict:

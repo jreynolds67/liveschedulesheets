@@ -114,10 +114,12 @@ event_overrides: {}
 lsp:
   base_url: "https://live-schedule-pro.example.com"   # no trailing slash
   verify_ssl: true                                     # false only for self-signed certs
-  # The label parameter ("variable") on each PCR channel that LSP fills with the
-  # event name, e.g. "VB STANFORD PITT". Every sync sets each PCR channel's
-  # "sync event name with label parameter" option to the parameter with this
-  # name (ignoring case). Blank = leave the channels' setting alone.
+  # The text variable on each event that gets the event name (e.g. "VB STANFORD
+  # PITT") instead of its default (e.g. "Event XX"). Matched by name, ignoring
+  # case, in the event's workflow variables and label parameters. The tool
+  # sets it on every event it creates or updates. Where a channel's labels
+  # offer it, it also points the channel's "sync event name with label
+  # parameter" option at it. Blank = off.
   event_name_variable: "Event Name"
 
 runtime:

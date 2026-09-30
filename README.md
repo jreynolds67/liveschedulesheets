@@ -23,8 +23,8 @@ Every `poll_interval` (default 15 min) it:
    **locked** and the tool leaves it alone. See
    [How changes are tracked](#how-changes-are-tracked). It's safe to run
    repeatedly: nothing is duplicated.
-5. Makes sure every PCR channel copies the event name (e.g. `VB STANFORD PITT`)
-   into its **Event Name** variable. See
+5. Sets each event's **Event Name** variable to the event name (e.g.
+   `VB STANFORD PITT`) instead of its default (e.g. `Event XX`). See
    [The Event Name variable](#the-event-name-variable).
 
 There is **no composite tab** — the schedule lives across the per-sport tabs and
@@ -51,8 +51,11 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   Channels are looked up live every pass, so added or renamed channels are
   picked up automatically; the UI lists which channels each PCR matches.
   Below the mapping, set the **Event name variable** (default `Event Name`).
-  The card lists each PCR channel as **linked**, **not linked** or **no
-  variable**. **Link now** links them straight away, even with dry run on.
+  **Check channels** lists each PCR channel as **set per event**, **linked**,
+  **not linked** or **no variable**, with where the variable was found.
+  **Link now** links the channels that can be linked straight away, even
+  with dry run on. The *Scheduled in Live Schedule Pro* list shows each
+  event's variable value, in amber when it isn't the event name.
 - Pick tabs and **check and choose rows** in *Sheet tabs & row mapping*. Every
   visible tab has a button; the selected one has an **Include this tab**
   toggle and is shown as a grid, with the detected Event / Date / Start / PCR
@@ -166,26 +169,33 @@ allow-list. Turn individual tabs off in the UI (**Include this tab** in the
 
 ## The Event Name variable
 
-Each LSP channel's labels can have a parameter (a "variable") named
-**Event Name**. LSP can fill it in by itself from the event's name. That is the
-channel's *sync event name with label parameter* setting. Every sync, the tool
-checks each PCR channel:
+Each event on a PCR channel has a text variable named **Event Name**
+(`lsp.event_name_variable`). Unless something fills it in, it keeps its
+default (e.g. `Event XX`). The tool fills it in two ways:
 
-- it finds the label parameter whose name is `lsp.event_name_variable`
-  (default `Event Name`, ignoring case and spacing), using
-  `GET /api/v1/GetAvailableSyncEventNameLabelsParametersForChannel`;
-- if the channel isn't already syncing the event name into that parameter, it
-  turns the setting on and points it there
-  (`POST /api/v1/SetSyncEventNameLabelParametersForChannel`).
+- **On each event (always).** After creating or updating an event, the tool
+  reads the event's variables. These are its workflow `Customization`
+  parameters and its labels' parameters. If the one named `Event Name`
+  (ignoring case and spacing) doesn't hold the event name, the tool sets it
+  with `PATCH /api/v1/PatchEvent/{id}`. Events the tool created earlier that
+  still hold the default show in Preview as **update** (`Will update Event
+  Name`) and are fixed on the next sync. Each booking is tried once per name
+  (`variable_set` in `state.json`), so a value LSP won't keep isn't re-sent
+  every pass.
+- **Channel sync (where available).** If a channel's labels offer the
+  parameter (`GET /api/v1/GetAvailableSyncEventNameLabelsParametersForChannel`),
+  the channel's *sync event name with label parameter* option is pointed at it
+  (`POST /api/v1/SetSyncEventNameLabelParametersForChannel`), so LSP fills it
+  in too. Workflow variables aren't offered there, so those channels show
+  **set per event**.
 
-This runs before events are created, so new events get the variable
-filled in. The value is the LSP event name: the sheet's `EVENT` cell plus
-any event name prefix. With dry run on, a sync only logs which channels it
-*would* link. A single **SEND TO LSP** from Preview links that event's own
-channels first. A channel without the parameter is flagged **no variable**
-(and logged); its events are still scheduled. Add the parameter to that
-channel's labels in LSP. Leave the setting blank to stop the tool changing
-channels' settings.
+The value is the LSP event name: the sheet's `EVENT` cell plus any event
+name prefix. Both run only when a sync is live; with dry run on, Preview's
+**SEND TO LSP** does both for that one event. **Check channels** reads each
+channel's labels and, if needed, its events. It then reports where the
+variable was found and, if it wasn't, which variables the channel's events do
+have. Events are scheduled either way. Leave the setting blank to turn all
+of this off.
 
 Also available as `GET /api/event-name-links` (check) and
 `POST /api/event-name-links` (link now).

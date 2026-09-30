@@ -204,10 +204,11 @@ class LspClient:
         return resp.json()
 
     def patch_event(self, event_id: str, name: str, start: datetime, end: datetime,
-                    force: bool = False) -> None:
-        """Change an event that hasn't started (PATCH /api/v1/PatchEvent/{id})."""
+                    force: bool = False, extra: Optional[dict] = None) -> None:
+        """Change an event that hasn't started (PATCH /api/v1/PatchEvent/{id}).
+        `extra` adds fields, e.g. Customization / Labels to set a variable."""
         self._check_writable(f"update event {name!r}", force)
-        body = {"Name": name, "Start": _iso(start), "End": _iso(end)}
+        body = {"Name": name, "Start": _iso(start), "End": _iso(end), **(extra or {})}
         resp = self._request("PATCH", f"/api/v1/PatchEvent/{event_id}", json=body)
         if resp.status_code != 200:
             raise LspError(

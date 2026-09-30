@@ -209,9 +209,10 @@
       <span class="hint" id="channelHint"></span></div>
     <div><label>Event name variable</label>
       <input type="text" id="lsp_event_var" placeholder="Event Name" />
-      <div class="hint" style="margin-top:6px">The label parameter on each PCR channel that gets the event's name
-        (e.g. “VB STANFORD PITT”). Every sync sets each channel's <i>sync event name</i> option to it, so LSP
-        fills it in for every event on that channel. Leave blank to leave the channels alone.</div></div>
+      <div class="hint" style="margin-top:6px">The variable that gets the event's name (e.g. “VB STANFORD PITT”)
+        instead of its default. The tool sets it on every event it creates or updates. Where a channel's labels
+        offer it, the channel's <i>sync event name</i> option is also pointed at it. <b>Check channels</b> shows
+        where each channel's variable was found. Leave blank to turn this off.</div></div>
     <div id="varBox" class="hint"></div>
     <div class="row"><button id="btnCheckVar" class="ghost">Check channels</button>
       <button id="btnLinkVar" class="ghost">Link now</button></div>
@@ -923,9 +924,10 @@ function renderScheduled(){
   const groups = new Map();
   for (const e of r.events){
     const k = [e.name, e.start, e.end, e.pcr].join("|");
-    if (!groups.has(k)) groups.set(k, {...e, channels: [], ids: [], statuses: new Set(), creators: new Set(), tool: 0});
+    if (!groups.has(k)) groups.set(k, {...e, channels: [], ids: [], statuses: new Set(), creators: new Set(), vars: [], tool: 0});
     const g = groups.get(k);
     g.channels.push(e.channel); g.ids.push(e.id); if (e.status) g.statuses.add(e.status);
+    g.vars.push({channel: e.channel, value: e.variable});
     if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++; if (e.locked) g.locked = true;
   }
   let rows = [...groups.values()];
@@ -933,9 +935,10 @@ function renderScheduled(){
   let html = `<div class="hint" style="margin-bottom:8px">${groups.size} event(s) across ${r.channels} mapped channel(s) · <b>${toolCount}</b> channel booking(s) created by this tool</div>`;
   if (!r.channels) html = `<div class="hint">No LSP channels match any PCR - check the PCR → channel mapping above.</div>`;
   else if (!rows.length) html += `<div class="hint">No events to show.</div>`;
-  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th><th></th></tr></thead><tbody>`
+  else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>${esc(r.variable || "Variable")}</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th><th></th></tr></thead><tbody>`
     + rows.map((g, gi) => `<tr>
       <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
+      <td>${varCell(g)}</td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
       <td class="mono nowrap">${fmtWhen(g.start)}</td><td class="mono nowrap">${fmtWhen(g.end)}</td>
       <td class="hint">${esc([...g.statuses].join(", "))}</td><td class="hint">${esc([...g.creators].join(", "))}</td>
@@ -944,6 +947,17 @@ function renderScheduled(){
   if (r.missing.length) html += `<div class="hint" style="margin-top:10px;color:var(--warn)">⚠ ${r.missing.length} channel booking(s) this tool created are no longer on any mapped channel in LSP (deleted or moved by hand): ${[...new Set(r.missing.map(m=>m.name))].map(esc).join(", ")}</div>`;
   box.className = ""; box.innerHTML = html;
   box.querySelectorAll("button[data-g]").forEach(b => b.onclick = () => deleteScheduled(rows[+b.dataset.g], b));
+}
+
+// The event's Event Name variable across its channels; amber if any channel
+// doesn't hold the event name (e.g. still its default).
+function varCell(g){
+  const known = g.vars.filter(v => v.value != null);
+  if (!known.length) return `<span class="hint">-</span>`;
+  const off = known.filter(v => v.value.trim() !== (g.name||"").trim());
+  const vals = [...new Set(known.map(v => v.value))];
+  const tip = g.vars.map(v => `${v.channel}: ${v.value ?? "(no variable)"}`).join("\n");
+  return `<span title="${esc(tip)}"${off.length ? ` style="color:var(--warn)"` : ""}>${vals.map(v => esc(v || "(empty)")).join(" / ")}</span>`;
 }
 
 async function deleteScheduled(g, btn){
@@ -994,7 +1008,7 @@ async function loadChannels(){
   }
 }
 
-const VAR_STATUS = {linked:["exists","linked"], linked_now:["create","linked now"], needs_link:["update","not linked"],
+const VAR_STATUS = {linked:["exists","linked"], linked_now:["create","linked now"], needs_link:["update","not linked"], per_event:["exists","set per event"],
   missing:["no_channel","no variable"], error:["error","error"], off:["ignore","off"]};
 function renderVarLinks(r){
   if (!r.ok){ $("varBox").innerHTML = `<span style="color:var(--err)">${esc(r.error||"")}</span>`; return; }
@@ -1013,7 +1027,7 @@ async function checkVarLinks(){
 // Wire up buttons
 $("btnCheckVar").onclick = checkVarLinks;
 $("btnLinkVar").onclick = async () => {
-  if (!confirm("Set every PCR channel in Live Schedule Pro to copy the event name into this variable?\n\nThis changes the channels' settings in LSP now, even with dry run on.")) return;
+  if (!confirm("Set every PCR channel whose labels offer this variable to copy the event name into it?\n\nThis changes those channels' settings in LSP now, even with dry run on. (Workflow variables are set per event instead.)")) return;
   await api("POST","/api/config", gather());
   $("varBox").textContent = "Linking…";
   renderVarLinks(await api("POST","/api/event-name-links"));
