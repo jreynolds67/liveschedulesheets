@@ -275,8 +275,9 @@ pass. Lead-in and safety-cap changes are applied the same way. Once an event
 has started, sheet changes are no longer applied to it.
 
 **Locking.** Before changing anything, the tool compares each booking with its
-snapshot. If the name, start or end differ, or the event was deleted or moved
-to another channel, **someone changed it in LSP**, and the whole sheet event is
+snapshot and with the values it last sent. If the name, start or end match
+neither, or the event was deleted or moved to another channel, **someone changed
+it in LSP**, and the whole sheet event is
 **locked**: the tool never updates, re-creates or deletes it again, and the
 cleanup button skips it. Locks are recorded even in dry run. Preview shows
 locked events with the reason and an **Unlock** button (`POST /api/unlock`
@@ -293,6 +294,10 @@ it's cancelled.
 **New events.** A sheet event with no record is created on each of its PCR's
 channels, unless LSP already has an event with the same name and start minute
 there (made by hand). That one is recorded but never modified or deleted.
+
+Matching the values last sent covers LSP returning the old values on the
+re-read right after an update. If LSP gives an event a new id when it's updated,
+the tool finds it by those values on the same channel and follows the new id.
 
 State from older versions (one hashed key per booking) is adopted into
 records automatically on the first pass. A booking whose name or start had

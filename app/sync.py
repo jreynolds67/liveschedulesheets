@@ -334,17 +334,20 @@ class Syncer:
                 targets.append(Target(cid, cn, EXISTS, "Made by hand in LSP; left alone",
                                       event_id=b.get("event_id")))
             else:
-                snap = b.get("snapshot") or {}
+                # Untouched by hand (checked above), so LSP's current values
+                # are what the tool last wrote; the snapshot is the fallback.
+                hit = _locate(b, cid, view)
+                cur = hit[1] if hit else (b.get("snapshot") or {})
                 diffs = []
-                if (snap.get("Name") or "").strip() != name.strip():
+                if (cur.get("Name") or "").strip() != name.strip():
                     diffs.append("name")
-                if not _same_instant(snap.get("Start"), ev.start):
+                if not _same_instant(cur.get("Start"), ev.start):
                     diffs.append("start")
-                if not _same_instant(snap.get("End"), ev.end):
+                if not _same_instant(cur.get("End"), ev.end):
                     diffs.append("end")
                 targets.append(Target(cid, cn, UPDATE if diffs else EXISTS,
                                       f"Will update {', '.join(diffs)}" if diffs else "Up to date",
-                                      event_id=b.get("event_id")))
+                                      event_id=hit[1].get("Id") if hit else b.get("event_id")))
         for cid, b in bookings.items():
             if cid not in wanted and b.get("by_tool"):
                 targets.append(Target(cid, cname(cid), DELETE,
@@ -382,7 +385,11 @@ class Syncer:
 
     def _hand_edit(self, rec, view: _LspView, now) -> Optional[str]:
         """Why this record's LSP events no longer match what the tool last
-        wrote ("" = untouched), or None if LSP couldn't be read."""
+        wrote ("" = untouched), or None if LSP couldn't be read.
+
+        A booking is untouched if LSP matches its snapshot *or* the values the
+        tool last sent: the re-read right after a write can still return the
+        old values, which would otherwise look like a hand edit next pass."""
         for cid, b in rec.get("bookings", {}).items():
             if not b.get("by_tool"):
                 continue  # hand-made bookings are never ours to compare
@@ -390,7 +397,7 @@ class Syncer:
             if cid in view.failed:
                 return None
             snap = b.get("snapshot")
-            hit = view.by_id.get(b.get("event_id"))
+            hit = _locate(b, cid, view)
             if hit is None:
                 end = _parse_utc((snap or {}).get("End")) or _parse_utc(rec.get("end"))
                 if end and end < now:
@@ -399,8 +406,8 @@ class Syncer:
             found_cid, e = hit
             if found_cid != cid:
                 return f"{label}: moved to another channel in LSP"
-            if snap is None:
-                continue  # no baseline yet; taken on the next pass
+            if snap is None or _matches_written(e, b.get("written")):
+                continue  # no baseline yet (taken next pass), or as the tool left it
             if (e.get("Name") or "").strip() != (snap.get("Name") or "").strip():
                 return f"{label}: name changed in LSP"
             for f in ("Start", "End"):
@@ -474,9 +481,9 @@ class Syncer:
         for cid, b in list(rec["bookings"].items()):
             if not b.get("by_tool"):
                 continue
-            hit = view.by_id.get(b.get("event_id"))
+            hit = _locate(b, cid, view)
             if hit and hit[0] == cid:
-                b["snapshot"] = _snapshot(hit[1])
+                b.update(event_id=hit[1].get("Id"), snapshot=_snapshot(hit[1]))
             else:
                 del rec["bookings"][cid]
         rec.update(locked=False, lock_reason="", locked_at=None)
@@ -513,8 +520,8 @@ class Syncer:
                 continue
 
             rid = item.record_id
-            if rid and not item.new_lock:
-                self._baseline_missing(rid)
+            if rid and not (item.new_lock or item.locked):
+                self._refresh_baselines(rid)
             if rid is None and item.new_lock:
                 # A legacy booking changed in LSP: track it, locked.
                 rid = self._new_record(item)
@@ -571,6 +578,7 @@ class Syncer:
                 "event_id": event_id, "channel_name": t.channel_name, "by_tool": True,
                 "created_at": now, "name": item.lsp_name,
                 "snapshot": _snapshot(result) if isinstance(result, dict) else None,
+                "written": _written(item),
             }
             touched.append((rid, t.channel_id))
             log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
@@ -578,7 +586,8 @@ class Syncer:
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
-            b.update(name=item.lsp_name, snapshot=None, updated_at=now)
+            b.update(event_id=t.event_id, name=item.lsp_name, snapshot=None,
+                     written=_written(item), updated_at=now)
             touched.append((rid, t.channel_id))
             log.info("Updated %r on %s (%s) @ %s", item.lsp_name, t.channel_name,
                      t.message, ev.start.isoformat())
@@ -588,13 +597,24 @@ class Syncer:
             log.info("Removed %r from %s (PCR now %s)", item.lsp_name, t.channel_name, ev.pcr)
         return rid
 
-    def _baseline_missing(self, rid: str) -> None:
-        """Take a snapshot for bookings written last pass whose re-read failed."""
+    def _refresh_baselines(self, rid: str) -> None:
+        """For an untouched record's bookings: follow an event LSP gave a new
+        id, and re-snapshot one whose last re-read failed or came back stale
+        (LSP now shows what the tool wrote)."""
         view = getattr(self, "_view", None)
+        if view is None:
+            return
         for cid, b in self.state.events[rid].get("bookings", {}).items():
-            hit = view.by_id.get(b.get("event_id")) if view else None
-            if b.get("by_tool") and b.get("snapshot") is None and hit and hit[0] == cid:
-                b["snapshot"] = _snapshot(hit[1])
+            if not b.get("by_tool"):
+                continue
+            hit = _locate(b, cid, view)
+            if not hit or hit[0] != cid:
+                continue
+            e = hit[1]
+            if e.get("Id") and e["Id"] != b.get("event_id"):
+                b["event_id"] = e["Id"]
+            if b.get("snapshot") is None or _matches_written(e, b.get("written")):
+                b["snapshot"] = _snapshot(e)
 
     def _new_record(self, item: PlanItem) -> str:
         return self.state.new_record(_record_fields(item))
@@ -758,6 +778,38 @@ def _record_fields(item: PlanItem) -> dict:
 
 def _snapshot(e: dict) -> dict:
     return {f: e.get(f) for f in _SNAPSHOT_FIELDS}
+
+
+def _written(item: PlanItem) -> dict:
+    """The values the tool sends LSP for an event."""
+    return {"Name": item.lsp_name, "Start": item.event.start.isoformat(),
+            "End": item.event.end.isoformat()}
+
+
+def _matches_written(e: dict, written: Optional[dict]) -> bool:
+    """Whether an LSP event still holds what the tool last sent it."""
+    if not written:
+        return False
+    start, end = _parse_utc(written.get("Start")), _parse_utc(written.get("End"))
+    return (bool(start and end)
+            and (e.get("Name") or "").strip() == (written.get("Name") or "").strip()
+            and _same_instant(e.get("Start"), start) and _same_instant(e.get("End"), end))
+
+
+def _locate(b: dict, cid: str, view: _LspView) -> Optional[tuple[str, dict]]:
+    """(channel id, LSP event) for a booking: by its id, or, if LSP gave the
+    event a new id, the event on its channel holding what the tool wrote."""
+    hit = view.by_id.get(b.get("event_id"))
+    if hit is not None:
+        return hit
+    w = b.get("written")
+    start = _parse_utc((w or {}).get("Start"))
+    if not start:
+        return None
+    for e in view.by_channel.get(cid, []):
+        if _matches_written(e, w):
+            return cid, e
+    return None
 
 
 def _booking(e: dict, channel_name: str, by_tool: bool, created_at=None) -> dict:
