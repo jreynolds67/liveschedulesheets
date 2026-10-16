@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
 
 import requests
 import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from .config import LspConfig
 from .models import ScheduledEvent
@@ -24,6 +27,33 @@ log = logging.getLogger(__name__)
 
 class LspError(Exception):
     pass
+
+
+# LSP's EventStatus values, in its enum order.
+EVENT_STATUSES = ("Waiting", "Queued", "Recording", "Complete", "Failed", "Timeout", "Canceled")
+# The statuses of events that haven't finished: all the sync needs to see.
+CURRENT_STATUSES = ("Waiting", "Queued", "Recording", "Canceled")
+
+
+def event_status(e: Optional[dict]) -> str:
+    """An LSP event's status, lowercase ("" if unknown). LSP sends the
+    EventStatus name; a number is taken as its position in the enum."""
+    s = (e or {}).get("Status")
+    if isinstance(s, int) and not isinstance(s, bool) and 0 <= s < len(EVENT_STATUSES):
+        s = EVENT_STATUSES[s]
+    s = str(s or "").strip().lower()
+    return "canceled" if s == "cancelled" else s
+
+
+def _retrying_adapter() -> HTTPAdapter:
+    """Retries a request that couldn't connect, and a GET that timed out or
+    got a 502/503/504 (LSP restarting, a network blip), a couple of times
+    with a short backoff, instead of failing the whole pass. A POST, PATCH
+    or DELETE that reached LSP is never retried here: it may have worked."""
+    return HTTPAdapter(max_retries=Retry(
+        total=2, connect=2, read=2, status=2, other=0, backoff_factor=1,
+        status_forcelist=(502, 503, 504), allowed_methods=frozenset({"GET"}),
+        raise_on_status=False, respect_retry_after_header=False))
 
 
 class _LoginUnavailable(LspError):
@@ -39,6 +69,14 @@ class LspClient:
         self.timeout = timeout
         self.session = requests.Session()
         self.session.verify = cfg.verify_ssl
+        for prefix in ("http://", "https://"):
+            self.session.mount(prefix, _retrying_adapter())
+        # Seconds this machine's clock is ahead of LSP's (from its Date
+        # header); None until a reply has one.
+        self.clock_skew: Optional[float] = None
+        # Whether GetFilteredEvents' status filter has been seen to work on
+        # this server (None: not checked yet). See get_current_events().
+        self._filter_ok: Optional[bool] = None
         if not cfg.verify_ssl:
             # Said once here rather than as a warning on every request, which
             # would fill the container log.
@@ -108,11 +146,22 @@ class LspClient:
         elif self.auth_mode == "basic":
             auth = (self.cfg.username, self.cfg.password)
         try:
-            return self.session.request(method, url, headers=headers, auth=auth, **kwargs)
+            resp = self.session.request(method, url, headers=headers, auth=auth, **kwargs)
         except requests.RequestException as exc:
             # Timeouts / connection errors are LSP failures like any other, so
             # callers that handle LspError (and save state) handle these too.
             raise LspError(f"{method} {url} failed: {exc}") from exc
+        self._note_clock(resp)
+        return resp
+
+    def _note_clock(self, resp) -> None:
+        try:
+            server = parsedate_to_datetime((getattr(resp, "headers", None) or {}).get("Date"))
+        except (TypeError, ValueError, IndexError):
+            return
+        if server.tzinfo is None:
+            server = server.replace(tzinfo=timezone.utc)
+        self.clock_skew = (datetime.now(timezone.utc) - server).total_seconds()
 
     def _authenticate(self) -> None:
         """After a 401: get a token, or fall back to HTTP Basic. Caller holds _lock.
@@ -170,7 +219,10 @@ class LspClient:
         resp = self._request("GET", "/api/v1/GetAllChannels")
         if resp.status_code != 200:
             raise LspError(f"GetAllChannels failed ({resp.status_code}): {resp.text[:300]}")
-        return _json(resp, "GetAllChannels")
+        data = _json(resp, "GetAllChannels")
+        if not isinstance(data, list):
+            raise LspError(f"GetAllChannels returned {type(data).__name__}, not a list")
+        return data
 
     # -- settings -------------------------------------------------------------
 
@@ -186,7 +238,7 @@ class LspClient:
     # -- events -------------------------------------------------------------
 
     def get_events_for_channel(self, channel_id: str) -> list[dict]:
-        """All events on a channel (used to match and check tracked events)."""
+        """All events on a channel, finished ones included."""
         resp = self._request(
             "GET", "/api/v1/GetEvents", params={"channelId": channel_id}
         )
@@ -194,7 +246,50 @@ class LspClient:
             raise LspError(
                 f"GetEvents failed for {channel_id} ({resp.status_code}): {resp.text[:300]}"
             )
-        return _json(resp, "GetEvents")
+        data = _json(resp, "GetEvents")
+        if not isinstance(data, list):
+            raise LspError(f"GetEvents for {channel_id} returned {type(data).__name__}, not a list")
+        return data
+
+    def get_current_events(self, channel_id: str) -> list[dict]:
+        """The channel's events that haven't finished (CURRENT_STATUSES),
+        which is all a sync needs: GetEvents returns every event LSP still
+        keeps, a season's worth by spring.
+
+        Uses GetFilteredEvents, but only once it is seen to work on this
+        server: the first call also reads the whole channel and checks the
+        filter returned exactly its unfinished events. Until then, or if a
+        reply ever holds something it shouldn't, the whole channel is read
+        (a filter that dropped live events would make them look deleted)."""
+        if self._filter_ok is False:
+            return self.get_events_for_channel(channel_id)
+        resp = self._request("GET", "/api/v1/GetFilteredEvents",
+                             params={"channelIds": [channel_id],
+                                     "eventStatuses": list(CURRENT_STATUSES)})
+        data = _json(resp, "GetFilteredEvents") if resp.status_code == 200 else None
+        wanted = {s.lower() for s in CURRENT_STATUSES}
+        if not isinstance(data, list) or any(
+                not isinstance(e, dict) or event_status(e) not in wanted
+                or str(e.get("ChannelId") or "").lower() != channel_id.lower() for e in data):
+            self._filter_off("its reply didn't match the filter")
+            return self.get_events_for_channel(channel_id)
+        if self._filter_ok is None:
+            full = self.get_events_for_channel(channel_id)
+            expected = {e.get("Id") for e in full if event_status(e) in wanted}
+            if {e.get("Id") for e in data} != expected:
+                self._filter_off("it left out unfinished events")
+                return full
+            if expected:  # proven only once it has had something to return
+                self._filter_ok = True
+                log.info("LSP's GetFilteredEvents works; reading only unfinished events from now on")
+            return full
+        return data
+
+    def _filter_off(self, why: str) -> None:
+        if self._filter_ok is not False:
+            log.warning("Not using LSP's GetFilteredEvents (%s); reading every event on each "
+                        "channel instead", why)
+        self._filter_ok = False
 
     def get_event(self, event_id: str) -> Optional[dict]:
         """One event exactly as LSP returns it (GetFilteredEvents), or None."""

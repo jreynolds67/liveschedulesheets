@@ -16,7 +16,7 @@ from .config import ConfigError
 from .manager import SyncManager
 from .runtime import setup_logging
 from .settings_store import SettingsStore
-from .webui import CONFIG_PATH, SEED_PATH, SHUTDOWN_WAIT_SECONDS
+from .webui import CONFIG_PATH, LOG_DIR, SEED_PATH, SHUTDOWN_WAIT_SECONDS
 
 _stop = False
 _exit_code = 0
@@ -35,7 +35,7 @@ def _restart(_why: str) -> None:
 
 
 def main() -> int:
-    setup_logging()
+    setup_logging(LOG_DIR)
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 

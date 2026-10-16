@@ -1,0 +1,20 @@
+# Runs the test suite on the Python the image uses, for every push and pull
+# request. Portainer deploys main on its own schedule, so a red run here is
+# the warning to fix (or revert) before the next deploy picks it up.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # keep in step with the Dockerfile's FROM line
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q

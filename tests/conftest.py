@@ -139,8 +139,10 @@ class FakeLsp:
 class FakeReader:
     def __init__(self, events=None):
         self.events = events or []
+        self.warnings = []
 
-    def read_events(self):
+    def read_events(self, known_tabs=None):
+        self.visible = self.read_tabs = sorted({e.source_tab for e in self.events})
         return copy.deepcopy(self.events)
 
 

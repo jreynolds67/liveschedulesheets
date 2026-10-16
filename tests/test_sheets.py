@@ -238,3 +238,61 @@ def test_postponed_or_cancelled_games_are_still_scheduled_but_flagged(tmp_path):
     pitt, duke, awareness = parse_grid("Fall", grid, cfg_for(tmp_path))
     assert "“PPD”" in pitt.note and "“CANCELLED”" in duke.note
     assert awareness.note == ""
+
+
+# -- what can't be scheduled is reported, not dropped silently ------------------
+
+def _future(days=10):
+    from datetime import date, timedelta
+    d = date.today() + timedelta(days=days)
+    return f"{d.month}/{d.day}/{d.year}"
+
+
+def test_columns_that_cant_be_scheduled_are_reported(tmp_path):
+    grid = [["DATE", _future(), _future(), _future(), "9/1/2020", _future(), ""],
+            ["EVENT", "VB vs Pitt", "VB vs Duke", "VB vs UNC", "Old game", "VB vs Rice", "TBA game"],
+            ["GAME START", "7:00", "TBD", "", "7:00", "7:00 PM", ""],
+            ["CONTROL ROOM", "B", "B", "B", "B", "B", "B"]]
+    problems = []
+    events = parse_grid("Fall", grid, cfg_for(tmp_path), problems=problems)
+    assert [e.name for e in events] == ["VB vs Rice"]
+    # Only Pitt: TBD, blank, long past and blank-date columns aren't worth a warning.
+    assert [p["text"] for p in problems] == [
+        "“VB vs Pitt” (Fall column B) isn't scheduled: the time “7:00” has no AM/PM"]
+    assert problems[0]["key"].startswith("Fall!B: ")
+
+
+def test_ignoring_a_column_silences_its_warning(tmp_path):
+    from datetime import date, timedelta
+    d = date.today() + timedelta(days=10)
+    cfg = cfg_for(tmp_path, event_overrides={"Fall": [
+        {"date": d.isoformat(), "event": "VB vs Pitt", "ignore": True}]})
+    grid = [["DATE", _future()], ["EVENT", "VB vs Pitt"], ["GAME START", "7:00"], ["CONTROL ROOM", "B"]]
+    problems = []
+    parse_grid("Fall", grid, cfg, problems=problems)
+    assert problems == []
+
+
+def test_tab_whose_rows_cant_be_found_is_reported(tmp_path):
+    problems = []
+    assert parse_grid("Contacts", [["NAME", "Jane"], ["PHONE", "555"]], cfg_for(tmp_path),
+                      problems=problems) == []
+    assert "Tab “Contacts” is not read: no EVENT / DATE / start time row found" in problems[0]["text"]
+
+
+def test_new_tabs_wait_to_be_turned_on(tmp_path):
+    r = _reader(tmp_path, _Google())
+    assert len(r.read_events(known_tabs=None)) == 4 and r.read_tabs == ["Fall", "Spring"]
+    # "Spring" appeared since the tool last read the sheet: not read, and said so.
+    assert len(r.read_events(known_tabs={"Fall"})) == 2 and r.read_tabs == ["Fall"]
+    assert any("New tab “Spring”" in w["text"] for w in r.warnings)
+    # Turned on in the UI: read.
+    r.cfg = cfg_for(tmp_path, tab_overrides={"Spring": {"enabled": True}})
+    assert len(r.read_events(known_tabs={"Fall"})) == 4
+
+
+def test_settings_for_a_renamed_tab_are_reported(tmp_path):
+    r = _reader(tmp_path, _Google())
+    r.cfg = cfg_for(tmp_path, tab_overrides={"Football": {"enabled": False}})
+    r.read_events()
+    assert any("Settings for tab “Football” match no tab" in w["text"] for w in r.warnings)

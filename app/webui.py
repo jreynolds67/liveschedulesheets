@@ -16,7 +16,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 from .config import ConfigError, parse_config
 from .manager import SyncManager
-from .runtime import setup_logging
+from .runtime import read_log_tail, setup_logging
 from .settings_store import ConfigConflict, GoogleKeyError, SettingsStore
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ WEB_DIR = os.path.join(HERE, "web")
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/data/config.yaml")
 SEED_PATH = os.environ.get("CONFIG_SEED", os.path.join(os.path.dirname(HERE), "config.example.yaml"))
+# The log file lives on the /data volume next to config.yaml.
+LOG_DIR = os.environ.get("LOG_DIR", os.path.join(os.path.dirname(CONFIG_PATH), "logs"))
 
 
 def _auth_enabled() -> bool:
@@ -146,6 +148,28 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         ok, why = manager.health()
         return Response(why, 200 if ok else 503, mimetype="text/plain")
 
+    @app.get("/healthz/sync")
+    def healthz_sync():
+        """For monitoring (Uptime Kuma, Companion...): 200 while syncing
+        works, 503 when passes are failing or none has run cleanly for a
+        while. No auth; says only ok / why not. Not used by Docker's health
+        check: restarting doesn't fix a revoked key or a changed login."""
+        ok, why = manager.sync_health()
+        return Response(why, 200 if ok else 503, mimetype="text/plain")
+
+    @app.post("/api/test-alert")
+    @require_auth
+    def test_alert():
+        return jsonify(manager.send_test_alert())
+
+    @app.get("/api/activity")
+    @require_auth
+    def activity():
+        """The end of the log file. ?changes=1 keeps only lines about changes
+        made to LSP or tracking, and alerts."""
+        return jsonify({"ok": True, "lines": read_log_tail(
+            LOG_DIR, changes_only=request.args.get("changes") == "1")})
+
     @app.get("/api/channels")
     @require_auth
     def channels():
@@ -210,7 +234,7 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
     @require_auth
     def preview():
         try:
-            return jsonify({"ok": True, "items": manager.preview()})
+            return jsonify({"ok": True, **manager.preview()})
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
@@ -247,6 +271,15 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
             return jsonify({"ok": False, "error": "record_id is required"})
         try:
             return jsonify({"ok": True, **manager.unlock_event(body["record_id"])})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
+    @app.post("/api/unlock-all")
+    @require_auth
+    def unlock_all():
+        """Unlock every locked event at once."""
+        try:
+            return jsonify({"ok": True, **manager.unlock_all()})
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})
 
@@ -311,7 +344,7 @@ def _restart(_why: str) -> None:
 
 
 def main() -> int:
-    setup_logging()
+    setup_logging(LOG_DIR)
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     store = SettingsStore(CONFIG_PATH, SEED_PATH)
     manager = SyncManager(store, on_unhealthy=_restart)

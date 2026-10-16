@@ -89,7 +89,11 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   **locked** (changed by hand in LSP), **not in sheet** (tracked, but gone from
   the sheet), out of window, or no channel. Each row has an inline **PCR
   selector** and an **Ignore** checkbox for fixing individual events; locked
-  rows have an **UNLOCK** button.
+  rows have an **UNLOCK** button, and **Unlock all** appears when several are
+  locked (after an LSP-wide change, say). Games that are over aren't listed.
+  Above the table, **Not scheduled / needs attention** lists what the sheet
+  has that can't be scheduled (see [What can't be scheduled is
+  reported](#what-cant-be-scheduled-is-reported)).
 - **Send one event to LSP** — rows that would be created or updated have a
   **SEND TO LSP** button that applies just that event now, on all its channels,
   so you can test one at a time. It works **even with dry run on** (the
@@ -104,7 +108,16 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   remove one to go back to what the sheet says. Fixes for games more than a
   day in the past are dropped on the next Save, as are tab settings for tabs
   the sheet no longer has. (Stored as `event_overrides`.)
-- **Run now**, and see the **last-run status** (the *Status* card at the top).
+- **Run now**, and see the **last-run status** (the *Status* card at the top):
+  whether syncing is working, when it last ran without errors, and what in
+  the sheet needs attention. It's kept across restarts (`/data/status.json`).
+- **Alerts** — set an **Alert webhook URL** (Runtime card; Slack, Microsoft
+  Teams / Power Automate, Discord, or anything that takes a JSON POST) to be
+  told when syncing stops working. See [Alerts and
+  monitoring](#alerts-and-monitoring).
+- **Activity** — the end of the tool's log, kept on the data volume across
+  redeploys: everything it created, updated, removed or locked, and every
+  alert it sent.
 - **See what's scheduled in LSP** — the *Scheduled in Live Schedule Pro* card
   lists, live from LSP, the upcoming and in-progress events on the mapped PCR
   channels (optionally the last 24 h / 7 days too). Events this tool created are
@@ -213,10 +226,27 @@ still on"). If the game is off, cancel or delete it in LSP.
 (e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
 or with the PCR selector in Preview.
 
+### What can't be scheduled is reported
+
+A column with an event name and a date and time typed in that can't be read
+(a time with no AM/PM, a date with no year, a typo) is **not scheduled, and
+says so**: it's listed in the Status card and above the Preview table, and
+sent as an alert. So is a tab whose EVENT / DATE / start-time rows can't be
+found. Blank or `TBD` dates and times, games more than a day past, and columns
+you **Ignore** in Preview aren't reported.
+
 **Which tabs are read:** all **visible** tabs by default (hidden tabs skipped).
 Leave `sheet.tabs` empty to auto-discover, or list specific tabs as an
 allow-list. Turn individual tabs off in the UI (**Include this tab** in the
 *Sheet tabs & row mapping* card).
+
+**New tabs wait to be turned on.** The tool remembers which tabs it has read
+(per sheet, in `state.json`). A tab added later — or a tab renamed, which is
+a new name — isn't read until someone turns on **Include this tab** for it and
+saves; until then it's marked **NEW** in the tab list and reported in Status,
+so a "Copy of Basketball" or a scratch tab can't book anything. Settings for a
+tab that no longer exists (renamed?) are reported too. The first time a sheet
+is read, all its visible tabs are read, as before.
 
 ---
 
@@ -320,11 +350,41 @@ no login needed) that marks the container unhealthy if the sync loop has died
 or a pass has made no progress for over half an hour past its interval;
 Portainer shows it. Docker doesn't restart an unhealthy container by itself,
 so the app also checks this every minute and, when it trips, shuts down with
-exit status 1; the stack's `restart: unless-stopped` then starts it afresh
-(nothing is lost: `state.json` is saved after every LSP write). The
-stack caps the container log at 5 × 10 MB. On stop or redeploy, the app
-finishes the LSP write in progress, saves `state.json` and exits (it waits up
-to 45 s; the stack's `stop_grace_period` is 60 s).
+exit status 1 (sending an alert first, if set up); the stack's `restart:
+unless-stopped` then starts it afresh (nothing is lost: `state.json` is saved
+after every LSP write). On stop or redeploy, the app finishes the LSP write in
+progress, saves `state.json` and exits (it waits up to 45 s; the stack's
+`stop_grace_period` is 60 s).
+
+The log goes to Docker's log (capped at 5 × 10 MB, and gone when the
+container is recreated) **and** to `/data/logs/liveschedulesheets.log` on the
+volume (5 × 5 MB, kept across redeploys; `LOG_DIR` env to move it), shown in
+the UI's *Activity* card.
+
+**Only one copy at a time.** The app locks `state.json` while it runs; a
+second copy using the same volume (a test container, `RUN_ONCE` alongside the
+service) is refused with an error instead of both writing to LSP. Never point
+a second, *live* copy with its own volume at the same LSP either: it would
+treat this one's events as made by hand.
+
+### Alerts and monitoring
+
+`/healthz` only says the process is alive. Whether **syncing works** — the
+Google key, the sheet's sharing, the LSP login and LSP itself — is checked
+two ways:
+
+- **Alert webhook** (`runtime.alert_webhook_url`, set in the Runtime card;
+  **Send test alert** checks it). A message is posted when passes keep failing
+  (two in a row, so a single blip doesn't wake anyone), again every 6 hours
+  while it lasts, and once when it recovers; once for each new sheet warning
+  (a game that can't be scheduled, a new tab, LSP's clock or event statuses
+  looking wrong); and before the watchdog restarts the app. What was sent is
+  remembered across restarts, so nothing is repeated.
+- **`GET /healthz/sync`** (no login): `200 ok` while syncing works, `503` with
+  the reason when the last pass failed or none has run without errors for
+  3 intervals (at least 45 minutes). Point Uptime Kuma, Companion or any
+  monitor at it. Docker's health check deliberately doesn't use it: a restart
+  can't fix a revoked key or a changed password.
 
 **Networking:** the container joins the existing **Companion** `ipvlan`
 network (parent `eth0`, subnet `10.10.251.0/24`) as an external network, at a
@@ -381,6 +441,11 @@ have a pytest suite in `tests/`; no Google key or LSP server is needed:
 python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
+
+GitHub runs the same suite on Python 3.12 (the image's version) for every
+push (`.github/workflows/tests.yml`). Portainer doesn't wait for it, so check
+the run after pushing to `main`, and fix or revert a red one before the next
+deploy.
 
 ### Updating dependencies
 
@@ -526,19 +591,43 @@ keeps records for 365 days.
 
 `state.json` is saved after every change the tool makes in LSP, not just at the
 end of a pass, so a restart mid-pass can't leave events in LSP that the tool
-has no record of. If `state.json` isn't valid JSON when the tool starts, it's
-renamed to `state.json.corrupt-<time>` (kept for inspection) and the Status
-card says so; one that can't be read at all stops the sync with an error
-rather than being overwritten. If `state.json` is lost, the tool falls back to
+has no record of. Every write goes to a temporary file that is flushed to disk
+and then renamed over the old one, so a power cut can't leave it half-written.
+A copy of `state.json` and `config.yaml` is kept each day in `/data/backups`
+(the last 14). If `state.json` isn't valid JSON when the tool starts, it's
+renamed to `state.json.corrupt-<time>` (kept for inspection), the newest
+backup is restored, and the Status card says so (events scheduled since that
+backup are then treated as made by hand); one that can't be read at all stops
+the sync with an error rather than being overwritten. If `config.yaml` is
+broken by a hand edit, it's moved to `config.yaml.broken-<time>` and the last
+saved settings (`config.yaml.lastgood`) put back, so the UI still opens.
+Back up the `/data` volume itself too: if `state.json` is lost, the tool falls back to
 matching LSP events by channel + name + start minute, so unchanged events
 aren't duplicated (they are then treated as made by hand and no longer follow
 the sheet). Events edited or deleted in LSP would be created again, though, so
 keep the volume.
 
-**Errors show in the Status card.** If the Google Sheet can't be opened (unshared,
+**Errors show in the Status card** (and are alerted). If the Google Sheet can't be opened (unshared,
 key revoked, Google down), the pass fails with that error instead of reading as
 an empty sheet; a single tab that can't be read is skipped (its events show as
-**not in sheet**, which deletes nothing) and counted as an error. A request from
+**not in sheet**, which deletes nothing) and counted as an error.
+
+**LSP reads.** Each pass reads only the events that haven't finished
+(GetFilteredEvents with the Waiting, Queued, Recording and Canceled statuses),
+not each channel's whole history. The filter is checked against a full read
+the first time; if this LSP doesn't apply it exactly, the tool reads every
+event instead. A read that fails to connect, times out or gets a 502/503/504 is
+retried twice before the pass gives up on it; changes to LSP are never
+retried that way, since they may have worked. A booked channel LSP no longer
+lists (deleted, or recreated with a new id) is skipped rather than holding
+the event up; a channel recreated under the same name is booked afresh.
+
+**LSP checks.** The Status card (and an alert) warns when this machine's
+clock is more than a minute off LSP's (from its replies' `Date` header:
+"started" is judged by this clock), when LSP shows events as *Queued* more
+than 30 minutes before they start (the tool treats Queued as started, so it
+would stop applying sheet changes to them), and when LSP sends event times
+without a time zone. A request from
 the UI that would have to wait more than a few seconds for a running sync pass
 (Preview, the channel lists) says so instead of hanging; Run now and the other
 actions wait up to two minutes.
@@ -598,13 +687,15 @@ app/
   main.py        # headless runner (RUN_ONCE / cron)
   runtime.py     # logging + local time zone (TZ) shared by both entry points
   config.py      # config model, parse/validate, load/save
-  settings_store.py # live config on /data, seeded from the example
+  settings_store.py # live config on /data, seeded from the example; backups, self-repair
+  alerts.py      # webhook alerts when syncing fails or the sheet needs attention
   sheets.py      # Google fetch + pure parse_grid() / locate_rows() / inspect_grid()
   lsp_client.py  # Live Schedule Pro API client (auth, channels, events)
   sync.py        # plan() (read-only) + run_once() (creates / updates / locks)
   state.py       # tracked events, their LSP bookings and snapshots
   models.py      # ScheduledEvent
 tests/           # pytest suite (pure parsing + sync against a fake LSP)
+.github/workflows/tests.yml  # runs the tests on Python 3.12 on every push
 requirements.in  # direct dependencies; requirements.txt is the full pinned set
 config.example.yaml   # seed / documented defaults
 Dockerfile

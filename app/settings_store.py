@@ -13,10 +13,11 @@ import logging
 import os
 import shutil
 import threading
-from typing import Callable
+from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from .config import effective_password, load_raw, normalize_url, save_raw
+from .config import ConfigError, effective_password, load_raw, normalize_url, save_raw
+from .state import keep_daily_backup
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +76,8 @@ class SettingsStore:
         self.seed_path = seed_path
         # Re-entrant: update() holds it across load + save.
         self._lock = threading.RLock()
+        # Set when config.yaml was unreadable and the last good copy was put back.
+        self.load_error: Optional[str] = None
         self._ensure()
 
     def _ensure(self) -> None:
@@ -90,12 +93,39 @@ class SettingsStore:
             log.warning("No seed found at %s; created empty config %s", self.seed_path, self.path)
 
     def load(self) -> dict:
+        """The saved settings. If config.yaml was broken by hand (not valid
+        YAML), it is moved aside and the last good copy (saved with it on
+        every save) put back, so the tool and the web UI keep working."""
         with self._lock:
-            return load_raw(self.path)
+            try:
+                return load_raw(self.path)
+            except ConfigError as exc:
+                if not os.path.exists(self.path) or not os.path.exists(self._good_path):
+                    raise
+                try:
+                    good = load_raw(self._good_path)
+                except ConfigError:
+                    raise exc from None
+                aside = f"{self.path}.broken-{datetime.datetime.now(datetime.timezone.utc):%Y%m%dT%H%M%SZ}"
+                os.replace(self.path, aside)
+                shutil.copy2(self._good_path, self.path)
+                self.load_error = (f"config.yaml couldn't be read ({exc}); it was moved to "
+                                   f"{os.path.basename(aside)} and the last saved settings put back")
+                log.error("%s", self.load_error)
+                return good
+
+    @property
+    def _good_path(self) -> str:
+        return self.path + ".lastgood"
 
     def save(self, raw: dict) -> None:
         with self._lock:
             save_raw(self.path, raw)
+            try:
+                shutil.copy2(self.path, self._good_path)  # keeps owner-only permissions
+            except OSError as exc:
+                log.warning("Could not keep a copy of %s: %s", self.path, exc)
+            keep_daily_backup(self.path)
 
     def update(self, change: Callable[[dict], None]) -> dict:
         """Load, apply `change` (which edits the dict in place), and save, as

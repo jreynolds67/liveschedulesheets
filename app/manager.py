@@ -19,12 +19,13 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from .alerts import Alerter
 from .config import (Config, ConfigError, extract_spreadsheet_id, parse_config,
                      parse_lsp_settings, parse_row_picks, parse_sheet_settings)
 from .lsp_client import LspClient, LspError
 from .settings_store import SettingsStore
 from .sheets import SheetReader, inspect_grid
-from .state import State
+from .state import State, atomic_write
 from .sync import Syncer
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,12 @@ _WRITE_WAIT_SECONDS = 120
 _STUCK_SECONDS = 30 * 60
 # How often the watchdog checks the loop.
 _WATCHDOG_SECONDS = 60
+# Syncing counts as broken (/healthz/sync) once the last clean pass is this
+# many intervals old, and at least _STALE_MIN_SECONDS.
+_STALE_INTERVALS = 3
+_STALE_MIN_SECONDS = 45 * 60
+# Status file next to config.yaml: the last pass and what alerts were sent.
+STATUS_FILENAME = "status.json"
 
 
 class ManagerError(Exception):
@@ -72,8 +79,16 @@ class SyncManager:
 
         self._created_count = 0  # for status() while a sync holds the lock
         self._state_error: Optional[str] = None
-        self.last_run: Optional[dict] = None
-        self.last_error: Optional[str] = None
+        self._started = time.time()
+        # The last pass, the last one that ran without errors (epoch
+        # seconds), and the alerts sent: kept in the status file so a
+        # restart doesn't blank the Status card or repeat alerts.
+        saved = self._read_status()
+        self.last_run: Optional[dict] = saved.get("last_run")
+        self.last_error: Optional[str] = saved.get("last_error")
+        self.last_clean: Optional[float] = saved.get("last_clean")
+        self._last_ok: Optional[bool] = saved.get("last_ok")
+        self._alerter = Alerter(saved.get("alerts"))
         # Loop liveness, for the container health check.
         self._heartbeat = time.monotonic()
         self._interval = 900
@@ -133,7 +148,7 @@ class SyncManager:
         if self._state is not None and self._state.path == path:
             return self._state
         try:
-            state = State(path)
+            state = State(path, exclusive=True)
         except OSError as exc:
             raise ConfigError(f"Could not read the state file {path}: {exc}") from exc
         if state.load_error:
@@ -159,13 +174,82 @@ class SyncManager:
         # Problems that didn't raise (sheet unreadable, a tab failing, LSP
         # unreachable) still belong in the status card's error line.
         self.last_error = "; ".join(summary.get("problems") or []) or None
+        ok = not summary.get("errors")
+        self._pass_result(ok, self.last_error or "errors in the last pass",
+                          summary.get("warnings") if "warnings" in summary else None)
+
+    def _pass_result(self, ok: bool, why: str, warnings: Optional[list]) -> None:
+        """Record how a pass went, alert if that's news, and save it."""
+        self._last_ok = ok
+        if ok:
+            self.last_clean = time.time()
+        try:
+            self._alerter.pass_done(self._webhook(), ok, why, warnings)
+        except Exception:  # noqa: BLE001 - an alert must never break the loop
+            log.exception("Alerting failed")
+        self._write_status()
+
+    def _webhook(self) -> str:
+        try:
+            return str(((self.store.load().get("runtime") or {}).get("alert_webhook_url")
+                        or "")).strip()
+        except (ConfigError, OSError):
+            return ""
+
+    def send_test_alert(self) -> dict:
+        url = self._webhook()
+        if not url:
+            return {"ok": False, "error": "Set and save an alert webhook URL first"}
+        if not self._alerter.send(url, "LiveScheduleSheets test alert: alerts reach this channel."):
+            return {"ok": False, "error": "The webhook didn't accept it; see the log"}
+        return {"ok": True}
+
+    @property
+    def _status_path(self) -> str:
+        return os.path.join(os.path.dirname(self.store.path) or ".", STATUS_FILENAME)
+
+    def _read_status(self) -> dict:
+        try:
+            with open(self._status_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _write_status(self) -> None:
+        data = {"last_run": self.last_run, "last_error": self.last_error,
+                "last_clean": self.last_clean, "last_ok": self._last_ok,
+                "alerts": self._alerter.to_dict()}
+        try:
+            atomic_write(self._status_path, lambda fh: json.dump(data, fh, indent=2, default=str))
+        except (OSError, TypeError, ValueError) as exc:
+            log.warning("Could not save %s: %s", self._status_path, exc)
+
+    def sync_health(self) -> tuple[bool, str]:
+        """For monitoring (/healthz/sync): is syncing actually working? Not
+        when the last pass had errors, or no pass has run cleanly for a while
+        (Google key revoked, LSP login changed, LSP down...). Unlike
+        health(), this never restarts anything: a restart can't fix those."""
+        stale_after = max(_STALE_INTERVALS * self._interval, _STALE_MIN_SECONDS)
+        if self._last_ok is False:
+            return False, f"last sync failed: {self.last_error or 'see the Status card'}"
+        if self.last_clean is None:
+            if time.time() - self._started < stale_after:
+                return True, "starting: no sync pass yet"
+            return False, "no sync pass has run without errors"
+        age = time.time() - self.last_clean
+        if age > stale_after:
+            return False, f"no sync pass without errors for {int(age // 60)} minutes"
+        return True, "ok"
 
     # -- operations for the web UI -----------------------------------------
 
-    def preview(self) -> list[dict]:
+    def preview(self) -> dict:
         with self._locked(_READ_WAIT_SECONDS):
             _, syncer = self._components()
-            return [item.to_dict() for item in syncer.plan()]
+            items = [item.to_dict() for item in syncer.plan()]
+            return {"items": items, "warnings": [w["text"] for w in syncer.sheet_warnings],
+                    "errors": list(syncer.sheet_errors)}
 
     def run_now(self) -> dict:
         with self._locked(_WRITE_WAIT_SECONDS):
@@ -183,6 +267,11 @@ class SyncManager:
         with self._locked(_WRITE_WAIT_SECONDS):
             _, syncer = self._components()
             return syncer.unlock(record_id)
+
+    def unlock_all(self) -> dict:
+        with self._locked(_WRITE_WAIT_SECONDS):
+            _, syncer = self._components()
+            return syncer.unlock_all()
 
     def channels(self) -> list[dict]:
         return self._channels()[0]
@@ -265,16 +354,21 @@ class SyncManager:
                 raise
             cfg = reader.cfg
         allow = set(cfg.sheet.tabs)
+        # Tabs the tool has read on this sheet: one it hasn't (added or
+        # renamed since) is off until turned on (see SheetReader.read_events).
+        known = self._state.known_tabs(cfg.sheet.spreadsheet_id) if self._state else None
         out = []
         for t in meta["tabs"]:
             if t["hidden"]:
                 continue
             name = t["name"]
             ov = cfg.tab_overrides.get(name)
+            new = known is not None and not allow and name not in known
             out.append({
                 "name": name,
                 "gid": t["gid"],
-                "enabled": (True if ov is None else ov.enabled)
+                "new": new,
+                "enabled": (ov.enabled if ov is not None else not new)
                            and (name in allow if allow else True),
                 "in_allow_list": (name in allow) if allow else True,
                 "row_picks": len(ov.rows) if ov else 0,
@@ -355,7 +449,12 @@ class SyncManager:
             "busy": busy,
             "last_run": self.last_run,
             "last_error": self.last_error,
+            "last_clean": (datetime.fromtimestamp(self.last_clean, timezone.utc).isoformat()
+                           if self.last_clean else None),
+            "sync_ok": self.sync_health()[0],
+            "sync_health": self.sync_health()[1],
             "state_error": self._state_error,
+            "config_error_restored": self.store.load_error,
         }
 
     def health(self) -> tuple[bool, str]:
@@ -387,6 +486,7 @@ class SyncManager:
             ok, why = self.health()
             if not ok:
                 log.error("Sync loop unhealthy (%s); restarting", why)
+                self._alerter.send(self._webhook(), f"⚠️ LiveScheduleSheets is restarting: {why}")
                 self._on_unhealthy(why)
                 return
 
@@ -414,9 +514,11 @@ class SyncManager:
             except ConfigError as exc:
                 self.last_error = str(exc)
                 log.warning("Config not ready: %s", exc)
+                self._pass_result(False, self.last_error, None)
             except Exception as exc:  # noqa: BLE001
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 log.exception("Unhandled error during sync pass")
+                self._pass_result(False, self.last_error, None)
 
             self._sleep(interval)
         log.info("Background sync loop stopped")

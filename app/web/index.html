@@ -68,6 +68,9 @@
   .pill.no_room { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.ignore { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.tool { background:rgba(59,209,136,.15); color:var(--accent2); }
+  .warnlist { margin:4px 0 0; padding-left:20px; }
+  pre.activity { max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:8px 0 0;
+    font-size:12px; }
   .schedbar { display:flex; gap:14px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
   .schedbar label { display:flex; gap:6px; align-items:center; }
   .mini { padding:4px 8px; font-size:12px; }
@@ -243,6 +246,12 @@
       <div><label>Dry run</label>
         <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: syncs only log what they would create. Only Preview's <b>SEND TO LSP</b> and the delete buttons change LSP. Applies immediately.</span></div></div>
     </div>
+    <div><label>Alert webhook URL</label>
+      <div class="row"><input type="text" id="alert_webhook" placeholder="https://… (Slack, Teams / Power Automate, Discord…; blank = off)" />
+        <button id="btnTestAlert" class="ghost mini">Send test alert</button></div>
+      <div class="hint" style="margin-top:6px">Gets a message when syncing keeps failing (and when it recovers),
+        and once for each new problem in the sheet, such as a game whose time can't be read or a new tab waiting
+        to be turned on. Monitoring tools can also poll <code>/healthz/sync</code> (200 = working, 503 = not).</div></div>
     <details><summary>Advanced: labels &amp; date parsing</summary>
       <div class="body" style="padding:14px 0 0;">
         <div class="grid2">
@@ -301,6 +310,18 @@
       <button id="btnRefreshCreated" class="ghost">Refresh</button>
       <button id="btnDeleteCreated" class="danger">Delete tool-created events</button>
     </div>
+  </div></section>
+
+  <!-- Activity -->
+  <section class="card"><h2>Activity</h2><div class="body">
+    <div class="hint">The end of the tool's log, kept on the data volume across restarts and redeploys
+      (<code>/data/logs</code>, the last 25 MB): every event it created, updated, removed or locked, and
+      every alert it sent.</div>
+    <div class="schedbar hint">
+      <label><input type="checkbox" id="actChanges" checked> Only changes and alerts</label>
+    </div>
+    <pre id="activityBox" class="activity hint">…</pre>
+    <div class="btns"><button id="btnActivity" class="ghost">Refresh</button></div>
   </div></section>
 </main>
 
@@ -378,6 +399,7 @@ function fillForm(){
   get(cfg,"scheduling.sport_safety_caps",[]).forEach(c => addCapRow(c.sport, c.hours));
 
   $("poll_interval").value = get(cfg,"runtime.poll_interval_seconds",900);
+  $("alert_webhook").value = get(cfg,"runtime.alert_webhook_url","");
   $("dry_run").checked = !get(cfg,"runtime.live",false);
 
   $("lbl_event").value = csv(get(cfg,"sheet.labels.event_name",["EVENT"]));
@@ -474,6 +496,7 @@ function gather(){
 
   cfg.runtime = cfg.runtime || {};
   cfg.runtime.poll_interval_seconds = +$("poll_interval").value;
+  cfg.runtime.alert_webhook_url = $("alert_webhook").value.trim();
   delete cfg.runtime.live;  // the dry-run switch saves on its own (/api/dry-run)
 
   cfg.date_parsing = cfg.date_parsing || {};
@@ -545,7 +568,9 @@ function gatherTabs(){
   for (const [name, ov] of Object.entries(cfg.tab_overrides || {})){
     if (known && !known.has(name)) continue;
     const o = {...ov};
-    if (o.enabled !== false) delete o.enabled;
+    // A new tab is off unless turned on, so keep an explicit choice for it.
+    const isNew = (tabsList.find(t => t.name === name) || {}).new;
+    if (o.enabled !== false && !(isNew && o.enabled === true)) delete o.enabled;
     if (!o.rows || !Object.keys(o.rows).length) delete o.rows;
     if (Object.keys(o).length) out[name] = o;
   }
@@ -606,8 +631,9 @@ function renderTabPills(){
   box.innerHTML = tabsList.map(t => {
     const picks = Object.keys(((cfg.tab_overrides[t.name]||{}).rows)||{}).length;
     const off = !tabEnabled(t.name);
+    const isNew = t.new && (cfg.tab_overrides[t.name]||{}).enabled === undefined;
     return `<button class="tabpill ${t.name===insp.tab?"on":""} ${off?"off":""}" data-tab="${esc(t.name)}"
-      title="${off?"Tab is left out":""}">${esc(t.name)}${picks?`<span class="dot" title="${picks} row(s) chosen by hand">●</span>`:""}</button>`;
+      title="${isNew?"New tab: not read until you turn on Include this tab":off?"Tab is left out":""}">${esc(t.name)}${isNew?" <b>NEW</b>":""}${picks?`<span class="dot" title="${picks} row(s) chosen by hand">●</span>`:""}</button>`;
   }).join("");
   box.querySelectorAll(".tabpill").forEach(b => b.onclick = () => inspectTab(b.dataset.tab));
 }
@@ -859,6 +885,7 @@ async function refreshStatus(){
   let html = "";
   if (s.config_error) html += `<div style="color:var(--err)">⚠ ${esc(s.config_error)}</div>`;
   if (s.state_error) html += `<div style="color:var(--err)">⚠ ${esc(s.state_error)}</div>`;
+  if (s.config_error_restored) html += `<div style="color:var(--warn)">⚠ ${esc(s.config_error_restored)}</div>`;
   if (s.ui_auth === false) html += `<div style="color:var(--warn)">⚠ This page has no password: anyone on the network can change settings and delete LSP events. Set UI_USER / UI_PASSWORD on the container.</div>`;
   if (s.busy) html += `<div class="hint">A sync pass is running…</div>`;
   html += `<div>Loop: <b>${s.loop_running?"active":"stopped"}</b> · interval ${s.poll_interval_seconds??"?"}s · dry run ${s.dry_run?"on":"off"} · tool-created events tracked: <b>${s.created_count??0}</b></div>`;
@@ -868,6 +895,11 @@ async function refreshStatus(){
       + `${su.dry_run?"would remove":"removed"} ${su.deleted||0}, up to date ${su.skipped_existing}, locked ${su.locked||0}, `
       + `not in sheet ${su.not_in_sheet||0}, out-of-window ${su.skipped_window}, no-channel ${su.no_channel||0}, errors ${su.errors}</div>`; }
   if (s.last_error) html += `<div style="color:var(--err)">Last error: ${esc(s.last_error)}</div>`;
+  if (s.sync_ok === false) html += `<div style="color:var(--err)">⚠ Syncing isn't working: ${esc(s.sync_health)}</div>`;
+  else if (s.last_clean) html += `<div class="hint">Last sync without errors: ${new Date(s.last_clean).toLocaleString()}</div>`;
+  const warns = (s.last_run && s.last_run.summary && s.last_run.summary.warnings) || [];
+  if (warns.length) html += `<div style="color:var(--warn)">⚠ Needs attention (${warns.length}):<ul class="warnlist">`
+    + warns.map(w => `<li>${esc(w.text)}</li>`).join("") + `</ul></div>`;
   $("statusBox").innerHTML = html;
 }
 
@@ -878,16 +910,25 @@ let previewShown = false;
 async function loadPreview(){
   $("previewBox").textContent = "Loading preview…";
   const r = await api("GET","/api/preview");
-  if (r.ok){ renderPreview(r.items); previewShown = true; }
+  if (r.ok){ renderPreview(r.items, [...(r.errors||[]), ...(r.warnings||[])]); previewShown = true; }
   else $("previewBox").innerHTML = `<span style="color:var(--err)">${esc(r.error)}</span>`;
 }
 function refreshPreviewIfShown(){ if (previewShown) loadPreview(); }
-function renderPreview(items){
+let lastPreviewWarnings = [];
+function renderPreview(items, warnings){
   lastPreview = items || [];
-  if (!items.length){ $("previewBox").innerHTML = "No schedulable events found."; return; }
-  $("previewBox").innerHTML = `<table><thead><tr>
+  if (warnings !== undefined) lastPreviewWarnings = warnings;
+  const warnHtml = lastPreviewWarnings.length
+    ? `<div style="color:var(--warn)">⚠ Not scheduled / needs attention:<ul class="warnlist">`
+      + lastPreviewWarnings.map(w => `<li>${esc(w)}</li>`).join("") + `</ul></div>` : "";
+  if (!items.length){ $("previewBox").innerHTML = warnHtml + "No schedulable events found."; return; }
+  const nLocked = items.filter(i => i.locked).length;
+  const unlockAll = nLocked > 1
+    ? `<div class="btns"><button id="btnUnlockAll" class="ghost mini">Unlock all ${nLocked} locked events</button></div>` : "";
+  $("previewBox").innerHTML = warnHtml + unlockAll + `<table><thead><tr>
     <th>Status</th><th>Event</th><th>Tab</th><th>PCR</th><th>Start</th><th>End</th><th>Fix</th>
     </tr></thead><tbody></tbody></table>`;
+  if ($("btnUnlockAll")) $("btnUnlockAll").onclick = () => unlockAllEvents(nLocked);
   const tb = $("previewBox").querySelector("tbody");
   items.forEach((i, idx) => {
     const noRoom = !i.pcr;
@@ -958,6 +999,17 @@ async function sendEvent(i, btn){
     $("btnPreview").click();
   } else { toast("Send failed: " + r.error, 5000); btn.disabled = false; btn.textContent = "SEND TO LSP"; }
   refreshStatus(); loadScheduled();
+}
+
+async function unlockAllEvents(n){
+  if (!confirm(`Unlock all ${n} locked events?\n\nEach was changed by hand in Live Schedule Pro. Unlocking lets this tool `
+    + `manage them again: the next sync puts the sheet's names and times back, and re-creates bookings that were `
+    + `deleted in LSP. Unlock them one by one instead if any hand changes should stay.`)) return;
+  const r = await api("POST","/api/unlock-all");
+  if (r.ok) toast(`Unlocked ${r.unlocked}` + (r.failed.length ? `; still locked: ${r.failed.join("; ")}` : ""),
+                  r.failed.length ? 8000 : 3000);
+  else toast("Unlock failed: " + r.error, 5000);
+  $("btnPreview").click();
 }
 
 async function unlockEvent(i, btn){
@@ -1155,6 +1207,20 @@ $("btnRun").onclick = async () => {
   else toast("Run failed: " + r.error, 5000);
   refreshStatus(); loadScheduled(); refreshPreviewIfShown();
 };
+async function loadActivity(){
+  const r = await api("GET", `/api/activity${$("actChanges").checked ? "?changes=1" : ""}`);
+  const box = $("activityBox");
+  if (!r.ok){ box.textContent = r.error || "Could not read the log"; return; }
+  box.textContent = r.lines.length ? r.lines.slice().reverse().join("\n") : "Nothing logged yet.";
+}
+$("btnActivity").onclick = loadActivity;
+$("actChanges").onchange = loadActivity;
+
+$("btnTestAlert").onclick = async () => {
+  if (!await saveConfig()) return;
+  const r = await api("POST","/api/test-alert");
+  toast(r.ok ? "Test alert sent ✓" : "Test alert failed: " + r.error, r.ok ? 2600 : 5000);
+};
 
 (async function init(){
   await loadConfig();
@@ -1163,6 +1229,7 @@ $("btnRun").onclick = async () => {
   api("GET","/api/event-name-channels").then(renderVarChannels);
   loadTabs();
   loadScheduled();
+  loadActivity();
   setInterval(refreshStatus, 15000);
 })();
 </script>

@@ -140,3 +140,9 @@ runtime:
                                # switch; the UI's Save leaves it as it is.
   state_file: "/data/state.json"   # tracked events + lock state; mount a volume so it
                                    # survives restarts. Log level: LOG_LEVEL env var.
+  # Where to tell someone when syncing keeps failing (and when it recovers),
+  # and about each new problem in the sheet (a game whose time can't be read,
+  # a new tab waiting to be turned on...). A webhook taking a JSON POST: Slack,
+  # Microsoft Teams / Power Automate, Discord... (the message is sent as both
+  # "text" and "content"). Blank = no alerts; /healthz/sync can be polled too.
+  alert_webhook_url: ""

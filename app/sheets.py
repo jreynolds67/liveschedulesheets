@@ -59,7 +59,7 @@ class SheetReader:
         # cache_discovery=False avoids a noisy warning and a file-cache dependency.
         self.service = build("sheets", "v4", credentials=creds, cache_discovery=False)
 
-    def read_events(self) -> list[ScheduledEvent]:
+    def read_events(self, known_tabs: Optional[set] = None) -> list[ScheduledEvent]:
         """Every schedulable event on the enabled tabs.
 
         Raises SheetError if the sheet can't be opened at all (so a revoked
@@ -67,16 +67,26 @@ class SheetReader:
         sheet). A single tab that fails is skipped and named in
         `self.errors`; its tracked events then show as "not in sheet", which
         never deletes anything.
+
+        `known_tabs` are the tabs the tool has read before (None: not
+        recorded yet). A visible tab not among them, and not turned on in the
+        UI, is new (an added or renamed tab, "Copy of Basketball"...): it
+        isn't read until someone turns it on. `self.warnings` names those,
+        tab settings that match no tab any more, tabs whose rows can't be
+        found, and columns with a name but no usable date or time.
+        `self.read_tabs` lists the tabs read.
         """
         self.errors: list[str] = []
+        self.warnings: list[dict] = []
+        self.read_tabs: list[str] = []
         events: list[ScheduledEvent] = []
         for tab in self._tabs_to_read():
-            if not self._tab_enabled(tab):
-                log.info("Tab %r is disabled; skipping", tab)
+            if not self._tab_enabled(tab, known_tabs):
                 continue
+            self.read_tabs.append(tab)
             try:
                 grid = self.fetch_grid(tab)
-                events.extend(parse_grid(tab, grid, self.cfg))
+                events.extend(parse_grid(tab, grid, self.cfg, problems=self.warnings))
             except Exception as exc:  # noqa: BLE001 - one bad tab shouldn't kill the run
                 log.exception("Failed to read tab %r", tab)
                 self.errors.append(f"Could not read tab {tab!r}: {exc}")
@@ -91,9 +101,16 @@ class SheetReader:
         visible tab is read (auto-discovery).
         """
         try:
-            visible = self.visible_tabs()
+            tabs = self.sheet_meta()["tabs"]
         except Exception as exc:  # noqa: BLE001 - any Google failure
             raise SheetError(f"Could not open the Google Sheet: {exc}") from exc
+        visible = self.visible = [t["name"] for t in tabs if not t["hidden"]]
+        names = {t["name"] for t in tabs}
+        for tab in self.cfg.tab_overrides:
+            if tab not in names:
+                self.warnings.append(_warning(
+                    tab, f"Settings for tab “{tab}” match no tab in the sheet (renamed?): "
+                         "set the renamed tab up again under Sheet tabs & row mapping"))
 
         configured = list(self.cfg.sheet.tabs)
         if not configured:
@@ -164,20 +181,38 @@ class SheetReader:
         return fill_merges(resp.get("values", []), merges,
                            _col_letter_to_index(self.cfg.sheet.header_column))
 
-    def _tab_enabled(self, tab: str) -> bool:
+    def _tab_enabled(self, tab: str, known_tabs: Optional[set] = None) -> bool:
         override = self.cfg.tab_overrides.get(tab)
-        return True if override is None else override.enabled
+        if override is not None:
+            if not override.enabled:
+                log.info("Tab %r is turned off; skipping", tab)
+            return override.enabled
+        if known_tabs is not None and tab not in known_tabs and not self.cfg.sheet.tabs:
+            log.warning("New tab %r is not read until it is turned on in the UI", tab)
+            self.warnings.append(_warning(
+                tab, f"New tab “{tab}” isn't read until you turn on Include this tab "
+                     "(Sheet tabs & row mapping) and Save"))
+            return False
+        return True
 
 
 # ---------------------------------------------------------------------------
 # Pure parsing (no I/O) -- tested directly against a real workbook.
 # ---------------------------------------------------------------------------
 
-def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEvent]:
+def parse_grid(tab: str, grid: list[list[str]], cfg: Config,
+               problems: Optional[list] = None) -> list[ScheduledEvent]:
     """Turn one tab's cell grid into schedulable events.
 
     `grid` is row-major (grid[row][col]); cells are strings (empty for blanks).
+    `problems`, if given, gets a warning (see _warning) for a tab whose rows
+    can't be found and for each column that has an event name and a date and
+    time typed in but can't be scheduled (no AM/PM, no year...), so a typo
+    is reported instead of the game silently not being recorded. Blank or
+    TBD dates and times, games more than a day past, and columns ignored by
+    an event fix aren't reported.
     """
+    problems = problems if problems is not None else []
     if not grid:
         log.warning("Tab %r is empty", tab)
         return []
@@ -189,18 +224,20 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
     row_of = {fld: m.row for fld, m in matches.items()}
     for fld, m in matches.items():
         if m.method in ("keyword", "content", "moved", "stale"):
-            log.info("Tab %r: %s -> row %s (%s)", tab, fld,
-                     "none" if m.row is None else m.row + 1, m.note or m.method)
+            log.debug("Tab %r: %s -> row %s (%s)", tab, fld,
+                      "none" if m.row is None else m.row + 1, m.note or m.method)
 
-    if row_of["event_name"] is None:
-        log.error("Tab %r: no EVENT row found; skipping", tab)
-        return []
-    if row_of["date"] is None or row_of["time"] is None:
-        log.error("Tab %r: no DATE and start-time rows found; skipping", tab)
+    missing = [what for fld, what in (("event_name", "EVENT"), ("date", "DATE"),
+                                      ("time", "start time")) if row_of[fld] is None]
+    if missing:
+        log.warning("Tab %r: no %s row found; skipping", tab, " / ".join(missing))
+        problems.append(_warning(
+            tab, f"Tab “{tab}” is not read: no {' / '.join(missing)} row found. Pick the rows "
+                 "under Sheet tabs & row mapping, or turn the tab off if it holds no games"))
         return []
 
     if row_of["pcr"] is None:
-        log.warning("Tab %r: no PCR row; events will need a PCR assigned", tab)
+        log.debug("Tab %r: no PCR row; events will need a PCR assigned", tab)
 
     n_cols = max(len(r) for r in grid)
     out: list[ScheduledEvent] = []
@@ -209,6 +246,10 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
         ev = _parse_column(tab, grid, row_of, col, cfg, seen)
         if ev is not None:
             out.append(ev)
+        else:
+            why = _unschedulable(tab, grid, row_of, col, cfg, seen)
+            if why:
+                problems.append(_warning(tab, why, col + 1))
     for ev in out:
         ev.same_day = seen.get((name_key(ev.name), ev.event_date), 1)
 
@@ -471,6 +512,40 @@ def _parse_start(grid, row_of, col, cfg) -> Optional[datetime]:
     if not time_val:
         return None
     return _parse_datetime_string(f"{date_val} {time_val}", tz)
+
+
+def _warning(tab: str, text: str, column: Optional[int] = None) -> dict:
+    """A sheet problem for Status and Preview. `key` identifies it, so an
+    alert about it is sent once, not every pass."""
+    where = f"{tab}!{_col_index_to_letter(column - 1)}" if column else tab
+    return {"tab": tab, "column": column, "text": text, "key": f"{where}: {text}"}
+
+
+def _unschedulable(tab, grid, row_of, col, cfg, seen) -> Optional[str]:
+    """Why a column with an event name, and a date and time typed in, can't
+    be scheduled; None if it isn't worth reporting (blank or TBD, more than a
+    day past, or ignored by an event fix)."""
+    name = _cell(grid, row_of.get("event_name"), col)
+    date_raw = _cell(grid, row_of.get("date"), col)
+    time_raw = _cell(grid, row_of.get("time"), col)
+    skip = cfg.date_parsing.skip_values
+    if not (name and date_raw and time_raw) or date_raw.upper() in skip or time_raw.upper() in skip:
+        return None
+    date_str = _date_key(date_raw, cfg)
+    if date_str:
+        today = datetime.now(cfg.sheet.timezone).date()
+        if datetime.strptime(date_str, "%Y-%m-%d").date() < today - timedelta(days=1):
+            return None
+        occurrence = seen.get((name_key(name), date_str), 1) - 1
+        if any(o.ignore and o.date == date_str and o.name == name_key(name)
+               and o.occurrence == occurrence for o in cfg.event_overrides.get(tab, [])):
+            return None
+    where = f"{tab} column {_col_index_to_letter(col)}"
+    if _lacks_year(date_raw):
+        return f"“{name}” ({where}) isn't scheduled: the date “{date_raw}” has no year"
+    if _lacks_ampm(time_raw):
+        return f"“{name}” ({where}) isn't scheduled: the time “{time_raw}” has no AM/PM"
+    return f"“{name}” ({where}) isn't scheduled: can't read “{date_raw} {time_raw}” as a date and time"
 
 
 def _date_key(date_val: str, cfg) -> Optional[str]:

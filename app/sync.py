@@ -31,6 +31,7 @@ from dateutil import parser as dateparser
 
 from .config import Config
 from .lsp_client import LspClient, LspError
+from .lsp_client import event_status as _status
 from .models import ScheduledEvent, name_key
 from .runtime import LOCAL_TZ
 from .sheets import SheetError, SheetReader
@@ -54,11 +55,17 @@ ERROR = "error"
 # tool's event from one made again by hand with the same values.
 _SNAPSHOT_FIELDS = ("Name", "Start", "End", "ChannelId", "CreatedByDisplayName")
 
-# LSP's EventStatus values, in its enum order. Only a Waiting event is the
-# tool's to change: LSP has queued or started the others (or they ran), and a
+# LSP event statuses (see lsp_client.EVENT_STATUSES). Only a Waiting event is
+# the tool's to change: LSP has queued or started these (or they ran), and a
 # Canceled one was canceled by hand.
-_STATUSES = ("Waiting", "Queued", "Recording", "Complete", "Failed", "Timeout", "Canceled")
 _ACTIVE = {"queued", "recording", "complete", "failed", "timeout"}
+
+# LSP's clock and this machine's may differ by this much before it's worth
+# a warning ("started" is judged by this machine's clock).
+_CLOCK_SKEW_SECONDS = 60
+# A Queued event this far from its start suggests LSP queues events early,
+# which would freeze them (Queued counts as started).
+_EARLY_QUEUE = timedelta(minutes=30)
 
 # An event this close to its start counts as started: a pass takes a while,
 # and an update must never reach LSP after the recording has begun.
@@ -120,15 +127,17 @@ class PlanItem:
 
 
 class _LspView:
-    """Every event on a set of channels, fetched once per pass."""
+    """The unfinished events on a set of channels (finished ones aren't
+    needed, and a season of them adds up), fetched once per pass."""
 
     def __init__(self, lsp: LspClient, channel_ids):
         self.by_channel: dict[str, list[dict]] = {}
         self.by_id: dict[str, tuple[str, dict]] = {}
         self.failed: set[str] = set()
+        read = getattr(lsp, "get_current_events", None) or lsp.get_events_for_channel
         for cid in channel_ids:
             try:
-                evs = lsp.get_events_for_channel(cid)
+                evs = read(cid)
             except LspError:
                 log.exception("Could not list events for channel %s", cid)
                 self.failed.add(cid)
@@ -163,12 +172,22 @@ class Syncer:
         # Called as a pass makes progress, so a long pass isn't taken for a stuck one.
         self.heartbeat = heartbeat or (lambda: None)
         self.sheet_errors: list[str] = []
+        # Not errors, but someone should look: unreadable columns, new tabs,
+        # LSP behaving unexpectedly... ({"text", "key"}; see sheets._warning).
+        self.sheet_warnings: list[dict] = []
 
     # -- planning (read-only) ----------------------------------------------
 
     def plan(self) -> list[PlanItem]:
-        events = self.reader.read_events()
+        sheet_id = self.cfg.sheet.spreadsheet_id
+        known = self.state.known_tabs(sheet_id)
+        events = self.reader.read_events(known_tabs=known)
         self.sheet_errors = list(getattr(self.reader, "errors", None) or [])
+        self.sheet_warnings = list(getattr(self.reader, "warnings", None) or [])
+        # A sheet read for the first time: every tab it has now counts as
+        # known, so only tabs added (or renamed) later wait to be turned on.
+        self.state.note_tabs(sheet_id, getattr(self.reader, "visible", None) or []
+                             if known is None else getattr(self.reader, "read_tabs", None) or [])
         if not events and not self.state.events:
             return []
 
@@ -176,8 +195,13 @@ class Syncer:
         by_pcr = self._resolve_channels(channels)
         names = {c["Id"]: c.get("Name") or c["Id"] for c in channels if c.get("Id")}
         wanted = {cid for found in by_pcr.values() for cid, _ in found}
-        wanted |= {cid for rec in self.state.events.values() for cid in rec.get("bookings", {})}
-        view = _LspView(self.lsp, wanted)
+        booked = {cid for rec in self.state.events.values() for cid in rec.get("bookings", {})}
+        # Booked channels LSP no longer lists (deleted, or recreated with a
+        # new id): not read, so an event booked there isn't stuck on "could
+        # not read LSP" for good. Their bookings are kept, in case the
+        # channel is only missing from this one reply.
+        self._gone = {cid for cid in booked if cid not in names}
+        view = _LspView(self.lsp, wanted | (booked - self._gone))
         self._view = view  # _execute rebaselines snapshots from it
         # LSP event id -> the record whose tool-made booking it is, so one
         # sheet event never takes another's event for a hand-made one.
@@ -203,11 +227,53 @@ class Syncer:
                 item = self._plan_not_in_sheet(rid, rec, names, view, now)
                 if item:
                     items.append(item)
+        # Games that are over (and whose LSP events are) need nothing more:
+        # listing them all season would bury what does.
+        items = [i for i in items if not self._finished(i, now)]
         _note_overlaps(items, view)
+        self.sheet_warnings += self._lsp_warnings(view, now)
         for item in items:
             if item.event.note:
                 item.message = "; ".join(m for m in (item.message, item.event.note) if m)
         return items
+
+    def _lsp_warnings(self, view: _LspView, now: datetime) -> list[dict]:
+        """LSP behaving in ways the sync relies on it not to (see the README),
+        as warnings for Status and alerts."""
+        out = []
+        skew = getattr(self.lsp, "clock_skew", None)
+        if skew is not None and abs(skew) > _CLOCK_SKEW_SECONDS:
+            out.append({"key": "clock", "text": (
+                f"This server's clock is {abs(skew):.0f} seconds "
+                f"{'ahead of' if skew > 0 else 'behind'} LSP's: check NTP on both. When an "
+                "event has started is judged by this clock")})
+        evs = [e for evs in view.by_channel.values() for e in evs]
+        early = [e for e in evs if _status(e) == "queued"
+                 and (s := _parse_utc(e.get("Start"))) and s > now + _EARLY_QUEUE]
+        if early:
+            out.append({"key": "queued-early", "text": (
+                f"LSP shows {len(early)} event(s) as Queued more than "
+                f"{int(_EARLY_QUEUE.total_seconds() // 60)} minutes before they start "
+                f"(e.g. “{early[0].get('Name')}”). The tool treats Queued events as started and "
+                "stops applying sheet changes to them; if LSP queues events early, that needs "
+                "changing in the tool")})
+        naive = next((e for e in evs if isinstance(e.get("Start"), str)
+                      and (p := _parse_any(e["Start"])) and p.tzinfo is None), None)
+        if naive:
+            out.append({"key": "naive-times", "text": (
+                f"LSP sends event times without a time zone (e.g. “{naive['Start']}”), so the "
+                "tool can't tell UTC from local time; same-named games exactly the UTC offset "
+                "apart could be confused")})
+        for w in out:
+            log.warning("%s", w["text"])
+        return out
+
+    def _finished(self, item: PlanItem, now: datetime) -> bool:
+        if item.status not in (EXISTS, OUT_OF_WINDOW, NO_CHANNEL) or item.event.end > now:
+            return False
+        rec = self.state.events.get(item.record_id) if item.record_id else None
+        end = _parse_utc(rec.get("end")) if rec else None
+        return rec is None or (end is not None and end < now)
 
     def _match(self, events: list[ScheduledEvent], now: datetime) -> dict[int, str]:
         """Pair sheet events with tracked records: index -> record id.
@@ -276,13 +342,13 @@ class Syncer:
         """A sheet event the tool isn't tracking yet."""
         name = ev.lsp_name(self.cfg.scheduling.event_name_prefix)
         chans = by_pcr.get(ev.pcr) or []
-        if not chans:
-            return PlanItem(ev, name, NO_CHANNEL,
-                            message=f"No LSP channels match PCR {ev.pcr or '(none)'}")
         if not self._within_window(ev):
             return PlanItem(ev, name, OUT_OF_WINDOW,
                             [Target(cid, cname, OUT_OF_WINDOW) for cid, cname in chans],
                             message="Start is outside the active window")
+        if not chans:
+            return PlanItem(ev, name, NO_CHANNEL,
+                            message=f"No LSP channels match PCR {ev.pcr or '(none)'}")
 
         targets = [self._new_target(cid, cname, name, ev, view, planned_keys)
                    for cid, cname in chans]
@@ -415,6 +481,10 @@ class Syncer:
                                       f"Will update {', '.join(diffs)}" if diffs else "Up to date",
                                       event_id=event_id))
         for cid, b in bookings.items():
+            if cid in getattr(self, "_gone", ()):
+                targets.append(Target(cid, cname(cid), EXISTS, _GONE,
+                                      event_id=b.get("event_id")))
+                continue
             if cid in wanted or not b.get("by_tool"):
                 continue
             # By where it is now, in case LSP gave the event a new id.
@@ -440,7 +510,7 @@ class Syncer:
             return PlanItem(ev, name, ERROR, targets, record_id=rid,
                             message="Could not read LSP; skipped this pass")
         # Channels left as they are although they don't match the sheet.
-        notes = [(n, why) for why in (_DUPLICATE, _OWNED, _HAND_DIFFERS)
+        notes = [(n, why) for why in (_DUPLICATE, _OWNED, _HAND_DIFFERS, _GONE)
                  if (n := sum(t.message == why for t in targets))]
         if not (counts[CREATE] or counts[UPDATE] or counts[DELETE]):
             return PlanItem(ev, name, EXISTS, targets, record_id=rid,
@@ -486,7 +556,7 @@ class Syncer:
         Canceling the event in LSP, or setting its event-name variable to
         something the tool didn't put there, is a hand edit too."""
         for cid, b in rec.get("bookings", {}).items():
-            if not b.get("by_tool"):
+            if not b.get("by_tool") or cid in getattr(self, "_gone", ()):
                 continue  # hand-made bookings are never ours to compare
             label = b.get("channel_name") or cid
             if cid in view.failed:
@@ -554,6 +624,7 @@ class Syncer:
         summary["parsed"] = sum(i.status != NOT_IN_SHEET for i in items)
         summary["errors"] += len(self.sheet_errors)
         summary["problems"].extend(self.sheet_errors)
+        summary["warnings"] = self.sheet_warnings
         try:
             self._execute(items, summary, live=not self.cfg.runtime.dry_run)
             self._prune()
@@ -607,10 +678,13 @@ class Syncer:
         rec = self.state.record(record_id)
         if rec is None:
             raise LspError("That event isn't tracked any more — refresh the preview")
-        view = _LspView(self.lsp, set(rec.get("bookings", {})))
+        exists = {c.get("Id") for c in self.lsp.get_all_channels()}
+        view = _LspView(self.lsp, set(rec.get("bookings", {})) & exists)
         if view.failed:
             raise LspError("Could not read LSP; try again")
-        hits = {cid: _locate(b, cid, view) for cid, b in rec["bookings"].items() if b.get("by_tool")}
+        # Bookings on channels LSP no longer lists are left as they are.
+        hits = {cid: _locate(b, cid, view) for cid, b in rec["bookings"].items()
+                if b.get("by_tool") and cid in exists}
         canceled = [rec["bookings"][cid].get("channel_name") or cid for cid, hit in hits.items()
                     if hit and hit[0] == cid and _status(hit[1]) == "canceled"]
         if canceled:
@@ -632,6 +706,20 @@ class Syncer:
         self.state.save()
         log.info("Unlocked %r; the sheet is applied to it again", rec.get("lsp_name") or rec["name"])
         return {"name": rec.get("lsp_name") or rec["name"]}
+
+    def unlock_all(self) -> dict:
+        """Unlock every locked event (after an LSP-wide change, say, that
+        locked them all). Ones that can't be unlocked (canceled in LSP) are
+        left locked and named."""
+        out = {"unlocked": 0, "failed": []}
+        for rid in [rid for rid, rec in self.state.events.items() if rec.get("locked")]:
+            try:
+                self.unlock(rid)
+                out["unlocked"] += 1
+            except LspError as exc:
+                rec = self.state.events.get(rid) or {}
+                out["failed"].append(f"{rec.get('lsp_name') or rec.get('name')}: {exc}")
+        return out
 
     def _execute(self, items: list[PlanItem], summary: dict, live: bool, force: bool = False) -> None:
         """Apply `items` to LSP (or just log them when not `live`), recording
@@ -655,7 +743,7 @@ class Syncer:
                 continue
             if item.status == NO_CHANNEL:
                 summary["no_channel"] += 1
-                log.warning("%s: %s", item.lsp_name, item.message)
+                log.info("%s: %s", item.lsp_name, item.message)
                 continue
             if item.status == NOT_IN_SHEET:
                 summary["not_in_sheet"] += 1
@@ -1027,7 +1115,10 @@ class Syncer:
 
         events, all_ids = [], set()
         for channel_id, pcrs in pcrs_by_channel.items():
-            for e in self.lsp.get_events_for_channel(channel_id):
+            # Finished events are only needed when asked for (past_days).
+            read = (getattr(self.lsp, "get_current_events", None) if past_days <= 0
+                    else None) or self.lsp.get_events_for_channel
+            for e in read(channel_id):
                 all_ids.add(e.get("Id"))
                 end = _parse_utc(e.get("End") or e.get("Start"))
                 if end is None or end < cutoff:
@@ -1077,9 +1168,13 @@ class Syncer:
                    "skipped_started": 0}
         now = datetime.now(timezone.utc)
         created = self.state.tool_created()
-        view = _LspView(self.lsp, {info["channel_id"] for _, info in created})
+        exists = {c.get("Id") for c in self.lsp.get_all_channels()}
+        self._gone = {info["channel_id"] for _, info in created} - exists
+        view = _LspView(self.lsp, {info["channel_id"] for _, info in created} - self._gone)
         for ref, info in created:
             event_id = info.get("event_id")
+            if info["channel_id"] in self._gone:
+                continue  # its channel is gone from LSP, and the event with it
             start = _parse_utc(info.get("start"))
             hit = view.by_id.get(event_id)
             if (start is None or start <= now + START_MARGIN
@@ -1161,6 +1256,7 @@ _COUNTER = {CREATE: "created", UPDATE: "updated", DELETE: "deleted"}
 _DUPLICATE = "another LSP event already has this name and start there; left as is"
 _OWNED = "already in LSP for another sheet event this tool tracks; left as is"
 _HAND_DIFFERS = "made by hand in LSP and differs from the sheet; left alone"
+_GONE = "channel no longer in LSP; skipped"
 
 
 def _note_overlaps(items: list[PlanItem], view: _LspView) -> None:
@@ -1200,7 +1296,7 @@ def _note_overlaps(items: list[PlanItem], view: _LspView) -> None:
 def _summary(dry_run: bool) -> dict:
     return {"parsed": 0, "created": 0, "updated": 0, "deleted": 0, "skipped_existing": 0,
             "locked": 0, "not_in_sheet": 0, "skipped_window": 0, "no_channel": 0,
-            "errors": 0, "dry_run": dry_run, "problems": []}
+            "errors": 0, "dry_run": dry_run, "problems": [], "warnings": []}
 
 
 def _event_id(result) -> Optional[str]:
@@ -1347,16 +1443,6 @@ def _locate(b: dict, cid: str, view: _LspView) -> Optional[tuple[str, dict]]:
     return None
 
 
-def _status(e: Optional[dict]) -> str:
-    """An LSP event's status, lowercase ("" if unknown). LSP sends the
-    EventStatus name; a number is taken as its position in the enum."""
-    s = (e or {}).get("Status")
-    if isinstance(s, int) and not isinstance(s, bool) and 0 <= s < len(_STATUSES):
-        s = _STATUSES[s]
-    s = str(s or "").strip().lower()
-    return "canceled" if s == "cancelled" else s
-
-
 def _live_status(rec: dict, view: _LspView) -> str:
     """The status of one of the record's tool-made events that LSP has
     queued, started or finished ("" if none), whatever its times say."""
@@ -1419,6 +1505,13 @@ def _same_lsp_time(a, b) -> bool:
 
 def _minute_key(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M")
+
+
+def _parse_any(value) -> Optional[datetime]:
+    try:
+        return dateparser.isoparse(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def _parse_utc(value) -> Optional[datetime]:

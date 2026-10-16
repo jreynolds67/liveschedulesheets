@@ -288,7 +288,7 @@ def test_state_is_saved_after_each_write_and_shutdown_stops_the_pass(make_syncer
 
 def test_unreadable_sheet_fails_the_pass(make_syncer, lsp):
     class Broken(FakeReader):
-        def read_events(self):
+        def read_events(self, known_tabs=None):
             raise SheetError("Could not open the Google Sheet: HttpError 403")
 
     s = make_syncer([])
@@ -713,3 +713,56 @@ def test_overlapping_games_on_one_channel_are_flagged(make_syncer, lsp):
     assert all(i.status == CREATE for i in items)
     assert all("overlaps “BSB vs Duke”" in i.message for i in items)
     assert "overlaps" not in make_syncer([sheet_event(pcr="B")]).plan()[0].message
+
+
+# -- operations: channels gone from LSP, finished games, LSP warnings ------------
+
+def test_channel_deleted_in_lsp_doesnt_freeze_its_events(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    lsp.channels = [c for c in lsp.channels if c["Id"] != "a2"]  # deleted in LSP
+    real = lsp.get_events_for_channel
+
+    def gone_is_an_error(cid):
+        if cid == "a2":
+            raise LspError("GetEvents failed for a2 (404)")
+        return real(cid)
+
+    lsp.get_events_for_channel = gone_is_an_error
+    s = make_syncer([sheet_event(pcr="A", hour=20)])
+    [item] = s.plan()
+    assert item.status == UPDATE and "channel no longer in LSP" in item.message
+    summary = s.run_once()
+    assert (summary["updated"], summary["errors"]) == (1, 0)
+    # ...and a channel recreated under the same name (new id) gets the event.
+    lsp.channels.append({"Id": "a3", "Name": "02 - PCR A CLEAN"})
+    assert make_syncer([sheet_event(pcr="A", hour=20)]).run_once()["created"] == 1
+
+
+def test_finished_games_drop_out_of_the_plan(make_syncer, lsp):
+    s = make_syncer([sheet_event(days=-3), sheet_event(name="VB vs Duke", days=-30, pcr=""),
+                     sheet_event(name="VB vs Pitt", days=3)])
+    assert [(i.event.name, i.status) for i in s.plan()] == [("VB vs Pitt", CREATE)]
+
+
+def test_lsp_surprises_are_warnings(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="B")]).run_once()
+    [e] = lsp.events.values()
+    e["Status"] = "Queued"  # days before it starts
+    e["Start"] = e["Start"][:19]  # no time zone
+    lsp.clock_skew = 300
+    s = make_syncer([sheet_event(pcr="B")])
+    s.plan()
+    keys = {w["key"] for w in s.sheet_warnings}
+    assert keys == {"clock", "queued-early", "naive-times"}
+    assert s.run_once()["warnings"]
+
+
+def test_unlock_all(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="B"), sheet_event(name="VB vs Duke", pcr="B", days=3)]).run_once()
+    for e in lsp.events.values():
+        e["Name"] += " (by hand)"
+    make_syncer([sheet_event(pcr="B"), sheet_event(name="VB vs Duke", pcr="B", days=3)]).run_once()
+    s = make_syncer([])
+    assert all(r["locked"] for r in s.state.events.values())
+    assert s.unlock_all() == {"unlocked": 2, "failed": []}
+    assert not any(r["locked"] for r in make_syncer([]).state.events.values())
