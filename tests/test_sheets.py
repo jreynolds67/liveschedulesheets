@@ -150,6 +150,11 @@ def test_room_normalisation():
     assert _normalize_room("Control Room B") == "B"
     assert _normalize_room("TBD") is None
     assert _normalize_room("PCRA") == "A"
+    # The C in "PCR" is never taken for the room.
+    for cell in ("PCR B", "pcr b", "PCRB", "PCR-B", "PCR: B", "PCR  B", "CR B"):
+        assert _normalize_room(cell) == "B", cell
+    assert _normalize_room("PCRC") == "C" and _normalize_room("PCR D (backup)") == "D"
+    assert _normalize_room("PCR") is None
     assert _normalize_room("CR3") is None
     assert _normalize_room("HOME") is None
     assert _normalize_room("SHADOW") is None
