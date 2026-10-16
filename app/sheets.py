@@ -27,7 +27,7 @@ from typing import Optional
 from dateutil import parser as dateparser
 
 from .config import ROW_FIELDS, Config
-from .models import ScheduledEvent
+from .models import ScheduledEvent, name_key
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +151,18 @@ class SheetReader:
             )
             .execute(num_retries=_GOOGLE_RETRIES)
         )
-        return resp.get("values", [])
+        # Google returns a merged cell's value in its first cell only; a DATE
+        # merged across a doubleheader's two columns would leave game 2
+        # without one.
+        meta = (
+            self.service.spreadsheets()
+            .get(spreadsheetId=self.cfg.sheet.spreadsheet_id, ranges=[a1_tab(tab)],
+                 fields="sheets(merges)")
+            .execute(num_retries=_GOOGLE_RETRIES)
+        )
+        merges = ((meta.get("sheets") or [{}])[0] or {}).get("merges") or []
+        return fill_merges(resp.get("values", []), merges,
+                           _col_letter_to_index(self.cfg.sheet.header_column))
 
     def _tab_enabled(self, tab: str) -> bool:
         override = self.cfg.tab_overrides.get(tab)
@@ -199,7 +210,7 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config) -> list[ScheduledEv
         if ev is not None:
             out.append(ev)
     for ev in out:
-        ev.same_day = seen.get((ev.name.strip().lower(), ev.event_date), 1)
+        ev.same_day = seen.get((name_key(ev.name), ev.event_date), 1)
 
     out = _apply_event_overrides(tab, out, cfg)
     log.info("Tab %r: parsed %d schedulable event(s)", tab, len(out))
@@ -287,7 +298,7 @@ def locate_rows(
     for fld in ROW_FIELDS:
         if fld in out:
             continue
-        aliases = {a.strip().lower() for a in getattr(labels, fld)}
+        aliases = {clean_text(a).lower() for a in getattr(labels, fld)}
         for r, h in enumerate(headers):
             if h and h in aliases and r not in claimed:
                 take(fld, r, "label")
@@ -317,7 +328,7 @@ def locate_rows(
         for r, row in enumerate(grid):
             if r in claimed:
                 continue
-            vals = [str(v).strip() for c, v in enumerate(row) if c > label_col and str(v).strip()]
+            vals = [clean_text(v) for c, v in enumerate(row) if c > label_col and clean_text(v)]
             hits = sum(1 for v in vals if check(v))
             if hits >= 2 and hits >= 0.7 * len(vals) and hits > best_hits:
                 best, best_hits = r, hits
@@ -356,7 +367,7 @@ def _resolve_pick(headers: list[str], pick) -> tuple[Optional[int], str, str]:
     header is gone, fall back to the row number and flag it as stale.
     """
     row = pick.row - 1
-    want = pick.label.strip().lower()
+    want = clean_text(pick.label).lower()
     here = headers[row] if row < len(headers) else ""
     if not want or here == want:
         return (row if row < len(headers) else None), "manual", ""
@@ -373,7 +384,18 @@ def _resolve_pick(headers: list[str], pick) -> tuple[Optional[int], str, str]:
 def _cell(grid, row: Optional[int], col: int) -> str:
     if row is None or row >= len(grid) or col >= len(grid[row]):
         return ""
-    return str(grid[row][col]).strip()
+    return clean_text(grid[row][col])
+
+
+# Characters that show as nothing in Sheets but break matching (zero-width
+# spaces, joiners, a byte-order mark, soft hyphens), often pasted in with text.
+_INVISIBLE_RE = re.compile("[\u00ad\u200b-\u200d\u2060\ufeff]")
+
+
+def clean_text(value) -> str:
+    """A cell as text: invisible characters dropped, and runs of spaces,
+    non-breaking spaces and line breaks (Alt+Enter) made one space."""
+    return " ".join(_INVISIBLE_RE.sub("", str(value)).split())
 
 
 def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]:
@@ -387,7 +409,7 @@ def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]
     date_str = _date_key(_cell(grid, row_of.get("date"), col), cfg)
     occurrence = 0
     if date_str:
-        bucket = (name.strip().lower(), date_str)
+        bucket = (name_key(name), date_str)
         occurrence = seen.get(bucket, 0)
         seen[bucket] = occurrence + 1
 
@@ -412,7 +434,24 @@ def _parse_column(tab, grid, row_of, col, cfg, seen) -> Optional[ScheduledEvent]
         event_date=date_str,
         occurrence=occurrence,
         sheet_start=sheet_start,
+        note=_called_off_note(grid, row_of, col),
     )
+
+
+# Words that say a game may be off. Such a column is still scheduled (a
+# makeup game's cell often says "PPD from 9/10", and a missed recording can't
+# be redone) but Preview says so, so someone checks it.
+_CALLED_OFF_RE = re.compile(r"\b(cancell?ed|cancel|postponed?|ppd|suspended|rain(?:ed)? out)\b",
+                            re.IGNORECASE)
+
+
+def _called_off_note(grid, row_of, col) -> str:
+    for fld in ("event_name", "date", "time"):
+        m = _CALLED_OFF_RE.search(_cell(grid, row_of.get(fld), col))
+        if m:
+            return (f"the sheet says “{m.group(0)}”: check it is still on "
+                    "(if not, cancel or delete it in LSP)")
+    return ""
 
 
 def _parse_start(grid, row_of, col, cfg) -> Optional[datetime]:
@@ -492,7 +531,7 @@ def inspect_grid(
     row_of = {fld: m.row for fld, m in effective.items()}
 
     # Trim trailing blank rows/cols (Football has ~990 mostly-empty rows).
-    last_row = max((r for r, row in enumerate(grid) if any(str(v).strip() for v in row)), default=-1)
+    last_row = max((r for r, row in enumerate(grid) if any(clean_text(v) for v in row)), default=-1)
     n_rows = min(last_row + 1, _MAX_PREVIEW_ROWS)
     n_cols_total = max((len(r) for r in grid[: last_row + 1]), default=0)
     n_cols = min(n_cols_total, _MAX_PREVIEW_COLS)
@@ -570,7 +609,7 @@ def _apply_event_overrides(tab, events, cfg) -> list[ScheduledEvent]:
     out = []
     for ev in events:
         ov = next((o for o in overrides
-                   if o.date == ev.event_date and o.name == ev.name.strip().lower()
+                   if o.date == ev.event_date and o.name == name_key(ev.name)
                    and ev.is_same_game(o.occurrence, o.same_day, o.sheet_start)), None)
         if ov is None:
             out.append(ev)
@@ -590,6 +629,29 @@ def _apply_event_overrides(tab, events, cfg) -> list[ScheduledEvent]:
 
 
 # -- small helpers ----------------------------------------------------------
+
+def fill_merges(grid: list[list[str]], merges: list[dict], label_col: int = 0) -> list[list[str]]:
+    """Copy a merged cell's value (Google returns it in the first cell only)
+    across the event columns it spans, as it shows in the sheet: a DATE or
+    PCR merged over a doubleheader's two columns applies to both games.
+
+    Only along its first row: a cell merged down into the rows below would
+    otherwise fill another field's row (a name landing in GAME START). Merges
+    starting in the label column (section banners) are left alone. `merges`
+    are Sheets API GridRanges (0-based, end exclusive)."""
+    n_cols = max((len(r) for r in grid), default=0)
+    for m in merges or []:
+        r, c0 = m.get("startRowIndex", 0), m.get("startColumnIndex", 0)
+        c1 = min(m.get("endColumnIndex", n_cols), n_cols)
+        if c0 <= label_col or r >= len(grid) or c0 >= len(grid[r]) or not clean_text(grid[r][c0]):
+            continue
+        row = grid[r]
+        row.extend([""] * (c1 - len(row)))
+        for c in range(c0 + 1, c1):
+            if not clean_text(row[c]):
+                row[c] = row[c0]
+    return grid
+
 
 def a1_tab(tab: str) -> str:
     """A whole-tab A1 range: the name quoted, with any ' doubled, so tabs

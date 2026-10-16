@@ -5,7 +5,7 @@ import pytest
 
 from app.config import parse_config
 from app.sheets import (SheetError, SheetReader, _first_time_token, _normalize_room, a1_tab,
-                        inspect_grid, locate_rows, parse_grid)
+                        fill_merges, inspect_grid, locate_rows, parse_grid)
 
 from .conftest import raw_config
 
@@ -195,3 +195,41 @@ def test_event_fix_without_a_game_count_matches_by_number(tmp_path):
     cfg = cfg_for(tmp_path, event_overrides={"Spring": [
         {"date": "2026-09-12", "event": "BSB vs Duke", "occurrence": 1, "control_room": "D"}]})
     assert [e.pcr for e in parse_grid("Spring", DOUBLEHEADER, cfg)] == ["A", "D"]
+
+
+def test_stray_spaces_and_invisible_characters_are_ignored(tmp_path):
+    grid = [["DATE ", "9/12/2026\u00a0"], ["EVENT", " VB  vs\nPitt "],
+            ["GAME\u00a0START", "7:00\u00a0PM"], ["\u200bCONTROL ROOM", "\u200bB"]]
+    [ev] = parse_grid("Fall", grid, cfg_for(tmp_path))
+    assert (ev.name, ev.pcr, ev.sheet_start) == ("VB vs Pitt", "B", "2026-09-12T19:00")
+
+
+def test_event_fix_matches_whatever_the_spacing(tmp_path):
+    cfg = cfg_for(tmp_path, event_overrides={"Fall": [
+        {"date": "2026-09-12", "event": "VB vs  Pitt", "control_room": "D"}]})
+    grid = [["DATE", "9/12/2026"], ["EVENT", "VB  vs Pitt"], ["GAME START", "7:00 PM"],
+            ["CONTROL ROOM", "B"]]
+    assert [e.pcr for e in parse_grid("Fall", grid, cfg)] == ["D"]
+
+
+def test_merged_cells_apply_to_every_column_they_span():
+    grid = [["DATE", "9/12/2026"], ["EVENT", "BSB vs Duke", "BSB vs Duke"],
+            ["GAME START", "1:00 PM", "6:00 PM"], ["CONTROL ROOM", "A"], ["NOTES", "rain"],
+            ["BANNER"]]
+    merges = [{"startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 1, "endColumnIndex": 3},
+              {"startRowIndex": 3, "endRowIndex": 5, "startColumnIndex": 1, "endColumnIndex": 3},
+              {"startRowIndex": 5, "endRowIndex": 6, "startColumnIndex": 0, "endColumnIndex": 3}]
+    out = fill_merges(grid, merges)
+    assert out[0] == ["DATE", "9/12/2026", "9/12/2026"]
+    assert out[3] == ["CONTROL ROOM", "A", "A"]
+    assert out[4] == ["NOTES", "rain"]   # merged down: not copied into another row
+    assert out[5] == ["BANNER"]          # starts in the label column: left alone
+
+
+def test_postponed_or_cancelled_games_are_still_scheduled_but_flagged(tmp_path):
+    grid = [["DATE", "9/12/2026", "9/13/2026", "9/14/2026"],
+            ["EVENT", "VB vs Pitt", "VB vs Duke - CANCELLED", "Cancer Awareness Night"],
+            ["GAME START", "7:00 PM - PPD", "7:00 PM", "7:00 PM"], ["CONTROL ROOM", "B", "B", "B"]]
+    pitt, duke, awareness = parse_grid("Fall", grid, cfg_for(tmp_path))
+    assert "“PPD”" in pitt.note and "“CANCELLED”" in duke.note
+    assert awareness.note == ""

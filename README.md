@@ -116,8 +116,9 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   creates it again, so tick **Ignore** on it in Preview to keep it out.
 - **Clean up test events** — the same card can **delete just the upcoming
   events this tool created** from LSP in one click. Events already in LSP (or
-  created by hand), events that have started (in progress or past), and locked
-  events are never touched.
+  created by hand), events that have started (in progress or past, or started
+  early by hand in LSP), and locked events (or ones changed by hand since the
+  last sync) are never touched.
 
 Everything is saved to `config.yaml` on the `/data` volume; the background loop
 picks up changes automatically. If the settings were saved from another
@@ -189,6 +190,25 @@ numbers shift, so they're matched by start time instead: game 1's fix, or its
 LSP event, never slides onto game 2. (If the count *and* the time change at
 once, a fix no longer applies; set it again from Preview.)
 
+**Stray spacing is ignored.** Extra spaces, non-breaking spaces, line breaks
+inside a cell (Alt+Enter) and invisible characters pasted in with text (zero-
+width spaces) are cleaned out of every cell before it's read, so `VB  vs Pitt`
+is the event `VB vs Pitt`, and a `GAME START` label typed with a non-breaking
+space still matches. Event names are compared ignoring case and spacing, so a
+hand-made LSP event `vb vs pitt` isn't booked a second time.
+
+**Merged cells** count for every event column they span: a DATE or PCR cell
+merged across a doubleheader's two columns applies to both games. (Google
+returns a merged cell's value in its first cell only; the tool reads the tab's
+merges and fills them in along the row. A cell merged down into the rows
+below, or a banner merged from column A, is not copied.)
+
+**Postponed or cancelled?** A column whose event, date or time cell says
+`PPD`, `Postponed`, `Cancelled`, `Suspended` or `Rain out` is still scheduled,
+since a makeup game's cell often says "PPD from 9/10" and a missed recording
+can't be redone, but Preview flags it ("the sheet says “PPD”: check it is
+still on"). If the game is off, cancel or delete it in LSP.
+
 **PCRs are letters `A`–`E` only** (bare or as `PCR A`). A stray value that isn't a letter
 (e.g. an old `CR3`) is left unassigned rather than guessed — fix it in the sheet
 or with the PCR selector in Preview.
@@ -216,7 +236,10 @@ channel by name and start. It then sets the variable in the event's workflow
 variables (`Customization.Conditions`, value in `ConditionValue.Text`; an
 empty value means the default) with one `PATCH /api/v1/PatchEvent/{id}`, and
 reads the event back (`GetFilteredEvents`) to check LSP kept it. An event
-updated from the sheet gets the same. An event the tool created earlier that
+updated from the sheet gets the same. If someone sets the variable to
+something else by hand in LSP (say `VB STANFORD PITT SENIOR NIGHT`), the event
+is **locked** like any other hand edit, so the tool never puts its own value
+back; unlocking it re-applies the sheet, variable included. An event the tool created earlier that
 still holds the default shows in Preview as **update** (`Will update Event
 Name`) and is fixed on the next sync. Each booking is tried once per name
 (`variable_sent` in `state.json`), so a value LSP won't keep isn't re-sent
@@ -421,6 +444,22 @@ reaches some channels but fails on others, the record keeps the times LSP
 still has (retried next pass), and the event counts as started from the
 earliest start on any of its channels.
 
+**Events LSP has started are never touched.** LSP gives each event a status.
+Only a *Waiting* event is changed: once LSP shows it *Queued* or *Recording*
+(an engineer started it early, say), or *Complete* / *Failed* / *Timeout*, it is
+treated as started whatever its times say. An event starting within the next
+2 minutes counts as started too, since a pass takes a while. And right before
+each update or removal the tool reads the event from LSP again; if it has
+started, been canceled, or been changed since the pass read it (someone is
+editing it right now), it is left alone that pass and the next pass decides
+afresh (locking it if it was changed). The Status card names it.
+
+**Overlaps are flagged.** Preview says when an event it would create or move
+overlaps another one on the same channel (e.g. a doubleheader whose first
+game's record length runs past the second game's start), so it can be fixed
+before it airs. The tool doesn't shorten either one; LSP decides whether a
+channel may hold both.
+
 **No double bookings.** The tool never moves or creates an event onto a channel
 where LSP already has one with the same name and start minute: a new event
 (or a new channel after a PCR change) records that one as made by hand, and an
@@ -441,8 +480,9 @@ PCR (renamed in LSP, or the channel match edited) is left in LSP.
 
 **Locking.** Before changing anything, the tool compares each booking with its
 snapshot and with the values it last sent. If the name, start or end match
-neither, or the event was deleted or moved to another channel, **someone changed
-it in LSP**, and the whole sheet event is
+neither, the event-name variable holds something the tool didn't put there,
+the event was **canceled** in LSP, or it was deleted or moved to another
+channel, **someone changed it in LSP**, and the whole sheet event is
 **locked**: the tool never updates, re-creates or deletes it again, and the
 cleanup button skips it. Locks are recorded even in dry run. Preview shows
 locked events with the reason and an **Unlock** button (`POST /api/unlock`
@@ -461,9 +501,21 @@ channels, unless LSP already has an event with the same name and start minute
 there (made by hand). That one is recorded (on live passes; a dry run only
 shows it) but never modified or deleted.
 
+A hand edit that makes LSP match exactly what the sheet now says (someone
+moved the event in LSP before the sheet was updated) isn't a conflict: it's
+taken as the new baseline, and the event keeps following the sheet. Changes
+to fields the tool never writes (description, colour, route) don't lock
+anything and are kept: updates only send the name, start and end (and the
+event-name variable). A canceled event can't be unlocked while it's still in
+LSP; delete it there and unlock it, and the tool books it again.
+
 Matching the values last sent covers LSP returning the old values on the
 re-read right after an update. If LSP gives an event a new id when it's updated,
-the tool finds it by those values on the same channel and follows the new id.
+the tool finds it by those values on the same channel and follows the new id,
+unless someone else made it (an event deleted and made again by hand with the
+same values is theirs: the original counts as deleted, and it's locked). If
+LSP stores a name differently from how it was sent (shortened, say), that's
+remembered, so it isn't re-sent every pass.
 
 **Old records are pruned.** LSP deletes events some days after they end (its
 *Event cleanup threshold*, read each pass from `GET /api/v1/settings/general`
@@ -497,8 +549,10 @@ The *Delete tool-created events* button on the UI's *Scheduled in Live Schedule
 Pro* card (and `POST /api/delete-created`)
 removes **only** the events this tool created that haven't started — read from
 the tool-created bookings in `state.json` and deleted via
-`DELETE /api/v1/RemoveEvent`. Events in progress or past, and locked ones, are
-skipped (the reply counts them as `skipped_started` / `skipped_locked`). After a
+`DELETE /api/v1/RemoveEvent`. It reads LSP first: events in progress or past
+(or started early by hand), and locked ones (or ones changed by hand since the
+last sync), are skipped (the reply counts them as `skipped_started` /
+`skipped_locked`). After a
 delete they are forgotten from state, so a later pass will re-create them. This
 lets you iterate during testing without wiping hand-made events in LSP. It works
 with dry run on too, to clean up events sent one at a time from Preview.

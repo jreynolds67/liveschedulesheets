@@ -526,3 +526,190 @@ def test_pcr_change_removes_an_event_lsp_gave_a_new_id(make_syncer, lsp):
     s = make_syncer([sheet_event(pcr="B")])
     s.run_once()
     assert [v["ChannelId"] for v in lsp.events.values()] == ["b1"]
+
+
+# -- LSP's own status, and changes made while a pass runs ----------------------
+
+def test_event_started_early_in_lsp_is_never_changed(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    for e in lsp.events.values():
+        e["Status"] = "Recording"  # an engineer started it ahead of time
+    before = {k: dict(v) for k, v in lsp.events.items()}
+    s = make_syncer([sheet_event(pcr="B", hour=21)])  # time and PCR changed in the sheet
+    [item] = s.plan()
+    assert item.status == EXISTS and item.started and "Recording in LSP" in item.message
+    summary = s.run_once()
+    assert (summary["updated"], summary["deleted"], summary["created"]) == (0, 0, 0)
+    assert {k: dict(v) for k, v in lsp.events.items()} == before
+
+
+def test_event_canceled_in_lsp_locks_and_cant_be_unlocked_while_canceled(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="B")]).run_once()
+    [e] = lsp.events.values()
+    e["Status"] = "Canceled"
+    s = make_syncer([sheet_event(pcr="B", hour=21)])
+    assert statuses(s) == [LOCKED]
+    s.run_once()
+    assert "T18:50:00" in e["Start"]
+    [rid] = s.state.events
+    with pytest.raises(LspError, match="canceled in LSP"):
+        s.unlock(rid)
+    # Deleted there instead: unlocking books it again.
+    lsp.events.clear()
+    s.unlock(rid)
+    assert make_syncer([sheet_event(pcr="B", hour=21)]).run_once()["created"] == 1
+
+
+def test_event_about_to_start_is_not_moved(key_file, state_path, lsp):
+    from datetime import datetime
+    from app.config import parse_config
+    from app.models import ScheduledEvent
+    from app.sync import Syncer
+    from .conftest import TZ, raw_config
+
+    def game(minutes):
+        start = datetime.now(TZ).replace(second=0, microsecond=0) + timedelta(minutes=minutes)
+        return ScheduledEvent(name="FB vs UCF", pcr="B", start=start,
+                              end=start + timedelta(hours=3), source_tab="Football",
+                              source_column=2, event_date=start.date().isoformat(),
+                              sheet_start=start.strftime("%Y-%m-%dT%H:%M"))
+
+    cfg = parse_config(raw_config(key_file, state_path))
+    Syncer(cfg, FakeReader([game(1)]), lsp, State(state_path)).run_once()
+    s = Syncer(cfg, FakeReader([game(60)]), lsp, State(state_path))
+    [item] = s.plan()
+    assert item.status == EXISTS and "About to start" in item.message
+    assert s.run_once()["updated"] == 0
+
+
+def test_event_edited_in_lsp_during_the_pass_is_not_overwritten(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="B")]).run_once()
+    [e] = lsp.events.values()
+
+    def engineer_edits(_event_id):
+        e["End"] = "2099-01-01T00:00:00+00:00"  # extended by hand after the pass read LSP
+
+    lsp.before_get_event = engineer_edits
+    s = make_syncer([sheet_event(pcr="B", hour=21)])
+    summary = s.run_once()
+    assert summary["updated"] == 0 and "changed in LSP during this pass" in summary["problems"][0]
+    assert "T18:50:00" in e["Start"] and e["End"].startswith("2099")
+    lsp.before_get_event = None
+    assert statuses(make_syncer([sheet_event(pcr="B", hour=21)])) == [LOCKED]
+
+
+def test_engineer_making_the_sheets_change_in_lsp_first_is_not_a_conflict(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="B", hour=19)]).run_once()
+    [e] = lsp.events.values()
+    moved = sheet_event(pcr="B", hour=21)
+    e.update(Start=moved.start.isoformat(), End=moved.end.isoformat())  # by hand, before the sheet
+    s = make_syncer([moved])
+    assert statuses(s) == [EXISTS]
+    s.run_once()
+    # ...and the event still follows the sheet afterwards.
+    s = make_syncer([sheet_event(pcr="B", hour=20)])
+    assert statuses(s) == [UPDATE]
+    assert s.run_once()["updated"] == 1
+
+
+def test_event_deleted_and_made_again_by_hand_is_not_taken_for_the_tools(make_syncer, lsp):
+    make_syncer([sheet_event(pcr="B")]).run_once()
+    [old] = lsp.events.values()
+    lsp.events.clear()
+    ev = sheet_event(pcr="B")
+    mine = lsp.add_hand_made("b1", old["Name"], ev.start, ev.end)  # same values, by an engineer
+    s = make_syncer([sheet_event(pcr="B", hour=21)])
+    assert statuses(s) == [LOCKED]
+    s.run_once()
+    assert lsp.events[mine["Id"]]["Start"] == mine["Start"]
+    assert s.delete_created()["deleted"] == 0 and mine["Id"] in lsp.events
+
+
+def test_cleanup_skips_events_started_early_or_edited_by_hand(make_syncer, lsp):
+    s = make_syncer([sheet_event(pcr="B"), sheet_event(name="VB vs Duke", pcr="B", days=3),
+                     sheet_event(name="MSOC vs UNC", pcr="B", days=4)])
+    s.run_once()
+    by_name = {e["Name"]: e for e in lsp.events.values()}
+    by_name["WSOC vs Texas"]["Status"] = "Recording"
+    by_name["VB vs Duke"]["Name"] = "VB vs Duke (moved)"
+    summary = make_syncer([]).delete_created()
+    assert (summary["deleted"], summary["skipped_started"], summary["skipped_locked"]) == (1, 1, 1)
+    assert sorted(e["Name"] for e in lsp.events.values()) == ["VB vs Duke (moved)", "WSOC vs Texas"]
+
+
+# -- the event-name variable ---------------------------------------------------
+
+@pytest.fixture
+def var_syncer(key_file, state_path, lsp):
+    from app.config import parse_config
+    from app.sync import Syncer
+    from .conftest import raw_config
+    lsp.variable = "Event Name"
+    cfg = parse_config(raw_config(key_file, state_path, lsp={"event_name_variable": "Event Name"}))
+    return lambda events: Syncer(cfg, FakeReader(events), lsp, State(state_path))
+
+
+def test_variable_set_by_hand_in_lsp_is_never_overwritten(var_syncer, lsp):
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    [eid] = lsp.events
+    assert lsp.variable_of(eid) == "WSOC vs Texas"
+    lsp.set_variable(eid, "WSOC vs Texas SENIOR NIGHT")
+    s = var_syncer([sheet_event(pcr="B", hour=21)])
+    [item] = s.plan()
+    assert item.status == LOCKED and "Event Name changed in LSP" in item.message
+    s.run_once()
+    assert lsp.variable_of(eid) == "WSOC vs Texas SENIOR NIGHT"
+    assert "T18:50:00" in lsp.events[eid]["Start"]
+    # Unlocking re-applies the sheet, the variable included.
+    [rid] = s.state.events
+    s.unlock(rid)
+    assert var_syncer([sheet_event(pcr="B", hour=21)]).run_once()["updated"] == 1
+    assert lsp.variable_of(eid) == "WSOC vs Texas" and "T20:50:00" in lsp.events[eid]["Start"]
+    assert statuses(var_syncer([sheet_event(pcr="B", hour=21)])) == [EXISTS]
+
+
+def test_variable_follows_a_sheet_rename_without_locking(var_syncer, lsp):
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    [eid] = lsp.events
+    s = var_syncer([sheet_event(name="WSOC vs Texas A&M", pcr="B")])  # step 3: same column
+    assert s.run_once()["updated"] == 1
+    assert lsp.variable_of(eid) == "WSOC vs Texas A&M"
+    assert statuses(var_syncer([sheet_event(name="WSOC vs Texas A&M", pcr="B")])) == [EXISTS]
+
+
+def test_variable_lsp_wont_keep_is_not_taken_for_a_hand_edit(var_syncer, lsp):
+    lsp.keeps_variable = False
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    for _ in range(2):
+        assert statuses(var_syncer([sheet_event(pcr="B")])) == [EXISTS]
+    assert statuses(var_syncer([sheet_event(pcr="B", hour=21)])) == [UPDATE]
+
+
+# -- names and overlaps ----------------------------------------------------------
+
+def test_hand_made_event_with_other_spacing_and_case_is_not_duplicated(make_syncer, lsp):
+    ev = sheet_event(name="VB vs Pitt", pcr="B")
+    lsp.add_hand_made("b1", "vb  vs   PITT ", ev.start, ev.end)
+    s = make_syncer([ev])
+    assert statuses(s) == [EXISTS]
+    s.run_once()
+    assert len(lsp.events) == 1
+
+
+def test_name_lsp_shortens_is_not_resent_every_pass(make_syncer, lsp):
+    lsp.name_limit = 10
+    make_syncer([sheet_event(pcr="B")]).run_once()
+    for _ in range(2):
+        s = make_syncer([sheet_event(pcr="B")])
+        assert statuses(s) == [EXISTS]
+        assert s.run_once()["updated"] == 0
+
+
+def test_overlapping_games_on_one_channel_are_flagged(make_syncer, lsp):
+    s = make_syncer([sheet_event(name="BSB vs Duke", pcr="B", hour=13, col=2, same_day=2),
+                     sheet_event(name="BSB vs Duke", pcr="B", hour=15, col=3, occurrence=1,
+                                 same_day=2)])
+    items = s.plan()
+    assert all(i.status == CREATE for i in items)
+    assert all("overlaps “BSB vs Duke”" in i.message for i in items)
+    assert "overlaps" not in make_syncer([sheet_event(pcr="B")]).plan()[0].message

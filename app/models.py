@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
+def name_key(name: str) -> str:
+    """An event name for matching: ignoring case and spacing ("VB  vs Pitt"
+    and "vb vs pitt" are the same game)."""
+    return " ".join((name or "").split()).lower()
+
+
 @dataclass
 class ScheduledEvent:
     """One event parsed from a sheet column, ready to become an LSP event."""
@@ -19,10 +25,11 @@ class ScheduledEvent:
     occurrence: int = 0   # 0-based index among same (name, date) in this tab
     same_day: int = 0     # how many same (name, date) columns the tab has; 0 = unknown
     sheet_start: str = ""  # the sheet's own start, "YYYY-MM-DDTHH:MM" local, before fixes
+    note: str = ""         # a warning for Preview, e.g. the sheet says "PPD"
 
     def override_key(self) -> tuple[str, str, int]:
         """Stable identity for UI overrides: (date, name, occurrence)."""
-        return (self.event_date, self.name.strip().lower(), self.occurrence)
+        return (self.event_date, name_key(self.name), self.occurrence)
 
     def is_same_game(self, occurrence: int, same_day: int = 0, sheet_start: str = "") -> bool:
         """Whether something remembered about a game with this name and date

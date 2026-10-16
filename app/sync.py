@@ -31,7 +31,7 @@ from dateutil import parser as dateparser
 
 from .config import Config
 from .lsp_client import LspClient, LspError
-from .models import ScheduledEvent
+from .models import ScheduledEvent, name_key
 from .runtime import LOCAL_TZ
 from .sheets import SheetError, SheetReader
 from .state import State, record_start
@@ -49,9 +49,20 @@ OUT_OF_WINDOW = "out_of_window"
 NO_CHANNEL = "no_channel"
 ERROR = "error"
 
-# The LSP fields a booking snapshot keeps; a change to any of them by someone
-# other than this tool locks the event.
-_SNAPSHOT_FIELDS = ("Name", "Start", "End", "ChannelId")
+# The LSP fields a booking snapshot keeps. A change to Name, Start or End by
+# someone other than this tool locks the event; CreatedByDisplayName tells the
+# tool's event from one made again by hand with the same values.
+_SNAPSHOT_FIELDS = ("Name", "Start", "End", "ChannelId", "CreatedByDisplayName")
+
+# LSP's EventStatus values, in its enum order. Only a Waiting event is the
+# tool's to change: LSP has queued or started the others (or they ran), and a
+# Canceled one was canceled by hand.
+_STATUSES = ("Waiting", "Queued", "Recording", "Complete", "Failed", "Timeout", "Canceled")
+_ACTIVE = {"queued", "recording", "complete", "failed", "timeout"}
+
+# An event this close to its start counts as started: a pass takes a while,
+# and an update must never reach LSP after the recording has begun.
+START_MARGIN = timedelta(minutes=2)
 
 # How long to keep a record after its event ends, when LSP's own cleanup
 # threshold (settings/general EventCleanupThresholdInDays) can't be read.
@@ -128,10 +139,11 @@ class _LspView:
                     self.by_id[e["Id"]] = (cid, e)
 
     def find(self, channel_id: str, name: str, start: datetime) -> Optional[dict]:
-        """An event on the channel with this name and start minute."""
-        want = name.strip().lower()
+        """An event on the channel with this name (ignoring case and spacing)
+        and start minute."""
+        want = name_key(name)
         for e in self.by_channel.get(channel_id, []):
-            if (e.get("Name") or "").strip().lower() == want and _same_instant(e.get("Start"), start):
+            if name_key(e.get("Name") or "") == want and _same_instant(e.get("Start"), start):
                 return e
         return None
 
@@ -191,6 +203,10 @@ class Syncer:
                 item = self._plan_not_in_sheet(rid, rec, names, view, now)
                 if item:
                     items.append(item)
+        _note_overlaps(items, view)
+        for item in items:
+            if item.event.note:
+                item.message = "; ".join(m for m in (item.message, item.event.note) if m)
         return items
 
     def _match(self, events: list[ScheduledEvent], now: datetime) -> dict[int, str]:
@@ -212,9 +228,9 @@ class Syncer:
         used: set[str] = set()
         same_day: dict[tuple, list[str]] = defaultdict(list)
         for rid, rec in self.state.events.items():
-            same_day[(rec["tab"], rec["date"], rec["name"].strip().lower())].append(rid)
+            same_day[(rec["tab"], rec["date"], name_key(rec["name"]))].append(rid)
         for i, ev in enumerate(events):
-            for rid in same_day.get((ev.source_tab, ev.event_date, ev.name.strip().lower()), []):
+            for rid in same_day.get((ev.source_tab, ev.event_date, name_key(ev.name)), []):
                 rec = self.state.events[rid]
                 if rid not in used and ev.is_same_game(rec.get("occurrence", 0),
                                                        rec.get("same_day", 0),
@@ -232,12 +248,12 @@ class Syncer:
             return end is not None and end > now
 
         loose = [
-            (lambda ev: (ev.source_tab, ev.name.strip().lower()),
-             lambda rec: (rec["tab"], rec["name"].strip().lower()), not_started),
+            (lambda ev: (ev.source_tab, name_key(ev.name)),
+             lambda rec: (rec["tab"], name_key(rec["name"])), not_started),
             (lambda ev: (ev.source_tab, ev.source_column, ev.event_date),
              lambda rec: (rec["tab"], rec.get("column"), rec["date"]), not_ended),
-            (lambda ev: (ev.name.strip().lower(), ev.event_date, ev.sheet_start),
-             lambda rec: (rec["name"].strip().lower(), rec["date"], rec.get("sheet_start")),
+            (lambda ev: (name_key(ev.name), ev.event_date, ev.sheet_start),
+             lambda rec: (name_key(rec["name"]), rec["date"], rec.get("sheet_start")),
              lambda rec: bool(rec.get("sheet_start")) and not_ended(rec)),
         ]
         for ev_key, rec_key, eligible in loose:
@@ -285,7 +301,7 @@ class Syncer:
     def _new_target(self, cid, cname, name, ev, view: _LspView, planned_keys) -> Target:
         """What to do on a channel an event isn't booked on yet: create it,
         but never add a second copy of one already there."""
-        key = (cid, name.strip().lower(), _minute_key(ev.start))
+        key = (cid, name_key(name), _minute_key(ev.start))
         if key in planned_keys:
             return Target(cid, cname, EXISTS, "Same event earlier in the sheet")
         if cid in view.failed:
@@ -319,12 +335,18 @@ class Syncer:
                             message=f"Locked: {reason}. Sheet changes are not applied.")
         # Started events are never changed, so there's no hand edit to look
         # for (LSP itself may rewrite a recording's End when it's stopped).
+        # Nor are ones about to start, or ones LSP has queued or started
+        # already (an engineer started it early).
         started = record_start(rec)
-        if started and started <= now:
-            return PlanItem(ev, name, EXISTS, as_is(EXISTS, "Started"), record_id=rid,
+        live = _live_status(rec, view)
+        if (started and started <= now + START_MARGIN) or live:
+            msg = (f"{live.capitalize()} in LSP" if live
+                   else "Started" if started <= now else "About to start")
+            return PlanItem(ev, name, EXISTS, as_is(EXISTS, msg), record_id=rid,
                             started=True,
-                            message="Started; sheet changes are no longer applied")
-        edit = self._hand_edit(rec, view, now)
+                            message=f"{msg}; sheet changes are no longer applied")
+        want = {"Name": name, "Start": ev.start.isoformat(), "End": ev.end.isoformat()}
+        edit = self._hand_edit(rec, view, now, want)
         if edit is None:
             return PlanItem(ev, name, ERROR, as_is(ERROR, "Could not read LSP"), record_id=rid,
                             message="Could not read LSP; skipped this pass")
@@ -344,7 +366,7 @@ class Syncer:
             return PlanItem(ev, name, NO_CHANNEL, as_is(EXISTS, "Left as is"), record_id=rid,
                             message=f"No LSP channels match PCR {ev.pcr or '(none)'}; "
                                     "existing bookings left as they are")
-        key = (name.strip().lower(), _minute_key(ev.start))
+        key = (name_key(name), _minute_key(ev.start))
         targets, wanted = [], set()
         for cid, cn in chans:
             wanted.add(cid)
@@ -370,7 +392,7 @@ class Syncer:
                 hit = _locate(b, cid, view)
                 cur = hit[1] if hit else (b.get("snapshot") or {})
                 diffs = []
-                if (cur.get("Name") or "").strip() != name.strip():
+                if (cur.get("Name") or "").strip() != name.strip() and not _kept_as_written(b, cur, name):
                     diffs.append("name")
                 if not _same_instant(cur.get("Start"), ev.start):
                     diffs.append("start")
@@ -451,13 +473,18 @@ class Syncer:
         return PlanItem(ev, rec.get("lsp_name") or rec["name"], NOT_IN_SHEET, targets, msg,
                         record_id=rid, locked=bool(rec.get("locked")), new_lock=edit)
 
-    def _hand_edit(self, rec, view: _LspView, now) -> Optional[str]:
+    def _hand_edit(self, rec, view: _LspView, now, want: Optional[dict] = None) -> Optional[str]:
         """Why this record's LSP events no longer match what the tool last
         wrote ("" = untouched), or None if LSP couldn't be read.
 
         A booking is untouched if LSP matches its snapshot *or* the values the
         tool last sent: the re-read right after a write can still return the
-        old values, which would otherwise look like a hand edit next pass."""
+        old values, which would otherwise look like a hand edit next pass.
+        Or if it holds exactly `want`, what the tool would write now: someone
+        made the sheet's change in LSP first, which is no conflict.
+
+        Canceling the event in LSP, or setting its event-name variable to
+        something the tool didn't put there, is a hand edit too."""
         for cid, b in rec.get("bookings", {}).items():
             if not b.get("by_tool"):
                 continue  # hand-made bookings are never ours to compare
@@ -474,7 +501,14 @@ class Syncer:
             found_cid, e = hit
             if found_cid != cid:
                 return f"{label}: moved to another channel in LSP"
-            if snap is None or _matches_written(e, b.get("written")):
+            if _status(e) in _ACTIVE:
+                continue  # LSP has started it: frozen, and LSP may change its times
+            if _status(e) == "canceled":
+                return f"{label}: canceled in LSP"
+            if self._variable_edited(e, b):
+                return f"{label}: {self.cfg.lsp.event_name_variable} changed in LSP"
+            if (snap is None or _matches_written(e, b.get("written"))
+                    or _matches_written(e, want)):
                 continue  # no baseline yet (taken next pass), or as the tool left it
             if (e.get("Name") or "").strip() != (snap.get("Name") or "").strip():
                 return f"{label}: name changed in LSP"
@@ -482,6 +516,26 @@ class Syncer:
                 if _lsp_time(e.get(f)) != _lsp_time(snap.get(f)):
                     return f"{label}: {f.lower()} changed in LSP"
         return ""
+
+    def _variable_edited(self, e: dict, b: dict) -> bool:
+        """Whether someone set the event's event-name variable by hand: it
+        holds a value of its own that is neither its default nor one the tool
+        sent or saw there after its own writes. Bookings with no record of
+        the variable yet (made before the tool tracked it) aren't judged."""
+        var = self.cfg.lsp.event_name_variable
+        if not var or not ("variable_sent" in b or "variable_seen" in b):
+            return False
+        own = _variable_own(e, var)
+        if not own:
+            return False
+        return own not in {(b.get(k) or "").strip() for k in ("variable_sent", "variable_seen")}
+
+    def _note_variable(self, b: dict, e: dict) -> None:
+        """Remember the event-name variable value LSP holds on an event the
+        tool considers untouched, so a later hand change to it is noticed."""
+        var = self.cfg.lsp.event_name_variable
+        if var and _variable(e, var) is not None and not self._variable_edited(e, b):
+            b["variable_seen"] = _variable_own(e, var)
 
     # -- execution ----------------------------------------------------------
 
@@ -522,7 +576,7 @@ class Syncer:
         pass, so it creates or updates exactly what a pass would, and a later
         pass won't repeat it.
         """
-        want = (event_date, event_name.strip().lower(), occurrence)
+        want = (event_date, name_key(event_name), occurrence)
         item = next((i for i in self.plan()
                      if i.status != NOT_IN_SHEET and i.event.source_tab == tab
                      and i.event.override_key() == want), None)
@@ -546,7 +600,9 @@ class Syncer:
 
         LSP's current values become the new baseline, and bookings deleted or
         moved away in LSP are forgotten, so the next pass re-applies the sheet
-        (updating the edited bookings back and re-creating deleted ones).
+        (updating the edited bookings back, event-name variable included, and
+        re-creating deleted ones). An event canceled in LSP can't be unlocked:
+        it is still there, so it would only lock again.
         """
         rec = self.state.record(record_id)
         if rec is None:
@@ -554,12 +610,20 @@ class Syncer:
         view = _LspView(self.lsp, set(rec.get("bookings", {})))
         if view.failed:
             raise LspError("Could not read LSP; try again")
-        for cid, b in list(rec["bookings"].items()):
-            if not b.get("by_tool"):
-                continue
-            hit = _locate(b, cid, view)
+        hits = {cid: _locate(b, cid, view) for cid, b in rec["bookings"].items() if b.get("by_tool")}
+        canceled = [rec["bookings"][cid].get("channel_name") or cid for cid, hit in hits.items()
+                    if hit and hit[0] == cid and _status(hit[1]) == "canceled"]
+        if canceled:
+            raise LspError(f"It is canceled in LSP on {', '.join(canceled)}: delete it there "
+                           "(the tool then books it again) and unlock it, or leave it locked")
+        var = self.cfg.lsp.event_name_variable
+        for cid, hit in hits.items():
+            b = rec["bookings"][cid]
             if hit and hit[0] == cid:
                 b.update(event_id=hit[1].get("Id"), snapshot=_snapshot(hit[1]))
+                b.pop("variable_sent", None)  # sent again next pass
+                if var and _variable(hit[1], var) is not None:
+                    b["variable_seen"] = _variable_own(hit[1], var)
             else:
                 del rec["bookings"][cid]
         rec.update(locked=False, lock_reason="", locked_at=None)
@@ -602,7 +666,7 @@ class Syncer:
 
             rid = item.record_id
             if rid and not (item.new_lock or item.locked):
-                self._refresh_baselines(rid)
+                self._refresh_baselines(rid, None if item.started else _written(item))
             if item.status == LOCKED:
                 summary["locked"] += 1
                 continue
@@ -624,6 +688,16 @@ class Syncer:
                     summary[_COUNTER[t.status]] += 1
                     continue
                 try:
+                    why = self._unsafe_now(item, t, rid) if t.status != CREATE else ""
+                    if why:
+                        # LSP still has the old values here, so the record
+                        # keeps them; next pass decides afresh (and locks it
+                        # if someone changed it).
+                        log.warning("Not changing %r on %s: %s", item.lsp_name, t.channel_name, why)
+                        summary["problems"].append(f"{item.lsp_name} on {t.channel_name}: {why}; "
+                                                   "left as is")
+                        failed = True
+                        continue
                     rid = self._apply(item, t, rid, force, now, touched)
                 except LspError:
                     log.exception("Failed to %s %r on %s", t.status, item.lsp_name, t.channel_name)
@@ -658,6 +732,35 @@ class Syncer:
         The record's own fields are only refreshed once the whole item is
         done, so an interrupted PCR move still looks like one next pass."""
         self.state.save()
+
+    def _unsafe_now(self, item: PlanItem, t: Target, rid: Optional[str]) -> str:
+        """Why an UPDATE / DELETE planned earlier in this pass mustn't go
+        ahead now ("" = it may): the event is about to start (a pass takes a
+        while), or LSP, read again just before the write, shows it started,
+        canceled, or changed since the pass read it (someone is editing it
+        right now). Raises LspError if it can't be read."""
+        rec = self.state.events.get(rid) if rid else None
+        start = record_start(rec) if rec else None
+        if start and start <= datetime.now(timezone.utc) + START_MARGIN:
+            return "about to start"
+        fresh = self.lsp.get_event(t.event_id)
+        if fresh is None:
+            return "" if t.status == DELETE else "no longer in LSP"
+        status = _status(fresh)
+        if status in _ACTIVE or status == "canceled":
+            return f"{status} in LSP"
+        view = getattr(self, "_view", None)
+        seen = view.by_id.get(t.event_id) if view else None
+        if seen is not None:
+            before = seen[1]
+            var = self.cfg.lsp.event_name_variable
+            if ((fresh.get("Name") or "").strip() != (before.get("Name") or "").strip()
+                    or any(not _same_lsp_time(fresh.get(f), before.get(f)) for f in ("Start", "End"))
+                    or (fresh.get("ChannelId") and fresh.get("ChannelId") != before.get("ChannelId"))
+                    or (var and _variable(before, var) is not None
+                        and _variable_own(fresh, var) != _variable_own(before, var))):
+                return "changed in LSP during this pass"
+        return ""
 
     def _apply(self, item: PlanItem, t: Target, rid, force, now, touched) -> Optional[str]:
         """Carry out one CREATE / UPDATE / DELETE target; returns the record id."""
@@ -763,7 +866,8 @@ class Syncer:
         fields = _with_variable(current, var, item.lsp_name) if var else None
         if fields is None:
             return
-        self.state.events[rid]["bookings"][t.channel_id]["variable_sent"] = item.lsp_name
+        b = self.state.events[rid]["bookings"][t.channel_id]
+        b["variable_sent"] = item.lsp_name
         ev = item.event
         try:
             self.lsp.patch_event(event_id, item.lsp_name, ev.start, ev.end,
@@ -772,24 +876,30 @@ class Syncer:
             log.warning("Could not set %r on %r on %s: %s", var, item.lsp_name, t.channel_name, exc)
             return
         holds = self._read_variable(event_id, var)
-        if holds == item.lsp_name:
+        if holds is not None:
+            b["variable_seen"] = holds[1]  # so a value LSP rewrote isn't taken for a hand edit
+        if holds and holds[0] == item.lsp_name:
             log.info("Set %r = %r on %s", var, item.lsp_name, t.channel_name)
         else:
             log.warning("LSP didn't keep %r = %r on %s: it holds %r",
-                        var, item.lsp_name, t.channel_name, holds)
+                        var, item.lsp_name, t.channel_name, holds and holds[0])
 
-    def _read_variable(self, event_id: str, variable: str) -> Optional[str]:
-        """The event-name variable's value on an LSP event, read fresh."""
+    def _read_variable(self, event_id: str, variable: str) -> Optional[tuple[Optional[str], str]]:
+        """The event-name variable on an LSP event, read fresh: (its value,
+        or its default when it has none; its own value, "" if none). None if
+        it couldn't be read."""
         try:
-            return _variable_value(self.lsp.get_event(event_id) or {}, variable)
+            e = self.lsp.get_event(event_id) or {}
         except LspError as exc:
             log.warning("Could not read event %s back from LSP: %s", event_id, exc)
             return None
+        return _variable_value(e, variable), _variable_own(e, variable)
 
-    def _refresh_baselines(self, rid: str) -> None:
+    def _refresh_baselines(self, rid: str, want: Optional[dict] = None) -> None:
         """For an untouched record's bookings: follow an event LSP gave a new
         id, and re-snapshot one whose last re-read failed or came back stale
-        (LSP now shows what the tool wrote)."""
+        (LSP now shows what the tool wrote), or that someone already set to
+        `want`, the sheet's values."""
         view = getattr(self, "_view", None)
         if view is None:
             return
@@ -802,8 +912,10 @@ class Syncer:
             e = hit[1]
             if e.get("Id") and e["Id"] != b.get("event_id"):
                 b["event_id"] = e["Id"]
-            if b.get("snapshot") is None or _matches_written(e, b.get("written")):
+            if (b.get("snapshot") is None or _matches_written(e, b.get("written"))
+                    or _matches_written(e, want)):
                 b["snapshot"] = _snapshot(e)
+            self._note_variable(b, e)
 
     def _new_record(self, item: PlanItem) -> str:
         return self.state.new_record(_record_fields(item))
@@ -822,6 +934,7 @@ class Syncer:
             hit = fresh.by_id.get(b.get("event_id"))
             if hit:
                 b["snapshot"] = _snapshot(hit[1])
+                self._note_variable(b, hit[1])
             # Otherwise keep what the write returned (or None: baseline next pass).
 
     def _prune(self) -> None:
@@ -957,19 +1070,29 @@ class Syncer:
         one's history is never removed. Runs even with dry run on, so events
         sent from Preview for testing can be cleaned up without taking the
         loop live. Locked events (changed by hand in LSP) are left alone too;
-        unlock one to include it.
+        unlock one to include it. LSP is read first, so an event started
+        early by hand, or changed by hand since the last pass, is skipped too.
         """
         summary = {"deleted": 0, "failed": 0, "errors": [], "skipped_locked": 0,
                    "skipped_started": 0}
         now = datetime.now(timezone.utc)
-        for ref, info in self.state.tool_created():
+        created = self.state.tool_created()
+        view = _LspView(self.lsp, {info["channel_id"] for _, info in created})
+        for ref, info in created:
             event_id = info.get("event_id")
             start = _parse_utc(info.get("start"))
-            if start is None or start <= now:
+            hit = view.by_id.get(event_id)
+            if (start is None or start <= now + START_MARGIN
+                    or (hit and _status(hit[1]) in _ACTIVE)):
                 summary["skipped_started"] += 1
                 continue
-            if info.get("locked"):
+            rec = self.state.events.get(ref[0]) or {}
+            if info.get("locked") or (rec and self._hand_edit(rec, view, now)):
                 summary["skipped_locked"] += 1
+                continue
+            if info["channel_id"] in view.failed:
+                summary["failed"] += 1
+                summary["errors"].append(f"{info.get('name')}: could not read its channel from LSP")
                 continue
             try:
                 self.lsp.remove_event(event_id, force=True)
@@ -1040,6 +1163,40 @@ _OWNED = "already in LSP for another sheet event this tool tracks; left as is"
 _HAND_DIFFERS = "made by hand in LSP and differs from the sheet; left alone"
 
 
+def _note_overlaps(items: list[PlanItem], view: _LspView) -> None:
+    """Say in Preview when an event a pass would create or move overlaps
+    another one on the same channel once the pass is done (a doubleheader
+    whose first game's record length runs into the second, a hand-made
+    event...). Only a note: LSP decides whether a channel may hold both."""
+    after: dict[str, dict] = defaultdict(dict)  # channel -> key -> (start, end, name)
+    for cid, evs in view.by_channel.items():
+        for e in evs:
+            s, en = _parse_utc(e.get("Start")), _parse_utc(e.get("End"))
+            if s and en and _status(e) not in ("canceled", "complete", "failed", "timeout"):
+                after[cid][e.get("Id")] = (s, en, e.get("Name") or "")
+    moving = []
+    for n, item in enumerate(items):
+        for t in item.targets:
+            if t.status == DELETE:
+                after[t.channel_id].pop(t.event_id, None)
+            elif t.status in (CREATE, UPDATE):
+                key = t.event_id or ("new", n)
+                after[t.channel_id][key] = (item.event.start, item.event.end, item.lsp_name)
+                moving.append((item, t, key))
+    noted: dict[int, list[str]] = defaultdict(list)
+    for item, t, key in moving:
+        s, en, _ = after[t.channel_id][key]
+        for other, (os_, oe, oname) in after[t.channel_id].items():
+            if other != key and os_ < en and s < oe:
+                what = (f"“{oname}” {os_.astimezone(LOCAL_TZ):%H:%M}–"
+                        f"{oe.astimezone(LOCAL_TZ):%H:%M}")
+                t.message += f"; overlaps {what}"
+                if what not in noted[id(item)]:
+                    noted[id(item)].append(what)
+                    item.message += f"; overlaps {what} in LSP"
+                break
+
+
 def _summary(dry_run: bool) -> dict:
     return {"parsed": 0, "created": 0, "updated": 0, "deleted": 0, "skipped_existing": 0,
             "locked": 0, "not_in_sheet": 0, "skipped_window": 0, "no_channel": 0,
@@ -1103,6 +1260,17 @@ def _variable_default(holder: dict, is_var: bool) -> str:
     return _texts(box.get("Default"))
 
 
+def _variable_own(e: dict, variable: str) -> str:
+    """An LSP event's own event-name variable value ("" if it has none, so
+    it uses its default, or has no such variable)."""
+    found = _variable(e, variable)
+    if found is None:
+        return ""
+    holder, is_var = found
+    own = _texts(holder.get("ConditionValue") if is_var else holder).strip()
+    return "" if own == _variable_default(holder, is_var).strip() else own
+
+
 def _variable_value(e: dict, variable: str) -> Optional[str]:
     """An LSP event's event-name variable value (its default when it has no
     value of its own); None if the event has no such variable."""
@@ -1161,7 +1329,9 @@ def _matches_written(e: dict, written: Optional[dict]) -> bool:
 
 def _locate(b: dict, cid: str, view: _LspView) -> Optional[tuple[str, dict]]:
     """(channel id, LSP event) for a booking: by its id, or, if LSP gave the
-    event a new id, the event on its channel holding what the tool wrote."""
+    event a new id, the event on its channel holding what the tool wrote,
+    made by whoever made the original (an event someone deleted and made
+    again by hand with the same values is theirs, not the tool's)."""
     hit = view.by_id.get(b.get("event_id"))
     if hit is not None:
         return hit
@@ -1169,10 +1339,41 @@ def _locate(b: dict, cid: str, view: _LspView) -> Optional[tuple[str, dict]]:
     start = _parse_utc((w or {}).get("Start"))
     if not start:
         return None
+    creator = (b.get("snapshot") or {}).get("CreatedByDisplayName")
     for e in view.by_channel.get(cid, []):
-        if _matches_written(e, w):
+        if _matches_written(e, w) and (not creator or not e.get("CreatedByDisplayName")
+                                       or e["CreatedByDisplayName"] == creator):
             return cid, e
     return None
+
+
+def _status(e: Optional[dict]) -> str:
+    """An LSP event's status, lowercase ("" if unknown). LSP sends the
+    EventStatus name; a number is taken as its position in the enum."""
+    s = (e or {}).get("Status")
+    if isinstance(s, int) and not isinstance(s, bool) and 0 <= s < len(_STATUSES):
+        s = _STATUSES[s]
+    s = str(s or "").strip().lower()
+    return "canceled" if s == "cancelled" else s
+
+
+def _live_status(rec: dict, view: _LspView) -> str:
+    """The status of one of the record's tool-made events that LSP has
+    queued, started or finished ("" if none), whatever its times say."""
+    for cid, b in (rec.get("bookings") or {}).items():
+        if b.get("by_tool"):
+            hit = _locate(b, cid, view)
+            if hit and _status(hit[1]) in _ACTIVE:
+                return _status(hit[1])
+    return ""
+
+
+def _kept_as_written(b: dict, cur: dict, name: str) -> bool:
+    """Whether LSP holds the name the tool last wrote, as LSP stored it (it
+    may trim, shorten or respace it), so it isn't re-sent every pass."""
+    sent = ((b.get("written") or {}).get("Name") or "").strip()
+    seen = ((b.get("snapshot") or {}).get("Name") or "").strip()
+    return bool(sent) and sent == name.strip() and (cur.get("Name") or "").strip() == seen
 
 
 def _booking(e: dict, channel_name: str, by_tool: bool) -> dict:
@@ -1199,6 +1400,21 @@ def _lsp_time(value):
     Both sides of a comparison come from LSP, so a missing offset is read the
     same way on each."""
     return _parse_utc(value) or value
+
+
+def _same_lsp_time(a, b) -> bool:
+    """Whether two LSP timestamps (from different LSP calls, which may not
+    format them alike) are the same minute."""
+    if a == b:
+        return True
+    try:
+        parsed = dateparser.isoparse(b)
+    except (ValueError, TypeError):
+        return False
+    if parsed.tzinfo:
+        return _same_instant(a, parsed)
+    return _same_instant(a, parsed.replace(tzinfo=timezone.utc)) or _same_instant(
+        a, parsed.replace(tzinfo=LOCAL_TZ))
 
 
 def _minute_key(dt: datetime) -> str:

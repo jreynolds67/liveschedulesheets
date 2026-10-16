@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
+from .models import name_key
 from .state import atomic_write
 
 
@@ -412,7 +413,7 @@ def _parse_event_overrides(raw: dict, tz: ZoneInfo) -> dict[str, list[EventOverr
         for item in items or []:
             item = item or {}
             date = str(item.get("date", "")).strip()
-            name = str(item.get("event", "")).strip().lower()
+            name = name_key(str(item.get("event", "")))
             if not date or not name:
                 continue  # need both to match an event
             try:

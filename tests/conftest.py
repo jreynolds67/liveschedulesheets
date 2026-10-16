@@ -72,6 +72,10 @@ class FakeLsp:
         self.add_error = None          # exception AddEvent raises
         self.add_creates_anyway = False  # ...after storing the event (a timeout)
         self.removed: list[str] = []
+        self.variable = None           # e.g. "Event Name": new events carry it, default "Event XX"
+        self.keeps_variable = True     # False: PatchEvent drops a variable value
+        self.name_limit = None         # LSP shortens names to this many characters
+        self.before_get_event = None   # called on each GetFilteredEvents read
 
     def get_all_channels(self):
         return copy.deepcopy(self.channels)
@@ -80,6 +84,8 @@ class FakeLsp:
         return [copy.deepcopy(e) for e in self.events.values() if e["ChannelId"] == channel_id]
 
     def get_event(self, event_id):
+        if self.before_get_event:
+            self.before_get_event(event_id)
         e = self.events.get(event_id)
         return copy.deepcopy(e) if e else None
 
@@ -88,9 +94,17 @@ class FakeLsp:
             raise LspError("GET /api/v1/settings/general failed (403)")
         return {"EventCleanupThresholdInDays": self.cleanup_days}
 
+    def _new(self, channel_id, name, start, end, by):
+        e = {"Id": str(uuid.uuid4()), "Name": name[:self.name_limit], "Start": start.isoformat(),
+             "End": end.isoformat(), "ChannelId": channel_id, "Status": "Waiting",
+             "CreatedByDisplayName": by}
+        if self.variable:
+            e["Customization"] = {"Conditions": [{"Name": self.variable, "ConditionValue": {
+                "Text": [], "Default": {"Text": ["Event XX"]}}}]}
+        return e
+
     def add_event(self, ev, channel_id, name, force=False):
-        e = {"Id": str(uuid.uuid4()), "Name": name, "Start": ev.start.isoformat(),
-             "End": ev.end.isoformat(), "ChannelId": channel_id}
+        e = self._new(channel_id, name, ev.start, ev.end, "lsp-api")
         if self.add_error is not None:
             if self.add_creates_anyway:
                 self.events[e["Id"]] = e
@@ -99,18 +113,27 @@ class FakeLsp:
         return copy.deepcopy(e)
 
     def patch_event(self, event_id, name, start, end, force=False, extra=None):
-        self.events[event_id].update(Name=name, Start=start.isoformat(), End=end.isoformat(),
-                                     **(extra or {}))
+        extra = copy.deepcopy(extra or {})
+        if not self.keeps_variable:
+            extra.pop("Customization", None)
+        self.events[event_id].update(Name=name[:self.name_limit], Start=start.isoformat(),
+                                     End=end.isoformat(), **extra)
 
     def remove_event(self, event_id, force=False):
         self.removed.append(event_id)
         self.events.pop(event_id, None)
 
     def add_hand_made(self, channel_id, name, start, end):
-        e = {"Id": str(uuid.uuid4()), "Name": name, "Start": start.isoformat(),
-             "End": end.isoformat(), "ChannelId": channel_id}
+        e = self._new(channel_id, name, start, end, "Jane Engineer")
         self.events[e["Id"]] = e
         return e
+
+    def variable_of(self, event_id):
+        cond = self.events[event_id]["Customization"]["Conditions"][0]["ConditionValue"]
+        return " ".join(cond.get("Text") or [])
+
+    def set_variable(self, event_id, value):
+        self.events[event_id]["Customization"]["Conditions"][0]["ConditionValue"]["Text"] = [value]
 
 
 class FakeReader:

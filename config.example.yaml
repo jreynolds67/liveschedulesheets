@@ -125,7 +125,8 @@ lsp:
   # The Vantage workflow variable on each event that gets the event name from
   # the sheet (e.g. "VB STANFORD PITT") instead of its default (e.g. "Event
   # XX"). Matched by name, ignoring case. The tool sets it on every event it
-  # creates or updates. Blank = off.
+  # creates or updates; one set to something else by hand in LSP is locked
+  # instead of overwritten. Blank = off.
   event_name_variable: "Event Name"
   # username / password are normally set in the UI. The password is only sent
   # to the base_url it was entered for (recorded as password_for); changing
