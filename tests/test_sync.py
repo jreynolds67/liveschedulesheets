@@ -843,3 +843,64 @@ def test_setting_the_variable_never_wipes_the_events_other_variables(var_syncer,
     assert e["Customization"]["Conditions"][1]["ConditionValue"]["Text"] == ["Jane"]
     assert e["Labels"][0]["Parameters"][0]["Text"] == ["A-team"]
     assert [sorted(x) for x in sent if x] == [["Customization"]]  # Labels not resent
+
+
+# -- LSP no longer giving new events their channel's workflow ---------------------
+
+def _hand_made_with_workflow(lsp, cid="b1", days=9):
+    ev = sheet_event(name="Template", pcr="B", days=days)
+    e = lsp.add_hand_made(cid, "VB vs Somebody", ev.start, ev.end)
+    e["Customization"] = {"Description": "PCR B record workflow", "Conditions": [
+        {"Name": "Event Name", "ConditionValue": {"Text": ["VB SOMEBODY"],
+                                                  "Default": {"Text": ["Event XX"]}}},
+        {"Name": "Director", "ConditionValue": {"Text": ["Jane"], "Default": {"Text": ["TBD"]}}}]}
+    return e
+
+
+def test_new_event_gets_the_channels_workflow_when_lsp_doesnt_give_one(var_syncer, lsp):
+    lsp.copies_workflow = False
+    template = _hand_made_with_workflow(lsp)
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    [eid] = [k for k in lsp.events if k != template["Id"]]
+    cust = lsp.events[eid]["Customization"]
+    assert cust["Description"] == "PCR B record workflow"
+    conds = {c["Name"]: c["ConditionValue"] for c in cust["Conditions"]}
+    assert conds["Event Name"]["Text"] == ["WSOC vs Texas"]
+    assert conds["Director"]["Text"] == [] and conds["Director"]["Default"] == {"Text": ["TBD"]}
+    assert template["Customization"]["Conditions"][1]["ConditionValue"]["Text"] == ["Jane"]
+    assert statuses(var_syncer([sheet_event(pcr="B")])) == [EXISTS]  # settled, not locked
+
+
+def test_events_left_without_a_workflow_are_repaired(var_syncer, lsp):
+    lsp.copies_workflow = False
+    var_syncer([sheet_event(pcr="B")]).run_once()  # no template yet: nothing to copy
+    [eid] = lsp.events
+    assert "Customization" not in lsp.events[eid]
+    s = var_syncer([sheet_event(pcr="B")])
+    s.plan()
+    assert any("no event on that channel has one to copy" in w["text"] for w in s.sheet_warnings)
+    _hand_made_with_workflow(lsp)  # someone makes one by hand
+    s = var_syncer([sheet_event(pcr="B")])
+    assert statuses(s) == [UPDATE]
+    s.run_once()
+    assert lsp.variable_of(eid) == "WSOC vs Texas"
+    assert lsp.events[eid]["Customization"]["Description"] == "PCR B record workflow"
+    assert statuses(var_syncer([sheet_event(pcr="B")])) == [EXISTS]
+
+
+def test_workflow_is_attached_even_with_no_event_name_variable(make_syncer, lsp):
+    lsp.copies_workflow = False
+    lsp.variable = "Event Name"
+    template = _hand_made_with_workflow(lsp)
+    make_syncer([sheet_event(pcr="B")]).run_once()  # event_name_variable is blank here
+    [eid] = [k for k in lsp.events if k != template["Id"]]
+    assert lsp.events[eid]["Customization"]["Description"] == "PCR B record workflow"
+    assert lsp.variable_of(eid) == ""  # defaults; nothing set
+
+
+def test_workflow_lsp_wont_keep_isnt_resent_every_pass(var_syncer, lsp):
+    lsp.copies_workflow = False
+    _hand_made_with_workflow(lsp)
+    lsp.keeps_variable = False  # PatchEvent drops Customization
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    assert statuses(var_syncer([sheet_event(pcr="B")])) == [EXISTS]

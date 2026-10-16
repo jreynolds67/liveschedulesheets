@@ -260,6 +260,19 @@ replaces it with the event name from the sheet (the `EVENT` cell, plus any
 event name prefix), the same on every channel. Vantage adds the channel,
 date and time itself.
 
+**The workflow itself.** LSP used to copy the channel's workflow (its Vantage
+variables and the workflow's description) into every event created through
+its API. When it doesn't, the event has none: its variable tab is greyed out
+in LSP and Vantage gets nothing. So after creating an event the tool checks
+it has a workflow, and if not, copies one from the most complete event on the
+same channel (one made by hand is fine), with **every value cleared** so the
+channel's defaults apply as on a fresh event: nothing from that other event
+(its crew, its own Event Name) carries over. Tool-made events that haven't
+started and lack a workflow are repaired the same way on the next sync (shown
+in Preview as `Will update workflow`). If no event on a channel has a
+workflow to copy, the Status card says so: create one event there by hand in
+LSP. This happens whether or not an Event Name variable is set.
+
 After creating an event, the tool reads it back from LSP. It uses the id in
 LSP's `AddEvent` reply, or, if the reply has none, finds the new event on its
 channel by name and start. It then sets the variable in the event's workflow

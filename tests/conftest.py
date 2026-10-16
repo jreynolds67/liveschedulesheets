@@ -73,6 +73,7 @@ class FakeLsp:
         self.add_creates_anyway = False  # ...after storing the event (a timeout)
         self.removed: list[str] = []
         self.variable = None           # e.g. "Event Name": new events carry it, default "Event XX"
+        self.copies_workflow = True    # False: AddEvent gives new events no workflow
         self.keeps_variable = True     # False: PatchEvent drops a variable value
         self.name_limit = None         # LSP shortens names to this many characters
         self.before_get_event = None   # called on each GetFilteredEvents read
@@ -105,6 +106,8 @@ class FakeLsp:
 
     def add_event(self, ev, channel_id, name, force=False):
         e = self._new(channel_id, name, ev.start, ev.end, "lsp-api")
+        if not self.copies_workflow:
+            e.pop("Customization", None)
         if self.add_error is not None:
             if self.add_creates_anyway:
                 self.events[e["Id"]] = e

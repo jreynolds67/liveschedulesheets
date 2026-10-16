@@ -67,6 +67,10 @@ _CLOCK_SKEW_SECONDS = 60
 # which would freeze them (Queued counts as started).
 _EARLY_QUEUE = timedelta(minutes=30)
 
+# Events read by id when looking for a workflow to copy onto an event that
+# has none (see Syncer._workflow_template).
+_TEMPLATE_READS = 5
+
 # A booking whose channel LSP hasn't listed for this long is forgotten.
 GONE_FORGET = timedelta(days=1)
 
@@ -218,6 +222,7 @@ class Syncer:
         self._note_gone(_now_iso())
         view = _LspView(self.lsp, wanted | (booked - self._gone))
         self._view = view  # _execute rebaselines snapshots from it
+        self._templates: dict = {}  # channel -> workflow to copy (_workflow_template)
         # LSP event id -> the record whose tool-made booking it is, so one
         # sheet event never takes another's event for a hand-made one.
         self._owned = {b["event_id"]: rid for rid, rec in self.state.events.items()
@@ -252,6 +257,23 @@ class Syncer:
             if item.event.note:
                 item.message = "; ".join(m for m in (item.message, item.event.note) if m)
         return items
+
+    def _lacks_workflow(self, b: dict, cid: str, e: dict) -> bool:
+        """Whether a tool-made event has no workflow and one can be copied to
+        it (see _fill_variable). Read by id before saying so: a list read may
+        carry less than the event has."""
+        if _workflow_size(e) or b.get("workflow_tried"):
+            return False
+        try:
+            fresh = self.lsp.get_event(e["Id"]) if e.get("Id") else None
+        except LspError:
+            return False
+        if fresh is None or _workflow_size(fresh):
+            return False
+        if self._workflow_template(cid, e.get("Id")) is None:
+            self._warn_no_template(cid, b.get("channel_name") or cid)
+            return False
+        return True
 
     def _log_new_warnings(self) -> None:
         """Log each warning when it appears (they're in Status and alerts
@@ -516,6 +538,8 @@ class Syncer:
                 if (hit and var and b.get("variable_sent") != name
                         and _with_variable(hit[1], var, name) is not None):
                     diffs.append(var)
+                if hit and self._lacks_workflow(b, cid, hit[1]):
+                    diffs.append("workflow")
                 event_id = hit[1].get("Id") if hit else b.get("event_id")
                 if {"name", "start"} & set(diffs):
                     # Moving it onto another event with the same name and
@@ -1003,56 +1027,114 @@ class Syncer:
 
     def _fill_variable(self, item: PlanItem, t: Target, event_id: str,
                        rid: str, force: bool) -> None:
-        """Set the event's event-name variable to its name, if the event has
-        that variable and it holds something else (e.g. its default), then
-        read the event back to check LSP kept it. Tried once per name, so a
-        value LSP won't keep isn't re-sent every pass; a failure is logged
-        and never undoes the create / update.
+        """Make sure a tool-made event has its channel's workflow, and set its
+        event-name variable to its name; then read it back to check LSP kept
+        them. A failure is logged and never undoes the create / update.
+
+        LSP used to copy the channel's workflow (Vantage variables, the
+        workflow's description) into every new event; when it doesn't, the
+        event has none (its variable tab greyed out in LSP) and Vantage gets
+        nothing. Then the workflow is copied from the most complete event on
+        the same channel (see _workflow_template), every value cleared so the
+        channel's defaults apply, as on a fresh event.
 
         The event is read by id first, and what's sent back is copied from
         that read, never from a list of events or a reply: LSP replaces the
         part it's sent whole, so a partial copy would wipe the event's other
-        workflow variables and description."""
+        workflow variables and description. The variable is set once per
+        name, so a value LSP won't keep isn't re-sent every pass."""
         var = self.cfg.lsp.event_name_variable
-        if not var:
-            return
         try:
             current = self.lsp.get_event(event_id)
         except LspError as exc:
-            log.warning("Could not read %r on %s to set %r (tried again next pass): %s",
-                        item.lsp_name, t.channel_name, var, exc)
+            log.warning("Could not read %r on %s to check its workflow (tried again next pass): %s",
+                        item.lsp_name, t.channel_name, exc)
             return
-        fields = _with_variable(current, var, item.lsp_name) if current else None
-        if fields is None:
+        if not current:
             return
         b = self.state.events[rid]["bookings"][t.channel_id]
-        b["variable_sent"] = item.lsp_name
+        fields: dict = {}
+        template = None
+        if _workflow_size(current) == 0:
+            template = self._workflow_template(t.channel_id, event_id)
+            if template is None:
+                self._warn_no_template(t.channel_id, t.channel_name)
+            else:
+                fields = _fresh_workflow(template)
+        base = {**current, **fields}
+        var_fields = _with_variable(base, var, item.lsp_name) if var else None
+        if var_fields:
+            fields.update(var_fields)
+            b["variable_sent"] = item.lsp_name
+        if not fields:
+            return
         ev = item.event
         try:
             self.lsp.patch_event(event_id, item.lsp_name, ev.start, ev.end,
                                  force=force, extra=fields)
         except LspError as exc:
-            log.warning("Could not set %r on %r on %s: %s", var, item.lsp_name, t.channel_name, exc)
+            log.warning("Could not set the workflow / %r on %r on %s: %s", var, item.lsp_name,
+                        t.channel_name, exc)
             return
-        holds = self._read_variable(event_id, var)
-        if holds is not None:
-            b["variable_seen"] = holds[1]  # so a value LSP rewrote isn't taken for a hand edit
-        if holds and holds[0] == item.lsp_name:
-            log.info("Set %r = %r on %s", var, item.lsp_name, t.channel_name)
-        else:
-            log.warning("LSP didn't keep %r = %r on %s: it holds %r",
-                        var, item.lsp_name, t.channel_name, holds and holds[0])
-
-    def _read_variable(self, event_id: str, variable: str) -> Optional[tuple[Optional[str], str]]:
-        """The event-name variable on an LSP event, read fresh: (its value,
-        or its default when it has none; its own value, "" if none). None if
-        it couldn't be read."""
         try:
-            e = self.lsp.get_event(event_id) or {}
+            after = self.lsp.get_event(event_id) or {}
         except LspError as exc:
-            log.warning("Could not read event %s back from LSP: %s", event_id, exc)
-            return None
-        return _variable_value(e, variable), _variable_own(e, variable)
+            log.warning("Could not read %r on %s back from LSP: %s", item.lsp_name,
+                        t.channel_name, exc)
+            return
+        if template is not None:
+            if _workflow_size(after):
+                log.info("Set %r's workflow on %s (copied from %r, values cleared to the "
+                         "channel's defaults): LSP didn't give it one", item.lsp_name,
+                         t.channel_name, template.get("Name"))
+            else:
+                b["workflow_tried"] = True  # LSP won't keep it: don't resend every pass
+                log.warning("LSP didn't keep the workflow sent for %r on %s", item.lsp_name,
+                            t.channel_name)
+        if var_fields:
+            b["variable_seen"] = _variable_own(after, var)  # a value LSP rewrote isn't a hand edit
+            holds = _variable_value(after, var)
+            if holds == item.lsp_name:
+                log.info("Set %r = %r on %s", var, item.lsp_name, t.channel_name)
+            else:
+                log.warning("LSP didn't keep %r = %r on %s: it holds %r",
+                            var, item.lsp_name, t.channel_name, holds)
+
+    def _workflow_template(self, channel_id: str, exclude_id: Optional[str]) -> Optional[dict]:
+        """The most complete workflow on another event on this channel (the
+        one with the most variables and parameters; the newest of those), read
+        by id. None if no event there has one. Cached for the pass."""
+        cache = self.__dict__.setdefault("_templates", {})
+        if channel_id in cache:
+            t = cache[channel_id]
+            return t if t is None or t.get("Id") != exclude_id else None
+        view = getattr(self, "_view", None)
+        evs = [e for e in (view.by_channel.get(channel_id, []) if view else [])
+               if e.get("Id") and e.get("Id") != exclude_id]
+        evs.sort(key=lambda e: (_workflow_size(e), e.get("Start") or ""), reverse=True)
+        best = None
+        # A list read may carry less than the event itself: read the likeliest
+        # few by id (most complete first, then the newest).
+        if not any(_workflow_size(e) for e in evs):
+            evs.sort(key=lambda e: e.get("Start") or "", reverse=True)
+        for e in evs[:_TEMPLATE_READS]:
+            try:
+                full = self.lsp.get_event(e["Id"]) or e
+            except LspError:
+                full = e
+            if _workflow_size(full) > _workflow_size(best or {}):
+                best = full
+        cache[channel_id] = best
+        return best
+
+    def _warn_no_template(self, channel_id: str, channel_name: str) -> None:
+        w = {"key": f"no-workflow:{channel_id}", "text": (
+            f"Events the tool creates on {channel_name} get no workflow (variables, description) "
+            "from LSP, and no event on that channel has one to copy: create one event there by "
+            "hand in LSP, and the tool copies its workflow from then on")}
+        if all(x["key"] != w["key"] for x in self.sheet_warnings):
+            self.sheet_warnings.append(w)
+            log.warning("%s", w["text"])
 
     def _refresh_baselines(self, rid: str, want: Optional[dict] = None) -> None:
         """For an untouched record's bookings: follow an event LSP gave a new
@@ -1468,6 +1550,26 @@ def _with_variable(e, variable: str, value: str) -> Optional[dict]:
         holder["ConditionValue"] = holder.get("ConditionValue") or {}
         holder = holder["ConditionValue"]
     holder["Text"] = [value]
+    return fields
+
+
+def _workflow_size(e: Optional[dict]) -> int:
+    """How much workflow an LSP event carries: its workflow variables and
+    parameters. 0 = none (its variable tab is greyed out in LSP)."""
+    return sum(1 for _ in _variables(e)) if isinstance(e, dict) else 0
+
+
+def _fresh_workflow(template: dict) -> dict:
+    """PatchEvent fields giving an event `template`'s workflow (its
+    Customization and Labels) with every value cleared, so the channel's
+    defaults apply, as on a new event: no values from the template event
+    (its crew, its own Event Name) carry over."""
+    fields = {k: copy.deepcopy(template[k]) for k in ("Customization", "Labels")
+              if template.get(k)}
+    for _name, holder, is_var in _variables(fields):
+        box = holder.get("ConditionValue") if is_var else holder
+        if isinstance(box, dict) and "Text" in box:
+            box["Text"] = []
     return fields
 
 
