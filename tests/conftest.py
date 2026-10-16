@@ -30,7 +30,8 @@ def raw_config(key_file: str, state_file: str, **overrides) -> dict:
         },
         "date_parsing": {"skip_values": ["TBD", "TBA"]},
         "scheduling": {"lead_in_minutes": 10, "safety_cap_hours": 3, "horizon_days": 60,
-                       "past_grace_minutes": 30, "event_name_prefix": ""},
+                       "past_grace_minutes": 30, "event_name_prefix": "",
+                       "home_team": ""},  # names as in the sheet; see test_event_names
         "pcr_channel_map": {"A": {"channel_match": "PCR A"}, "B": {"channel_match": "PCR B"}},
         "lsp": {"base_url": "http://lsp.invalid", "event_name_variable": ""},
         "runtime": {"live": True, "state_file": state_file},

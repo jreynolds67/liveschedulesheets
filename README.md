@@ -250,14 +250,34 @@ is read, all its visible tabs are read, as before.
 
 ---
 
+## Event names in LSP
+
+The sheet lists a home game by sport and opponent: `MSOC vs UNC`. In LSP —
+the event's name and its Event Name variable — it becomes `MSOC UNC vs. Pitt`
+(the **Home team** in the Scheduling card; `Pitt` by default). An event the
+sheet already lists with two teams keeps them: `VB Jacksonville vs High Point`
+→ `VB Jacksonville vs. High Point`, and `UNC vs Duke` (no sport in front) →
+`UNC vs. Duke`. Notes in brackets, like `(7 PM)` or `(EXH)`, are dropped; two
+capitals in brackets are part of a team's name and stay (`FB vs Miami (OH)` →
+`FB Miami (OH) vs. Pitt`). A name with no `vs` is used as the sheet has it.
+
+What counts as a sport (rather than a team) in front of `vs` is the **Sport
+codes** list (`scheduling.sport_codes`; blank = FB, MBB, WBB, MSOC, WSOC, VB,
+GYM, WRS, BSB, SB and other usual ones) plus the codes under *Record length by
+sport*. Clear the home team to use names exactly as in the sheet. The event
+name prefix, if set, goes in front. Changing any of these renames events
+already in LSP that haven't started; an event made by hand with the sheet's
+wording (`MSOC vs UNC`) is still recognised, so it isn't booked twice.
+
 ## The Event Name variable
 
 Each PCR channel's Vantage workflow has a text variable named **Event Name**
 (`lsp.event_name_variable`). The channel stores it with no value and a default
 (e.g. `Event XX`). When an event is created, LSP copies the channel's
 variables into it, so a new event starts out holding that default. The tool
-replaces it with the event name from the sheet (the `EVENT` cell, plus any
-event name prefix), the same on every channel. Vantage adds the channel,
+replaces it with the event's LSP name (from the sheet's `EVENT` cell, as
+described in [Event names in LSP](#event-names-in-lsp): `MSOC UNC vs. Pitt`),
+the same on every channel. Vantage adds the channel,
 date and time itself.
 
 **The workflow itself.** LSP used to copy the channel's workflow (its Vantage

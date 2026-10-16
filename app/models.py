@@ -1,8 +1,47 @@
 """Shared data structures."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
+
+# Sport codes that start an event name ("MSOC vs UNC"); more can be added in
+# the settings (scheduling.sport_codes).
+DEFAULT_SPORT_CODES = (
+    "FB", "MBB", "WBB", "MSOC", "WSOC", "VB", "WVB", "MVB", "GYM", "WRS", "BSB", "SB",
+    "MTEN", "WTEN", "SWIM", "MSWIM", "WSWIM", "DIVE", "TF", "MTF", "WTF", "XC", "MXC", "WXC",
+    "LAX", "MLAX", "WLAX", "FH", "GOLF", "MGOLF", "WGOLF", "HOCKEY",
+)
+
+_VS_RE = re.compile(r"\s+(?:vs\.?|v\.)\s+", re.IGNORECASE)
+# A note in brackets: "(7 PM)", "(EXH)". Not two capitals alone, which are
+# part of a team's name: "Miami (OH)".
+_NOTE_RE = re.compile(r"\s*\((?![A-Z]{2}\))[^)]*\)")
+
+
+def format_event_name(name: str, home_team: str, sport_codes=DEFAULT_SPORT_CODES) -> str:
+    """The name a sheet event gets in LSP (event and Event Name variable).
+
+    The sheet lists home games by the opponent alone, so with a home team
+    set, "MSOC vs UNC" becomes "MSOC UNC vs. Pitt". A name that already has
+    two teams keeps them: "VB Jacksonville vs High Point" becomes "VB
+    Jacksonville vs. High Point" (as does "UNC vs Duke", which has no sport
+    code in front). Notes in brackets ("(7 PM)", "(EXH)") are dropped. A name
+    with no "vs", or no home team set, is left as the sheet has it."""
+    if not home_team.strip():
+        return name
+    parts = _VS_RE.split(" ".join(_NOTE_RE.sub("", name).split()), maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        return name
+    left, right = parts[0].strip(), parts[1].strip()
+    words = left.split()
+    if not words:  # "vs UNC"
+        return f"{right} vs. {home_team.strip()}"
+    if words[-1].upper() in {c.strip().upper() for c in sport_codes}:
+        # Only the sport before "vs" (anything ahead of it, like a date,
+        # stays): a home game.
+        return f"{left} {right} vs. {home_team.strip()}"
+    return f"{left} vs. {right}"
 
 
 def name_key(name: str) -> str:
@@ -44,5 +83,7 @@ class ScheduledEvent:
             return bool(sheet_start) and sheet_start == self.sheet_start
         return occurrence == self.occurrence
 
-    def lsp_name(self, prefix: str = "") -> str:
-        return f"{prefix}{self.name}".strip()
+    def lsp_name(self, prefix: str = "", home_team: str = "",
+                 sport_codes=DEFAULT_SPORT_CODES) -> str:
+        """The event's name in LSP: see format_event_name."""
+        return f"{prefix}{format_event_name(self.name, home_team, sport_codes)}".strip()

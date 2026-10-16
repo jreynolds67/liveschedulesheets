@@ -73,6 +73,16 @@ scheduling:
   past_grace_minutes: 30
   # Optional prefix for the LSP event name, e.g. "AUTO " -> "AUTO FB vs UCF".
   event_name_prefix: ""
+  # The name each event gets in LSP (and in its Event Name variable). The
+  # sheet lists home games by sport and opponent ("MSOC vs UNC"); with a home
+  # team set they become "MSOC UNC vs. Pitt". A name that already has two
+  # teams keeps them ("VB Jacksonville vs. High Point"). Notes in brackets,
+  # like "(7 PM)" or "(EXH)", are dropped. "" = names exactly as in the sheet.
+  home_team: "Pitt"
+  # Codes that tell a sport from a team in front of "vs" (plus the codes in
+  # sport_safety_caps). Empty = the usual ones: FB, MBB, WBB, MSOC, WSOC, VB,
+  # GYM, WRS, BSB, SB, ...
+  sport_codes: []
 
 # PCR letter (from the sheet) -> Live Schedule Pro channels.
 # Each event is booked on EVERY channel whose name contains channel_match as a

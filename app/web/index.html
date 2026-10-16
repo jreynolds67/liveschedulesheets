@@ -226,6 +226,16 @@
       <div><label>Event name prefix</label><input type="text" id="name_prefix" placeholder="(optional)" /></div>
     </div>
     <div class="grid2">
+      <div><label>Home team</label><input type="text" id="home_team" placeholder="Pitt (blank = names as in the sheet)" /></div>
+      <div><label>Sport codes</label><input type="text" id="sport_codes" placeholder="FB, MBB, WBB, MSOC, WSOC, VB, …" /></div>
+    </div>
+    <div class="hint">The name each event gets in LSP, and in its Event Name variable. A home game, listed in
+      the sheet by sport and opponent, gets the home team: “MSOC vs UNC” → “MSOC UNC vs. Pitt”. A name that
+      already has two teams keeps them: “VB Jacksonville vs High Point” → “VB Jacksonville vs. High Point”.
+      Notes in brackets like “(7 PM)” or “(EXH)” are dropped. <b>Sport codes</b> (comma-separated; blank =
+      the usual ones) tell a sport from a team in front of “vs”; the codes under Record length by sport
+      count too. Changing these renames events already in LSP that haven't started.</div>
+    <div class="grid2">
       <div><label>Only schedule within (days ahead)</label><input type="number" id="horizon" min="1" /></div>
       <div><label>Ignore starts older than (minutes)</label><input type="number" id="past_grace" min="0" /></div>
     </div>
@@ -401,6 +411,8 @@ function fillForm(){
   $("lead_in").value = get(cfg,"scheduling.lead_in_minutes",10);
   $("safety_cap").value = get(cfg,"scheduling.safety_cap_hours",6);
   $("name_prefix").value = get(cfg,"scheduling.event_name_prefix","");
+  $("home_team").value = get(cfg,"scheduling.home_team","Pitt");
+  $("sport_codes").value = (get(cfg,"scheduling.sport_codes",[]) || []).join(", ");
   $("horizon").value = get(cfg,"scheduling.horizon_days",60);
   $("past_grace").value = get(cfg,"scheduling.past_grace_minutes",30);
   $("capRows").innerHTML = "";
@@ -497,6 +509,8 @@ function gather(){
   cfg.scheduling.lead_in_minutes = +$("lead_in").value;
   cfg.scheduling.safety_cap_hours = +$("safety_cap").value;
   cfg.scheduling.event_name_prefix = $("name_prefix").value;
+  cfg.scheduling.home_team = $("home_team").value.trim();
+  cfg.scheduling.sport_codes = fromCsv($("sport_codes").value).map(c => c.toUpperCase());
   cfg.scheduling.horizon_days = +$("horizon").value;
   cfg.scheduling.past_grace_minutes = +$("past_grace").value;
   cfg.scheduling.sport_safety_caps = [...document.querySelectorAll(".cap-row")]

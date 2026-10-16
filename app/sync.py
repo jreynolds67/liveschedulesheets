@@ -410,7 +410,7 @@ class Syncer:
 
     def _plan_new(self, ev, by_pcr, view: _LspView, planned_keys) -> PlanItem:
         """A sheet event the tool isn't tracking yet."""
-        name = ev.lsp_name(self.cfg.scheduling.event_name_prefix)
+        name = self.cfg.scheduling.lsp_name(ev)
         chans = by_pcr.get(ev.pcr) or []
         if not self._within_window(ev):
             return PlanItem(ev, name, OUT_OF_WINDOW,
@@ -442,7 +442,9 @@ class Syncer:
             return Target(cid, cname, EXISTS, "Same event earlier in the sheet")
         if cid in view.failed:
             return Target(cid, cname, ERROR, "Could not read this channel from LSP")
-        found = view.find(cid, name, ev.start)
+        # A hand-made event may carry the sheet's own wording ("MSOC vs UNC").
+        found = view.find(cid, name, ev.start) or view.find(
+            cid, ev.lsp_name(self.cfg.scheduling.event_name_prefix), ev.start)
         if found and found.get("Id") in getattr(self, "_owned", {}):
             return Target(cid, cname, EXISTS, _OWNED, event_id=found.get("Id"))
         if found:
@@ -455,7 +457,7 @@ class Syncer:
                       planned_keys) -> PlanItem:
         """A sheet event the tool already scheduled: bring LSP in line with it."""
         rec = self.state.events[rid]
-        name = ev.lsp_name(self.cfg.scheduling.event_name_prefix)
+        name = self.cfg.scheduling.lsp_name(ev)
         bookings = rec.get("bookings", {})
 
         def cname(cid):

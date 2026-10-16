@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from .models import name_key
+from .models import DEFAULT_SPORT_CODES, name_key
 from .state import atomic_write
 
 
@@ -54,6 +54,15 @@ class SchedulingConfig:
     event_name_prefix: str
     # (sport code, hours) in priority order; see cap_hours_for().
     sport_safety_caps: list[tuple[str, float]] = field(default_factory=list)
+    # Home games are named "<sport> <opponent> vs. <home_team>" in LSP ("" =
+    # names as the sheet has them); see models.format_event_name.
+    home_team: str = "Pitt"
+    sport_codes: tuple[str, ...] = DEFAULT_SPORT_CODES
+
+    def lsp_name(self, ev) -> str:
+        """A sheet event's name in LSP (the event and its Event Name variable)."""
+        codes = tuple(self.sport_codes) + tuple(sport for sport, _ in self.sport_safety_caps)
+        return ev.lsp_name(self.event_name_prefix, self.home_team, codes)
 
     def cap_hours_for(self, event_name: str) -> float:
         """Safety cap for an event: the first sport code that appears in its
@@ -264,6 +273,10 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
         past_grace_minutes=_number(sc_raw, "past_grace_minutes", 30, "scheduling", int, 0, 24 * 60),
         event_name_prefix=str(sc_raw.get("event_name_prefix", "")),
         sport_safety_caps=_parse_sport_caps(sc_raw.get("sport_safety_caps")),
+        home_team=str(sc_raw.get("home_team", "Pitt") if sc_raw.get("home_team") is not None
+                      else "Pitt").strip(),
+        sport_codes=tuple(c.strip().upper() for c in _as_list(sc_raw.get("sport_codes"))
+                          if c.strip()) or DEFAULT_SPORT_CODES,
     )
 
     google_raw = raw.get("google", {}) or {}
