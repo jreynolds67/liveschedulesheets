@@ -406,7 +406,12 @@ docker push your-registry/liveschedulesheets:latest
 Then set `image:` in `docker-compose.yml` and deploy the stack.
 
 The `lss_state` named volume persists the live `config.yaml`, the tracking
-`state.json`, and an uploaded Google key across restarts and redeploys.
+`state.json`, an uploaded Google key, the backups and the log across restarts
+and redeploys. Its Docker name is pinned to `liveschedulesheets_lss_state` in
+`docker-compose.yml`, so renaming or recreating the stack keeps using it
+(otherwise Docker names it after the stack, and a new stack name would start
+from an empty volume). Don't remove the stack's volumes in Portainer, and back
+the volume up now and then.
 
 ---
 

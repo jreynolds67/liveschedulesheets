@@ -55,4 +55,9 @@ networks:
     name: ${COMPANION_NETWORK:-companion_companion_net}
 
 volumes:
-  lss_state: {}
+  lss_state:
+    # The volume's full Docker name, pinned: without it Docker names it
+    # "<stack name>_lss_state", so renaming or recreating the stack under
+    # another name would start from an empty volume and lose the config,
+    # tracking state and Google key. This is the name it already has.
+    name: liveschedulesheets_lss_state
