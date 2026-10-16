@@ -444,7 +444,7 @@ class Syncer:
             return Target(cid, cname, ERROR, "Could not read this channel from LSP")
         # A hand-made event may carry the sheet's own wording ("MSOC vs UNC").
         found = view.find(cid, name, ev.start) or view.find(
-            cid, ev.lsp_name(self.cfg.scheduling.event_name_prefix), ev.start)
+            cid, f"{self.cfg.scheduling.event_name_prefix}{ev.name}", ev.start)
         if found and found.get("Id") in getattr(self, "_owned", {}):
             return Target(cid, cname, EXISTS, _OWNED, event_id=found.get("Id"))
         if found:

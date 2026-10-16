@@ -13,6 +13,18 @@ DEFAULT_SPORT_CODES = (
     "LAX", "MLAX", "WLAX", "FH", "GOLF", "MGOLF", "WGOLF", "HOCKEY",
 )
 
+# Characters Windows doesn't allow in a file name (the name ends up in
+# Vantage's output file names), and control characters.
+_UNSAFE_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_name(text: str) -> str:
+    """`text` usable as a Windows file name: no periods (removed: "St.
+    Peter's" -> "St Peter's"), the characters Windows forbids replaced by a
+    space ("UNC/Duke" -> "UNC Duke"), spacing tidied."""
+    return " ".join(_UNSAFE_RE.sub(" ", text.replace(".", "")).split())
+
+
 _VS_RE = re.compile(r"\s+(?:vs\.?|v\.)\s+", re.IGNORECASE)
 # A note in brackets: "(7 PM)", "(EXH)". Not two capitals alone, which are
 # part of a team's name: "Miami (OH)".
@@ -23,9 +35,9 @@ def format_event_name(name: str, home_team: str, sport_codes=DEFAULT_SPORT_CODES
     """The name a sheet event gets in LSP (event and Event Name variable).
 
     The sheet lists home games by the opponent alone, so with a home team
-    set, "MSOC vs UNC" becomes "MSOC UNC vs. Pitt". A name that already has
-    two teams keeps them: "VB Jacksonville vs High Point" becomes "VB
-    Jacksonville vs. High Point" (as does "UNC vs Duke", which has no sport
+    set, "MSOC vs UNC" becomes "MSOC UNC vs Pitt". A name that already has
+    two teams keeps them: "VB Jacksonville vs. High Point" becomes "VB
+    Jacksonville vs High Point" (as does "UNC vs. Duke", which has no sport
     code in front). Notes in brackets ("(7 PM)", "(EXH)") are dropped. A name
     with no "vs", or no home team set, is left as the sheet has it."""
     if not home_team.strip():
@@ -36,12 +48,12 @@ def format_event_name(name: str, home_team: str, sport_codes=DEFAULT_SPORT_CODES
     left, right = parts[0].strip(), parts[1].strip()
     words = left.split()
     if not words:  # "vs UNC"
-        return f"{right} vs. {home_team.strip()}"
+        return f"{right} vs {home_team.strip()}"
     if words[-1].upper() in {c.strip().upper() for c in sport_codes}:
         # Only the sport before "vs" (anything ahead of it, like a date,
         # stays): a home game.
-        return f"{left} {right} vs. {home_team.strip()}"
-    return f"{left} vs. {right}"
+        return f"{left} {right} vs {home_team.strip()}"
+    return f"{left} vs {right}"
 
 
 def name_key(name: str) -> str:
@@ -85,5 +97,6 @@ class ScheduledEvent:
 
     def lsp_name(self, prefix: str = "", home_team: str = "",
                  sport_codes=DEFAULT_SPORT_CODES) -> str:
-        """The event's name in LSP: see format_event_name."""
-        return f"{prefix}{format_event_name(self.name, home_team, sport_codes)}".strip()
+        """The event's name in LSP (see format_event_name), made safe for a
+        file name (see safe_name): it ends up in Vantage's output names."""
+        return safe_name(f"{prefix}{format_event_name(self.name, home_team, sport_codes)}")

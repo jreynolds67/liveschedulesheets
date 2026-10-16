@@ -13,20 +13,32 @@ from .conftest import FakeReader, raw_config, sheet_event
 
 
 @pytest.mark.parametrize("sheet, lsp", [
-    ("MSOC vs UNC", "MSOC UNC vs. Pitt"),
-    ("MSOC vs. UNC", "MSOC UNC vs. Pitt"),
-    ("WSOC VS Duke", "WSOC Duke vs. Pitt"),
-    ("MBB vs BOSTON COLLEGE", "MBB BOSTON COLLEGE vs. Pitt"),
-    ("VB Jacksonville vs High Point", "VB Jacksonville vs. High Point"),  # two teams given
-    ("UNC vs. Duke", "UNC vs. Duke"),                                      # no sport code
-    ("MSOC vs Georgetown (8 PM)", "MSOC Georgetown vs. Pitt"),            # notes dropped
-    ("MBB vs Towson (EXH)", "MBB Towson vs. Pitt"),
-    ("FB vs Miami (OH)", "FB Miami (OH) vs. Pitt"),                       # part of the name
-    ("10/25 MSOC vs Virginia (7 PM)", "10/25 MSOC Virginia vs. Pitt"),
+    ("MSOC vs UNC", "MSOC UNC vs Pitt"),
+    ("MSOC vs. UNC", "MSOC UNC vs Pitt"),
+    ("WSOC VS Duke", "WSOC Duke vs Pitt"),
+    ("MBB vs BOSTON COLLEGE", "MBB BOSTON COLLEGE vs Pitt"),
+    ("VB Jacksonville vs High Point", "VB Jacksonville vs High Point"),  # two teams given
+    ("UNC vs. Duke", "UNC vs Duke"),                                      # no sport code
+    ("MSOC vs Georgetown (8 PM)", "MSOC Georgetown vs Pitt"),            # notes dropped
+    ("MBB vs Towson (EXH)", "MBB Towson vs Pitt"),
+    ("FB vs Miami (OH)", "FB Miami (OH) vs Pitt"),                       # part of the name
+    ("10/25 MSOC vs Virginia (7 PM)", "10/25 MSOC Virginia vs Pitt"),
     ("Senior Night (7 PM)", "Senior Night (7 PM)"),                       # no "vs": as is
 ])
 def test_format(sheet, lsp):
     assert format_event_name(sheet, "Pitt") == lsp
+
+
+@pytest.mark.parametrize("sheet, lsp", [
+    ("WBB vs St. Peter's", "WBB St Peter's vs Pitt"),   # no periods anywhere
+    ("MBB vs UNC/Duke", "MBB UNC Duke vs Pitt"),         # / \\ : * ? " < > | -> space
+    ('Senior Night: "Pink" 7 PM?', "Senior Night Pink 7 PM"),
+    ("MSOC vs. UNC", "MSOC UNC vs Pitt"),
+])
+def test_lsp_names_are_safe_windows_file_names(sheet, lsp):
+    name = sheet_event(name=sheet).lsp_name("", "Pitt")
+    assert name == lsp
+    assert not set(name) & set('.<>:"/\\|?*')
 
 
 def test_no_home_team_leaves_names_alone():
@@ -42,9 +54,9 @@ def test_settings(key_file, state_path):
                              sport_safety_caps=[{"sport": "RIFLE", "hours": 2}],
                              event_name_prefix="LIVE ")
     sc = parse_config(raw).scheduling
-    for sheet, lsp in [("ESPORTS vs UNC", "LIVE ESPORTS UNC vs. Panthers"),
-                       ("RIFLE vs Navy", "LIVE RIFLE Navy vs. Panthers"),  # from record lengths
-                       ("MSOC vs UNC", "LIVE MSOC vs. UNC")]:            # not in the custom list
+    for sheet, lsp in [("ESPORTS vs UNC", "LIVE ESPORTS UNC vs Panthers"),
+                       ("RIFLE vs Navy", "LIVE RIFLE Navy vs Panthers"),  # from record lengths
+                       ("MSOC vs UNC", "LIVE MSOC vs UNC")]:            # not in the custom list
         assert sc.lsp_name(sheet_event(name=sheet)) == lsp
 
 
@@ -59,10 +71,10 @@ def home_syncer(key_file, state_path, lsp):
 def test_lsp_gets_the_formatted_name_on_the_event_and_variable(home_syncer, lsp):
     s = home_syncer([sheet_event(name="MSOC vs UNC (7 PM)", pcr="B")])
     [item] = s.plan()
-    assert (item.status, item.lsp_name) == (CREATE, "MSOC UNC vs. Pitt")
+    assert (item.status, item.lsp_name) == (CREATE, "MSOC UNC vs Pitt")
     s.run_once()
     [e] = lsp.events.values()
-    assert e["Name"] == "MSOC UNC vs. Pitt" and lsp.variable_of(e["Id"]) == "MSOC UNC vs. Pitt"
+    assert e["Name"] == "MSOC UNC vs Pitt" and lsp.variable_of(e["Id"]) == "MSOC UNC vs Pitt"
     assert [i.status for i in home_syncer([sheet_event(name="MSOC vs UNC (7 PM)", pcr="B")]).plan()] == [EXISTS]
 
 
@@ -77,7 +89,7 @@ def test_events_already_in_lsp_are_renamed(key_file, state_path, lsp):
     assert [i.status for i in s.plan()] == [UPDATE]
     s.run_once()
     [e] = lsp.events.values()
-    assert e["Name"] == "MSOC UNC vs. Pitt" and lsp.variable_of(e["Id"]) == "MSOC UNC vs. Pitt"
+    assert e["Name"] == "MSOC UNC vs Pitt" and lsp.variable_of(e["Id"]) == "MSOC UNC vs Pitt"
 
 
 def test_hand_made_event_in_the_sheets_wording_is_not_duplicated(home_syncer, lsp):

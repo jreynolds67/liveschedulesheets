@@ -230,9 +230,10 @@
       <div><label>Sport codes</label><input type="text" id="sport_codes" placeholder="FB, MBB, WBB, MSOC, WSOC, VB, …" /></div>
     </div>
     <div class="hint">The name each event gets in LSP, and in its Event Name variable. A home game, listed in
-      the sheet by sport and opponent, gets the home team: “MSOC vs UNC” → “MSOC UNC vs. Pitt”. A name that
-      already has two teams keeps them: “VB Jacksonville vs High Point” → “VB Jacksonville vs. High Point”.
-      Notes in brackets like “(7 PM)” or “(EXH)” are dropped. <b>Sport codes</b> (comma-separated; blank =
+      the sheet by sport and opponent, gets the home team: “MSOC vs UNC” → “MSOC UNC vs Pitt”. A name that
+      already has two teams keeps them: “VB Jacksonville vs. High Point” → “VB Jacksonville vs High Point”.
+      Notes in brackets like “(7 PM)” or “(EXH)” are dropped, and names are always valid Windows file names
+      (no periods; &lt; &gt; : " / \ | ? * become spaces). <b>Sport codes</b> (comma-separated; blank =
       the usual ones) tell a sport from a team in front of “vs”; the codes under Record length by sport
       count too. Changing these renames events already in LSP that haven't started.</div>
     <div class="grid2">

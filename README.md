@@ -253,13 +253,18 @@ is read, all its visible tabs are read, as before.
 ## Event names in LSP
 
 The sheet lists a home game by sport and opponent: `MSOC vs UNC`. In LSP —
-the event's name and its Event Name variable — it becomes `MSOC UNC vs. Pitt`
+the event's name and its Event Name variable — it becomes `MSOC UNC vs Pitt`
 (the **Home team** in the Scheduling card; `Pitt` by default). An event the
 sheet already lists with two teams keeps them: `VB Jacksonville vs High Point`
-→ `VB Jacksonville vs. High Point`, and `UNC vs Duke` (no sport in front) →
-`UNC vs. Duke`. Notes in brackets, like `(7 PM)` or `(EXH)`, are dropped; two
+→ `VB Jacksonville vs High Point`, and `UNC vs Duke` (no sport in front) →
+`UNC vs Duke`. Notes in brackets, like `(7 PM)` or `(EXH)`, are dropped; two
 capitals in brackets are part of a team's name and stay (`FB vs Miami (OH)` →
-`FB Miami (OH) vs. Pitt`). A name with no `vs` is used as the sheet has it.
+`FB Miami (OH) vs Pitt`). A name with no `vs` is used as the sheet has it.
+
+The name ends up in Vantage's output file names, so it's always made a valid
+Windows file name: **no periods** (removed: `vs.` → `vs`, `St. Peter's` →
+`St Peter's`), and `< > : " / \ | ? *` replaced by a space (`UNC/Duke` →
+`UNC Duke`). This applies even with no home team set.
 
 What counts as a sport (rather than a team) in front of `vs` is the **Sport
 codes** list (`scheduling.sport_codes`; blank = FB, MBB, WBB, MSOC, WSOC, VB,
@@ -276,7 +281,7 @@ Each PCR channel's Vantage workflow has a text variable named **Event Name**
 (e.g. `Event XX`). When an event is created, LSP copies the channel's
 variables into it, so a new event starts out holding that default. The tool
 replaces it with the event's LSP name (from the sheet's `EVENT` cell, as
-described in [Event names in LSP](#event-names-in-lsp): `MSOC UNC vs. Pitt`),
+described in [Event names in LSP](#event-names-in-lsp): `MSOC UNC vs Pitt`),
 the same on every channel. Vantage adds the channel,
 date and time itself.
 
