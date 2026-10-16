@@ -246,9 +246,10 @@
       <div><label>Dry run</label>
         <div class="switch"><input type="checkbox" id="dry_run" /><span class="hint" id="dryHint">On: syncs only log what they would create. Only Preview's <b>SEND TO LSP</b> and the delete buttons change LSP. Applies immediately.</span></div></div>
     </div>
-    <div><label>Alert webhook URL</label>
-      <div class="row"><input type="text" id="alert_webhook" placeholder="https://… (Slack, Teams / Power Automate, Discord…; blank = off)" />
-        <button id="btnTestAlert" class="ghost mini">Send test alert</button></div>
+    <div><label>Alert webhook URL <span id="hookSet" class="hint"></span></label>
+      <div class="row"><input type="password" id="alert_webhook" autocomplete="off" placeholder="https://… (Slack, Teams Workflows, Discord…)" />
+        <button id="btnTestAlert" class="ghost mini">Send test alert</button>
+        <button id="btnClearHook" class="ghost mini">Remove</button></div>
       <div class="hint" style="margin-top:6px">Gets a message when syncing keeps failing (and when it recovers),
         and once for each new problem in the sheet, such as a game whose time can't be read or a new tab waiting
         to be turned on. Monitoring tools can also poll <code>/healthz/sync</code> (200 = working, 503 = not).</div></div>
@@ -367,6 +368,13 @@ async function saveConfig(){
     delete cfg.lsp.password; $("lsp_password").value = "";
     $("pwSet").textContent = "(set)"; cfg.lsp.password_set = true;
   }
+  if (cfg.runtime && (cfg.runtime.alert_webhook_url || cfg.runtime.alert_webhook_clear)){
+    const set = !!cfg.runtime.alert_webhook_url;
+    cfg.runtime.alert_webhook_set = set;
+    cfg.runtime.alert_webhook_host = set ? (() => { try { return new URL(cfg.runtime.alert_webhook_url).hostname; } catch { return ""; } })() : "";
+    delete cfg.runtime.alert_webhook_url; delete cfg.runtime.alert_webhook_clear;
+    $("alert_webhook").value = ""; showHook();
+  }
   if (r.password_cleared){
     $("pwSet").textContent = "(not set)"; cfg.lsp.password_set = false;
     toast("LSP server changed, so the saved password was cleared - enter it again", 6000);
@@ -399,7 +407,8 @@ function fillForm(){
   get(cfg,"scheduling.sport_safety_caps",[]).forEach(c => addCapRow(c.sport, c.hours));
 
   $("poll_interval").value = get(cfg,"runtime.poll_interval_seconds",900);
-  $("alert_webhook").value = get(cfg,"runtime.alert_webhook_url","");
+  $("alert_webhook").value = "";
+  showHook();
   $("dry_run").checked = !get(cfg,"runtime.live",false);
 
   $("lbl_event").value = csv(get(cfg,"sheet.labels.event_name",["EVENT"]));
@@ -496,7 +505,9 @@ function gather(){
 
   cfg.runtime = cfg.runtime || {};
   cfg.runtime.poll_interval_seconds = +$("poll_interval").value;
-  cfg.runtime.alert_webhook_url = $("alert_webhook").value.trim();
+  const hook = $("alert_webhook").value.trim();
+  if (hook) cfg.runtime.alert_webhook_url = hook;   // only sent when entered
+  else delete cfg.runtime.alert_webhook_url;
   delete cfg.runtime.live;  // the dry-run switch saves on its own (/api/dry-run)
 
   cfg.date_parsing = cfg.date_parsing || {};
@@ -868,6 +879,15 @@ function renderOverrides(){
 
 async function loadConfig(){ cfg = await api("GET","/api/config"); fillForm(); }
 
+// A list of warnings, the first WARN_SHOWN of them (a tab full of bad cells
+// would otherwise fill the page).
+const WARN_SHOWN = 15;
+function warnList(texts){
+  const more = texts.length - WARN_SHOWN;
+  return `<ul class="warnlist">` + texts.slice(0, WARN_SHOWN).map(t => `<li>${esc(t)}</li>`).join("")
+    + (more > 0 ? `<li>…and ${more} more</li>` : "") + `</ul>`;
+}
+
 let lastStatus = null;
 async function refreshStatus(){
   const s = lastStatus = await api("GET","/api/status");
@@ -898,8 +918,8 @@ async function refreshStatus(){
   if (s.sync_ok === false) html += `<div style="color:var(--err)">⚠ Syncing isn't working: ${esc(s.sync_health)}</div>`;
   else if (s.last_clean) html += `<div class="hint">Last sync without errors: ${new Date(s.last_clean).toLocaleString()}</div>`;
   const warns = (s.last_run && s.last_run.summary && s.last_run.summary.warnings) || [];
-  if (warns.length) html += `<div style="color:var(--warn)">⚠ Needs attention (${warns.length}):<ul class="warnlist">`
-    + warns.map(w => `<li>${esc(w.text)}</li>`).join("") + `</ul></div>`;
+  if (warns.length) html += `<div style="color:var(--warn)">⚠ Needs attention (${warns.length}):`
+    + warnList(warns.map(w => w.text)) + `</div>`;
   $("statusBox").innerHTML = html;
 }
 
@@ -919,8 +939,8 @@ function renderPreview(items, warnings){
   lastPreview = items || [];
   if (warnings !== undefined) lastPreviewWarnings = warnings;
   const warnHtml = lastPreviewWarnings.length
-    ? `<div style="color:var(--warn)">⚠ Not scheduled / needs attention:<ul class="warnlist">`
-      + lastPreviewWarnings.map(w => `<li>${esc(w)}</li>`).join("") + `</ul></div>` : "";
+    ? `<div style="color:var(--warn)">⚠ Not scheduled / needs attention:`
+      + warnList(lastPreviewWarnings) + `</div>` : "";
   if (!items.length){ $("previewBox").innerHTML = warnHtml + "No schedulable events found."; return; }
   const nLocked = items.filter(i => i.locked).length;
   const unlockAll = nLocked > 1
@@ -1207,6 +1227,18 @@ $("btnRun").onclick = async () => {
   else toast("Run failed: " + r.error, 5000);
   refreshStatus(); loadScheduled(); refreshPreviewIfShown();
 };
+function showHook(){
+  const set = get(cfg,"runtime.alert_webhook_set",false);
+  $("hookSet").textContent = set ? `(set: ${get(cfg,"runtime.alert_webhook_host","")})` : "(not set)";
+  $("alert_webhook").placeholder = set ? "•••••• (leave blank to keep)" : "https://… (Slack, Teams Workflows, Discord…)";
+  $("btnClearHook").style.display = set ? "" : "none";
+}
+$("btnClearHook").onclick = async () => {
+  if (!confirm("Remove the alert webhook? No more alerts will be sent.")) return;
+  cfg.runtime = cfg.runtime || {}; cfg.runtime.alert_webhook_clear = true; $("alert_webhook").value = "";
+  if (await saveConfig()) toast("Alert webhook removed");
+};
+
 async function loadActivity(){
   const r = await api("GET", `/api/activity${$("actChanges").checked ? "?changes=1" : ""}`);
   const box = $("activityBox");

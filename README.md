@@ -112,8 +112,8 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   whether syncing is working, when it last ran without errors, and what in
   the sheet needs attention. It's kept across restarts (`/data/status.json`).
 - **Alerts** — set an **Alert webhook URL** (Runtime card; Slack, Microsoft
-  Teams / Power Automate, Discord, or anything that takes a JSON POST) to be
-  told when syncing stops working. See [Alerts and
+  Teams, Discord, or anything that takes a JSON POST) to be told when syncing
+  stops working. See [Alerts and
   monitoring](#alerts-and-monitoring).
 - **Activity** — the end of the tool's log, kept on the data volume across
   redeploys: everything it created, updated, removed or locked, and every
@@ -374,15 +374,22 @@ Google key, the sheet's sharing, the LSP login and LSP itself — is checked
 two ways:
 
 - **Alert webhook** (`runtime.alert_webhook_url`, set in the Runtime card;
-  **Send test alert** checks it). A message is posted when passes keep failing
+  **Send test alert** checks it). The message is shaped for the service the
+  URL belongs to: Slack (`hooks.slack.com`), Discord, Microsoft Teams — a
+  *Workflows* webhook (the "Send webhook alerts to a channel" template; its URL
+  is on `logic.azure.com` or `powerplatform.com`) gets an Adaptive Card, an
+  older `office.com` connector plain text — and anything else gets
+  `{"text", "content"}`. Like the LSP password, the URL is never sent back to
+  the browser (it's a secret: anyone with it can post to the channel); leave
+  the box blank to keep it, or **Remove** it. A message is posted when passes keep failing
   (two in a row, so a single blip doesn't wake anyone), again every 6 hours
   while it lasts, and once when it recovers; once for each new sheet warning
   (a game that can't be scheduled, a new tab, LSP's clock or event statuses
   looking wrong); and before the watchdog restarts the app. What was sent is
   remembered across restarts, so nothing is repeated.
 - **`GET /healthz/sync`** (no login): `200 ok` while syncing works, `503` with
-  the reason when the last pass failed or none has run without errors for
-  3 intervals (at least 45 minutes). Point Uptime Kuma, Companion or any
+  the reason when the last two passes failed (one is a blip, as for alerts) or
+  none has run without errors for 3 intervals (at least 45 minutes). Point Uptime Kuma, Companion or any
   monitor at it. Docker's health check deliberately doesn't use it: a restart
   can't fix a revoked key or a changed password.
 
@@ -552,7 +559,8 @@ PCR (renamed in LSP, or the channel match edited) is left in LSP.
 snapshot and with the values it last sent. If the name, start or end match
 neither, the event-name variable holds something the tool didn't put there,
 the event was **canceled** in LSP, or it was deleted or moved to another
-channel, **someone changed it in LSP**, and the whole sheet event is
+channel (checked by asking LSP for that event, so one reply that leaves it out
+of the channel's list doesn't lock it), **someone changed it in LSP**, and the whole sheet event is
 **locked**: the tool never updates, re-creates or deletes it again, and the
 cleanup button skips it. Locks are recorded even in dry run. Preview shows
 locked events with the reason and an **Unlock** button (`POST /api/unlock`
@@ -605,7 +613,8 @@ backup is restored, and the Status card says so (events scheduled since that
 backup are then treated as made by hand); one that can't be read at all stops
 the sync with an error rather than being overwritten. If `config.yaml` is
 broken by a hand edit, it's moved to `config.yaml.broken-<time>` and the last
-saved settings (`config.yaml.lastgood`) put back, so the UI still opens.
+readable settings (`config.yaml.lastgood`, refreshed on every save and
+whenever a newer `config.yaml` loads cleanly) put back, so the UI still opens.
 Back up the `/data` volume itself too: if `state.json` is lost, the tool falls back to
 matching LSP events by channel + name + start minute, so unchanged events
 aren't duplicated (they are then treated as made by hand and no longer follow
@@ -615,7 +624,11 @@ keep the volume.
 **Errors show in the Status card** (and are alerted). If the Google Sheet can't be opened (unshared,
 key revoked, Google down), the pass fails with that error instead of reading as
 an empty sheet; a single tab that can't be read is skipped (its events show as
-**not in sheet**, which deletes nothing) and counted as an error.
+**not in sheet**, which deletes nothing) and counted as an error. A
+configuration problem (settings incomplete, the key file missing, another copy
+holding the state file during a redeploy) is retried after a minute rather
+than a whole interval. Warnings are logged once when they appear, not every
+pass, and the Status card lists the first 15.
 
 **LSP reads.** Each pass reads only the events that haven't finished
 (GetFilteredEvents with the Waiting, Queued, Recording and Canceled statuses),
@@ -625,10 +638,13 @@ event instead. A read that fails to connect, times out or gets a 502/503/504 is
 retried twice before the pass gives up on it; changes to LSP are never
 retried that way, since they may have worked. A booked channel LSP no longer
 lists (deleted, or recreated with a new id) is skipped rather than holding
-the event up; a channel recreated under the same name is booked afresh.
+the event up, and its old time no longer counts towards when the event
+starts; after a day missing, the booking is forgotten. A channel recreated
+under the same name is booked afresh.
 
 **LSP checks.** The Status card (and an alert) warns when this machine's
-clock is more than a minute off LSP's (from its replies' `Date` header:
+clock is more than a minute off LSP's (from its replies' `Date` header, the
+closest of the last 20 replies, so one slow reply doesn't count:
 "started" is judged by this clock), when LSP shows events as *Queued* more
 than 30 minutes before they start (the tool treats Queued as started, so it
 would stop applying sheet changes to them), and when LSP sends event times

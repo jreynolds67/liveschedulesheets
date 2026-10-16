@@ -182,8 +182,11 @@ def record_start(rec: dict) -> Optional[datetime]:
     after a pass whose update reached some channels but not others; a
     channel that starts sooner counts, so a recording is never changed."""
     starts = [_parse_time(rec.get("start"))]
+    # Not a channel LSP no longer lists: its event went with it, and its
+    # old time would make the event look started early.
     starts += [_parse_time((b.get("written") or {}).get("Start"))
-               for b in (rec.get("bookings") or {}).values() if b.get("by_tool")]
+               for b in (rec.get("bookings") or {}).values()
+               if b.get("by_tool") and not b.get("gone_since")]
     starts = [s for s in starts if s is not None]
     return min(starts) if starts else None
 

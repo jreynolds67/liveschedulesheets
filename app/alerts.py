@@ -1,8 +1,9 @@
 """Tell someone when syncing stops working, or the sheet needs attention.
 
-Posts a short message to a webhook (`runtime.alert_webhook_url`: Slack,
-Microsoft Teams / Power Automate, Discord, or anything taking a JSON POST;
-the body carries the message as both `text` and `content`):
+Posts a short message to a webhook (`runtime.alert_webhook_url`), shaped
+for the service its address belongs to (see _payload): Slack, Discord,
+Microsoft Teams (a Workflows / Power Automate webhook, or an older
+office.com connector), or anything else taking a JSON POST:
 
 - when passes keep failing (two in a row, so one LSP blip isn't an alert),
   again every few hours while it lasts, and once when it recovers;
@@ -17,6 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -79,10 +81,30 @@ class Alerter:
         if not url:
             return False
         try:
-            resp = requests.post(url, json={"text": text, "content": text}, timeout=10)
+            resp = requests.post(url, json=_payload(url, text), timeout=10)
             resp.raise_for_status()
         except requests.RequestException as exc:
             log.warning("Could not send alert to the webhook: %s", exc)
             return False
         log.info("Alert sent: %s", text.splitlines()[0])
         return True
+
+
+def _payload(url: str, text: str) -> dict:
+    """The JSON body for a message, in the shape the webhook's service wants."""
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "hooks.slack.com" or host.endswith(".slack.com"):
+        return {"text": text}
+    if host.endswith(("discord.com", "discordapp.com")):
+        return {"content": text[:2000]}  # Discord's limit
+    if host.endswith(("logic.azure.com", "powerplatform.com", "powerautomate.com")):
+        # A Teams "Workflows" (Power Automate) webhook takes an Adaptive Card.
+        return {"type": "message", "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {"$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard", "version": "1.4",
+                        "body": [{"type": "TextBlock", "text": line, "wrap": True}
+                                 for line in text.splitlines() if line.strip()]}}]}
+    if host.endswith("office.com"):
+        return {"text": text.replace("\n", "\n\n")}  # older Teams connector: markdown
+    return {"text": text, "content": text}

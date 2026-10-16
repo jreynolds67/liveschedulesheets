@@ -46,7 +46,8 @@ def config_version(raw: dict) -> str:
     view = {k: copy.deepcopy(raw.get(k)) for k in UI_SECTIONS}
     for k in ("password", "password_for"):
         (view.get("lsp") or {}).pop(k, None)
-    (view.get("runtime") or {}).pop("live", None)
+    for k in ("live", "alert_webhook_url"):
+        (view.get("runtime") or {}).pop(k, None)
     blob = json.dumps(view, sort_keys=True, default=str).encode()
     return hashlib.sha1(blob).hexdigest()[:16]
 
@@ -94,11 +95,14 @@ class SettingsStore:
 
     def load(self) -> dict:
         """The saved settings. If config.yaml was broken by hand (not valid
-        YAML), it is moved aside and the last good copy (saved with it on
-        every save) put back, so the tool and the web UI keep working."""
+        YAML), it is moved aside and the last good copy put back, so the tool
+        and the web UI keep working. That copy is refreshed on every save and
+        whenever a newer config.yaml (a hand edit) loads cleanly."""
         with self._lock:
             try:
-                return load_raw(self.path)
+                raw = load_raw(self.path)
+                self._keep_good()
+                return raw
             except ConfigError as exc:
                 if not os.path.exists(self.path) or not os.path.exists(self._good_path):
                     raise
@@ -118,13 +122,20 @@ class SettingsStore:
     def _good_path(self) -> str:
         return self.path + ".lastgood"
 
+    def _keep_good(self) -> None:
+        """Copy config.yaml to the last-good copy if it's newer (copy2 keeps
+        its time, so an unchanged file isn't copied again)."""
+        try:
+            if (not os.path.exists(self._good_path)
+                    or os.path.getmtime(self.path) > os.path.getmtime(self._good_path)):
+                shutil.copy2(self.path, self._good_path)  # keeps owner-only permissions
+        except OSError as exc:
+            log.warning("Could not keep a copy of %s: %s", self.path, exc)
+
     def save(self, raw: dict) -> None:
         with self._lock:
             save_raw(self.path, raw)
-            try:
-                shutil.copy2(self.path, self._good_path)  # keeps owner-only permissions
-            except OSError as exc:
-                log.warning("Could not keep a copy of %s: %s", self.path, exc)
+            self._keep_good()
             keep_daily_backup(self.path)
 
     def update(self, change: Callable[[dict], None]) -> dict:
@@ -151,6 +162,13 @@ class SettingsStore:
         lsp.pop("password", None)
         lsp.pop("password_for", None)
         raw["lsp"] = lsp
+        # The alert webhook URL is a secret too (anyone holding it can post
+        # to the channel): only whether it's set, and the service's host.
+        runtime = raw.get("runtime") or {}
+        url = str(runtime.pop("alert_webhook_url", "") or "").strip()
+        runtime["alert_webhook_set"] = bool(url)
+        runtime["alert_webhook_host"] = (urlsplit(url).hostname or "") if url else ""
+        raw["runtime"] = runtime
         raw["_version"] = version
         # never expose a stored key path beyond a boolean
         google = raw.get("google") or {}
@@ -278,6 +296,17 @@ class SettingsStore:
                             "entered again; the password is cleared", old_url, new_url)
 
         runtime = merged.setdefault("runtime", {})
+        # The alert webhook URL is never sent to the browser, so a blank one
+        # keeps the saved URL; alert_webhook_clear removes it.
+        sent = runtime.pop("alert_webhook_url", None)
+        clear = runtime.pop("alert_webhook_clear", False)
+        for k in ("alert_webhook_set", "alert_webhook_host"):
+            runtime.pop(k, None)
+        old = (current.get("runtime") or {}).get("alert_webhook_url")
+        if sent and str(sent).strip():
+            runtime["alert_webhook_url"] = str(sent).strip()
+        elif old and not clear:
+            runtime["alert_webhook_url"] = old
         if "live" in (current.get("runtime") or {}):
             runtime["live"] = current["runtime"]["live"]
         else:

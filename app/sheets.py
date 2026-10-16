@@ -188,7 +188,7 @@ class SheetReader:
                 log.info("Tab %r is turned off; skipping", tab)
             return override.enabled
         if known_tabs is not None and tab not in known_tabs and not self.cfg.sheet.tabs:
-            log.warning("New tab %r is not read until it is turned on in the UI", tab)
+            log.info("New tab %r is not read until it is turned on in the UI", tab)
             self.warnings.append(_warning(
                 tab, f"New tab “{tab}” isn't read until you turn on Include this tab "
                      "(Sheet tabs & row mapping) and Save"))
@@ -230,7 +230,7 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config,
     missing = [what for fld, what in (("event_name", "EVENT"), ("date", "DATE"),
                                       ("time", "start time")) if row_of[fld] is None]
     if missing:
-        log.warning("Tab %r: no %s row found; skipping", tab, " / ".join(missing))
+        log.info("Tab %r: no %s row found; skipping", tab, " / ".join(missing))
         problems.append(_warning(
             tab, f"Tab “{tab}” is not read: no {' / '.join(missing)} row found. Pick the rows "
                  "under Sheet tabs & row mapping, or turn the tab off if it holds no games"))
@@ -249,7 +249,11 @@ def parse_grid(tab: str, grid: list[list[str]], cfg: Config,
         else:
             why = _unschedulable(tab, grid, row_of, col, cfg, seen)
             if why:
-                problems.append(_warning(tab, why, col + 1))
+                # Known by its cells, not its column letter, so inserting a
+                # column doesn't make every warning on the tab look new.
+                key = "|".join([tab] + [_cell(grid, row_of.get(f), col)
+                                        for f in ("event_name", "date", "time")])
+                problems.append(_warning(tab, why, col + 1, key))
     for ev in out:
         ev.same_day = seen.get((name_key(ev.name), ev.event_date), 1)
 
@@ -514,11 +518,11 @@ def _parse_start(grid, row_of, col, cfg) -> Optional[datetime]:
     return _parse_datetime_string(f"{date_val} {time_val}", tz)
 
 
-def _warning(tab: str, text: str, column: Optional[int] = None) -> dict:
+def _warning(tab: str, text: str, column: Optional[int] = None,
+             key: Optional[str] = None) -> dict:
     """A sheet problem for Status and Preview. `key` identifies it, so an
-    alert about it is sent once, not every pass."""
-    where = f"{tab}!{_col_index_to_letter(column - 1)}" if column else tab
-    return {"tab": tab, "column": column, "text": text, "key": f"{where}: {text}"}
+    alert about it is sent once, not every pass (by default its text)."""
+    return {"tab": tab, "column": column, "text": text, "key": key or f"{tab}: {text}"}
 
 
 def _unschedulable(tab, grid, row_of, col, cfg, seen) -> Optional[str]:

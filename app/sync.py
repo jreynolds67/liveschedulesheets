@@ -30,7 +30,7 @@ from typing import Callable, Optional
 from dateutil import parser as dateparser
 
 from .config import Config
-from .lsp_client import LspClient, LspError
+from .lsp_client import CURRENT_STATUSES, LspClient, LspError
 from .lsp_client import event_status as _status
 from .models import ScheduledEvent, name_key
 from .runtime import LOCAL_TZ
@@ -59,6 +59,7 @@ _SNAPSHOT_FIELDS = ("Name", "Start", "End", "ChannelId", "CreatedByDisplayName")
 # the tool's to change: LSP has queued or started these (or they ran), and a
 # Canceled one was canceled by hand.
 _ACTIVE = {"queued", "recording", "complete", "failed", "timeout"}
+_CURRENT = {s.lower() for s in CURRENT_STATUSES}
 
 # LSP's clock and this machine's may differ by this much before it's worth
 # a warning ("started" is judged by this machine's clock).
@@ -66,6 +67,9 @@ _CLOCK_SKEW_SECONDS = 60
 # A Queued event this far from its start suggests LSP queues events early,
 # which would freeze them (Queued counts as started).
 _EARLY_QUEUE = timedelta(minutes=30)
+
+# A booking whose channel LSP hasn't listed for this long is forgotten.
+GONE_FORGET = timedelta(days=1)
 
 # An event this close to its start counts as started: a pass takes a while,
 # and an update must never reach LSP after the recording has begun.
@@ -147,6 +151,16 @@ class _LspView:
                 if e.get("Id"):
                     self.by_id[e["Id"]] = (cid, e)
 
+    def add(self, e: dict, channel_id: str) -> tuple[str, dict]:
+        """Add an event read on its own (by id); returns (its channel, it)."""
+        cid = e.get("ChannelId") or channel_id
+        if str(cid).lower() == channel_id.lower():
+            cid = channel_id
+        self.by_channel.setdefault(cid, []).append(e)
+        if e.get("Id"):
+            self.by_id[e["Id"]] = (cid, e)
+        return cid, e
+
     def find(self, channel_id: str, name: str, start: datetime) -> Optional[dict]:
         """An event on the channel with this name (ignoring case and spacing)
         and start minute."""
@@ -175,6 +189,7 @@ class Syncer:
         # Not errors, but someone should look: unreadable columns, new tabs,
         # LSP behaving unexpectedly... ({"text", "key"}; see sheets._warning).
         self.sheet_warnings: list[dict] = []
+        self._logged_warnings: set[str] = set()  # logged once, not every pass
 
     # -- planning (read-only) ----------------------------------------------
 
@@ -189,6 +204,7 @@ class Syncer:
         self.state.note_tabs(sheet_id, getattr(self.reader, "visible", None) or []
                              if known is None else getattr(self.reader, "read_tabs", None) or [])
         if not events and not self.state.events:
+            self._log_new_warnings()
             return []
 
         channels = self.lsp.get_all_channels()
@@ -201,6 +217,7 @@ class Syncer:
         # not read LSP" for good. Their bookings are kept, in case the
         # channel is only missing from this one reply.
         self._gone = {cid for cid in booked if cid not in names}
+        self._note_gone(_now_iso())
         view = _LspView(self.lsp, wanted | (booked - self._gone))
         self._view = view  # _execute rebaselines snapshots from it
         # LSP event id -> the record whose tool-made booking it is, so one
@@ -232,10 +249,45 @@ class Syncer:
         items = [i for i in items if not self._finished(i, now)]
         _note_overlaps(items, view)
         self.sheet_warnings += self._lsp_warnings(view, now)
+        self._log_new_warnings()
         for item in items:
             if item.event.note:
                 item.message = "; ".join(m for m in (item.message, item.event.note) if m)
         return items
+
+    def _log_new_warnings(self) -> None:
+        """Log each warning when it appears (they're in Status and alerts
+        every pass), and again if it goes away and comes back."""
+        keys = {w["key"] for w in self.sheet_warnings}
+        for w in self.sheet_warnings:
+            if w["key"] not in self._logged_warnings:
+                log.warning("Needs attention: %s", w["text"])
+        self._logged_warnings = keys
+
+    def _note_gone(self, now_iso: str) -> None:
+        """Mark bookings on channels LSP no longer lists with when that was
+        first seen (record_start ignores them), and unmark ones whose
+        channel is back. Observed, not an action, so done in dry run too."""
+        for rec in self.state.events.values():
+            for cid, b in rec.get("bookings", {}).items():
+                if cid in self._gone:
+                    b.setdefault("gone_since", now_iso)
+                else:
+                    b.pop("gone_since", None)
+
+    def _forget_gone(self) -> None:
+        """Forget bookings whose channel has been missing from LSP for over
+        GONE_FORGET (deleted for good, not a reply that left it out)."""
+        cutoff = datetime.now(timezone.utc) - GONE_FORGET
+        for rec in self.state.events.values():
+            bookings = rec.get("bookings", {})
+            for cid, b in list(bookings.items()):
+                since = _parse_utc(b.get("gone_since"))
+                if since and since < cutoff:
+                    del bookings[cid]
+                    log.warning("Forgot %r's booking on channel %s: it has been gone from LSP "
+                                "since %s", rec.get("lsp_name") or rec.get("name"),
+                                b.get("channel_name") or cid, b["gone_since"])
 
     def _lsp_warnings(self, view: _LspView, now: datetime) -> list[dict]:
         """LSP behaving in ways the sync relies on it not to (see the README),
@@ -264,8 +316,6 @@ class Syncer:
                 f"LSP sends event times without a time zone (e.g. “{naive['Start']}”), so the "
                 "tool can't tell UTC from local time; same-named games exactly the UTC offset "
                 "apart could be confused")})
-        for w in out:
-            log.warning("%s", w["text"])
         return out
 
     def _finished(self, item: PlanItem, now: datetime) -> bool:
@@ -567,7 +617,20 @@ class Syncer:
                 end = _parse_utc((snap or {}).get("End")) or _parse_utc(rec.get("end"))
                 if end and end < now:
                     continue  # finished and cleared out of LSP
-                return f"{label}: deleted or moved in LSP"
+                # Not in the channel's events. Before calling it deleted (and
+                # locking it), ask LSP for it by id: one reply that wrongly
+                # left it out mustn't lock every event on the channel.
+                try:
+                    fresh = self.lsp.get_event(b["event_id"]) if b.get("event_id") else None
+                except LspError:
+                    return None
+                if fresh is None:
+                    return f"{label}: deleted or moved in LSP"
+                hit = view.add(fresh, cid)
+                if _status(fresh) in _CURRENT and hasattr(self.lsp, "filter_off"):
+                    self.lsp.filter_off("an unfinished event was missing from its reply")
+                log.warning("%r on %s was missing from LSP's list of the channel's events, but "
+                            "LSP still has it", rec.get("lsp_name") or rec.get("name"), label)
             found_cid, e = hit
             if found_cid != cid:
                 return f"{label}: moved to another channel in LSP"
@@ -627,6 +690,8 @@ class Syncer:
         summary["warnings"] = self.sheet_warnings
         try:
             self._execute(items, summary, live=not self.cfg.runtime.dry_run)
+            if not self.cfg.runtime.dry_run:
+                self._forget_gone()
             self._prune()
         finally:
             self.state.save()  # keep what was written even if the pass broke off

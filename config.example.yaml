@@ -142,7 +142,9 @@ runtime:
                                    # survives restarts. Log level: LOG_LEVEL env var.
   # Where to tell someone when syncing keeps failing (and when it recovers),
   # and about each new problem in the sheet (a game whose time can't be read,
-  # a new tab waiting to be turned on...). A webhook taking a JSON POST: Slack,
-  # Microsoft Teams / Power Automate, Discord... (the message is sent as both
-  # "text" and "content"). Blank = no alerts; /healthz/sync can be polled too.
+  # a new tab waiting to be turned on...). A webhook taking a JSON POST; the
+  # message is shaped for Slack, Discord, Microsoft Teams (a Workflows webhook
+  # gets an Adaptive Card) or, for anything else, sent as "text" and
+  # "content". Set it in the UI: it's kept secret like the LSP password.
+  # Blank = no alerts; /healthz/sync can be polled too.
   alert_webhook_url: ""

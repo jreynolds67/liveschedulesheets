@@ -259,7 +259,8 @@ def test_columns_that_cant_be_scheduled_are_reported(tmp_path):
     # Only Pitt: TBD, blank, long past and blank-date columns aren't worth a warning.
     assert [p["text"] for p in problems] == [
         "“VB vs Pitt” (Fall column B) isn't scheduled: the time “7:00” has no AM/PM"]
-    assert problems[0]["key"].startswith("Fall!B: ")
+    # Known by its cells, so inserting a column doesn't make it look new.
+    assert problems[0]["key"] == f"Fall|VB vs Pitt|{_future()}|7:00"
 
 
 def test_ignoring_a_column_silences_its_warning(tmp_path):

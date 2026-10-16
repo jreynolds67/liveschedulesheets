@@ -65,10 +65,12 @@ def test_no_webhook_sends_nothing(sent):
 def test_sync_health_and_saved_status(tmp_path, key_file, monkeypatch):
     m = manager(tmp_path, key_file, monkeypatch)
     assert m.sync_health() == (True, "starting: no sync pass yet")
-    m._finished({"errors": 1, "problems": ["GetAllChannels failed (401)"], "warnings": []},
-                "scheduled")
+    failed = {"errors": 1, "problems": ["GetAllChannels failed (401)"], "warnings": []}
+    m._finished(failed, "scheduled")
+    assert m.sync_health()[0]  # one blip isn't "broken", as with alerts
+    m._finished(failed, "scheduled")
     ok, why = m.sync_health()
-    assert not ok and "401" in why
+    assert not ok and "401" in why and "last 2 syncs failed" in why
     m._finished({"errors": 0, "problems": [], "warnings": []}, "scheduled")
     assert m.sync_health() == (True, "ok")
     # A restart keeps the Status card and the alert record.
@@ -194,3 +196,53 @@ def test_status_file_is_json(tmp_path, key_file, monkeypatch):
     m._finished({"errors": 0, "problems": [], "warnings": []}, "manual")
     data = json.loads((tmp_path / "status.json").read_text())
     assert data["last_ok"] is True and data["last_run"]["trigger"] == "manual"
+
+
+# -- second ops audit -------------------------------------------------------------
+
+def test_webhook_payload_suits_the_service():
+    from app.alerts import _payload
+    assert _payload("https://hooks.slack.com/services/T/B/x", "hi") == {"text": "hi"}
+    assert _payload("https://discord.com/api/webhooks/1/x", "hi") == {"content": "hi"}
+    teams = _payload("https://prod-1.westus.logic.azure.com/workflows/abc/triggers/x", "a\nb")
+    card = teams["attachments"][0]["content"]
+    assert teams["type"] == "message" and card["type"] == "AdaptiveCard"
+    assert [b["text"] for b in card["body"]] == ["a", "b"]
+    assert _payload("https://alerts.example/hook", "hi") == {"text": "hi", "content": "hi"}
+
+
+def test_webhook_url_is_kept_from_the_browser(tmp_path, key_file):
+    path = tmp_path / "config.yaml"
+    store = SettingsStore(str(path), str(tmp_path / "missing-seed.yaml"))
+    store.save(raw_config(key_file, str(tmp_path / "state.json"),
+                          runtime={"alert_webhook_url": "https://hooks.slack.com/services/T/B/secret"}))
+    page = store.load_safe()
+    assert "alert_webhook_url" not in page["runtime"]
+    assert page["runtime"]["alert_webhook_set"] and page["runtime"]["alert_webhook_host"] == "hooks.slack.com"
+    store.save_from_ui(page)  # saved back blank: kept
+    assert store.load()["runtime"]["alert_webhook_url"].endswith("/secret")
+    page = store.load_safe()
+    page["runtime"]["alert_webhook_clear"] = True
+    store.save_from_ui(page)
+    assert "alert_webhook_url" not in store.load()["runtime"]
+
+
+def test_a_valid_hand_edit_becomes_the_last_good_settings(tmp_path, key_file):
+    import time
+    path = tmp_path / "config.yaml"
+    store = SettingsStore(str(path), str(tmp_path / "missing-seed.yaml"))
+    store.save(raw_config(key_file, str(tmp_path / "state.json")))
+    time.sleep(0.01)
+    raw = store.load()
+    raw["scheduling"]["lead_in_minutes"] = 25
+    path.write_text(yaml.safe_dump(raw))  # edited by hand, validly
+    store.load()
+    path.write_text("scheduling: [oops\n")  # ...and later broken
+    assert store.load()["scheduling"]["lead_in_minutes"] == 25
+
+
+def test_clock_skew_ignores_a_slow_reply():
+    c = LspClient(LspConfig(base_url="http://lsp.invalid", verify_ssl=True, username="",
+                            password=""))
+    c._skews.extend([2.0, 95.0, -1.5])  # the 95 s one was a slow reply
+    assert c.clock_skew == -1.5

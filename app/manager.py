@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from .alerts import Alerter
+from .alerts import FAILS_BEFORE_ALERT, Alerter
 from .config import (Config, ConfigError, extract_spreadsheet_id, parse_config,
                      parse_lsp_settings, parse_row_picks, parse_sheet_settings)
 from .lsp_client import LspClient, LspError
@@ -40,6 +40,8 @@ _WRITE_WAIT_SECONDS = 120
 # The loop counts as stuck when a pass makes no progress for this much longer
 # than the interval.
 _STUCK_SECONDS = 30 * 60
+# How soon the loop tries again after a configuration problem.
+_CONFIG_RETRY_SECONDS = 60
 # How often the watchdog checks the loop.
 _WATCHDOG_SECONDS = 60
 # Syncing counts as broken (/healthz/sync) once the last clean pass is this
@@ -89,6 +91,7 @@ class SyncManager:
         self.last_clean: Optional[float] = saved.get("last_clean")
         self._last_ok: Optional[bool] = saved.get("last_ok")
         self._alerter = Alerter(saved.get("alerts"))
+        self._result_lock = threading.Lock()
         # Loop liveness, for the container health check.
         self._heartbeat = time.monotonic()
         self._interval = 900
@@ -179,15 +182,17 @@ class SyncManager:
                           summary.get("warnings") if "warnings" in summary else None)
 
     def _pass_result(self, ok: bool, why: str, warnings: Optional[list]) -> None:
-        """Record how a pass went, alert if that's news, and save it."""
-        self._last_ok = ok
-        if ok:
-            self.last_clean = time.time()
-        try:
-            self._alerter.pass_done(self._webhook(), ok, why, warnings)
-        except Exception:  # noqa: BLE001 - an alert must never break the loop
-            log.exception("Alerting failed")
-        self._write_status()
+        """Record how a pass went, alert if that's news, and save it. (Run
+        now and the loop can both finish a pass at once: one at a time.)"""
+        with self._result_lock:
+            self._last_ok = ok
+            if ok:
+                self.last_clean = time.time()
+            try:
+                self._alerter.pass_done(self._webhook(), ok, why, warnings)
+            except Exception:  # noqa: BLE001 - an alert must never break the loop
+                log.exception("Alerting failed")
+            self._write_status()
 
     def _webhook(self) -> str:
         try:
@@ -231,8 +236,10 @@ class SyncManager:
         (Google key revoked, LSP login changed, LSP down...). Unlike
         health(), this never restarts anything: a restart can't fix those."""
         stale_after = max(_STALE_INTERVALS * self._interval, _STALE_MIN_SECONDS)
-        if self._last_ok is False:
-            return False, f"last sync failed: {self.last_error or 'see the Status card'}"
+        # As with alerts, one failed pass (an LSP blip) isn't "broken" yet.
+        if self._last_ok is False and self._alerter.fails >= FAILS_BEFORE_ALERT:
+            return False, (f"the last {self._alerter.fails} syncs failed: "
+                           f"{self.last_error or 'see the Status card'}")
         if self.last_clean is None:
             if time.time() - self._started < stale_after:
                 return True, "starting: no sync pass yet"
@@ -515,6 +522,10 @@ class SyncManager:
                 self.last_error = str(exc)
                 log.warning("Config not ready: %s", exc)
                 self._pass_result(False, self.last_error, None)
+                # Settings, the key file or the state file's lock (another
+                # copy still stopping during a redeploy): no network involved,
+                # so look again soon rather than a whole interval later.
+                interval = _CONFIG_RETRY_SECONDS
             except Exception as exc:  # noqa: BLE001
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 log.exception("Unhandled error during sync pass")

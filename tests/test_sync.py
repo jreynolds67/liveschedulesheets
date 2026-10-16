@@ -766,3 +766,45 @@ def test_unlock_all(make_syncer, lsp):
     assert all(r["locked"] for r in s.state.events.values())
     assert s.unlock_all() == {"unlocked": 2, "failed": []}
     assert not any(r["locked"] for r in make_syncer([]).state.events.values())
+
+
+def test_booking_on_a_deleted_channel_doesnt_make_the_event_start_early(make_syncer, lsp):
+    from datetime import datetime, timezone
+    from app.state import record_start
+    make_syncer([sheet_event(pcr="A", hour=19)]).run_once()
+    lsp.channels = [c for c in lsp.channels if c["Id"] != "a2"]
+    s = make_syncer([sheet_event(pcr="A", hour=21)])
+    s.run_once()
+    [rec] = s.state.events.values()
+    assert record_start(rec) == datetime.fromisoformat(rec["start"])  # 20:50, not 18:50
+    assert "gone_since" in rec["bookings"]["a2"]
+    # Gone for over a day: forgotten.
+    rec["bookings"]["a2"]["gone_since"] = (datetime.now(timezone.utc)
+                                           - timedelta(days=2)).isoformat()
+    s.state.save()
+    s = make_syncer([sheet_event(pcr="A", hour=21)])
+    s.run_once()
+    assert list(next(iter(s.state.events.values()))["bookings"]) == ["a1"]
+
+
+def test_one_wrongly_empty_reply_doesnt_lock_anything(make_syncer, lsp, caplog):
+    make_syncer([sheet_event(pcr="A")]).run_once()
+    real = lsp.get_events_for_channel
+    lsp.get_events_for_channel = lambda cid: []  # LSP's list left them out
+    s = make_syncer([sheet_event(pcr="A", hour=21)])
+    assert statuses(s) == [UPDATE]
+    assert s.run_once()["updated"] == 2
+    assert not any(r["locked"] for r in s.state.events.values())
+    assert "LSP still has it" in caplog.text
+    lsp.get_events_for_channel = real
+    lsp.events.clear()  # really deleted: that still locks
+    assert statuses(make_syncer([sheet_event(pcr="A", hour=21)])) == [LOCKED]
+
+
+def test_warnings_are_logged_once(make_syncer, lsp, caplog):
+    make_syncer([sheet_event(pcr="B")]).run_once()
+    lsp.clock_skew = 300
+    s = make_syncer([sheet_event(pcr="B")])  # the service keeps one between passes
+    for _ in range(3):
+        s.plan()
+    assert caplog.text.count("clock is 300 seconds ahead") == 1

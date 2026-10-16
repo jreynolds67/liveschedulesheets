@@ -8,6 +8,7 @@ Also handles channel lookup and creating, updating and removing events.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import threading
 from datetime import datetime, timezone
@@ -71,9 +72,9 @@ class LspClient:
         self.session.verify = cfg.verify_ssl
         for prefix in ("http://", "https://"):
             self.session.mount(prefix, _retrying_adapter())
-        # Seconds this machine's clock is ahead of LSP's (from its Date
-        # header); None until a reply has one.
-        self.clock_skew: Optional[float] = None
+        # Seconds this machine's clock is ahead of LSP's, per recent reply
+        # (from its Date header); see clock_skew.
+        self._skews: collections.deque = collections.deque(maxlen=20)
         # Whether GetFilteredEvents' status filter has been seen to work on
         # this server (None: not checked yet). See get_current_events().
         self._filter_ok: Optional[bool] = None
@@ -161,7 +162,14 @@ class LspClient:
             return
         if server.tzinfo is None:
             server = server.replace(tzinfo=timezone.utc)
-        self.clock_skew = (datetime.now(timezone.utc) - server).total_seconds()
+        self._skews.append((datetime.now(timezone.utc) - server).total_seconds())
+
+    @property
+    def clock_skew(self) -> Optional[float]:
+        """How far this machine's clock is ahead of LSP's (seconds; None
+        until a reply has said). The smallest over recent replies: a slow
+        reply arrives later than its Date header says, which isn't skew."""
+        return min(self._skews, key=abs) if self._skews else None
 
     def _authenticate(self) -> None:
         """After a 401: get a token, or fall back to HTTP Basic. Caller holds _lock.
@@ -271,13 +279,13 @@ class LspClient:
         if not isinstance(data, list) or any(
                 not isinstance(e, dict) or event_status(e) not in wanted
                 or str(e.get("ChannelId") or "").lower() != channel_id.lower() for e in data):
-            self._filter_off("its reply didn't match the filter")
+            self.filter_off("its reply didn't match the filter")
             return self.get_events_for_channel(channel_id)
         if self._filter_ok is None:
             full = self.get_events_for_channel(channel_id)
             expected = {e.get("Id") for e in full if event_status(e) in wanted}
             if {e.get("Id") for e in data} != expected:
-                self._filter_off("it left out unfinished events")
+                self.filter_off("it left out unfinished events")
                 return full
             if expected:  # proven only once it has had something to return
                 self._filter_ok = True
@@ -285,7 +293,8 @@ class LspClient:
             return full
         return data
 
-    def _filter_off(self, why: str) -> None:
+    def filter_off(self, why: str) -> None:
+        """Stop using GetFilteredEvents (read whole channels) from now on."""
         if self._filter_ok is not False:
             log.warning("Not using LSP's GetFilteredEvents (%s); reading every event on each "
                         "channel instead", why)
