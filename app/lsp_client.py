@@ -32,8 +32,6 @@ class LspError(Exception):
 
 # LSP's EventStatus values, in its enum order.
 EVENT_STATUSES = ("Waiting", "Queued", "Recording", "Complete", "Failed", "Timeout", "Canceled")
-# The statuses of events that haven't finished: all the sync needs to see.
-CURRENT_STATUSES = ("Waiting", "Queued", "Recording", "Canceled")
 
 
 def event_status(e: Optional[dict]) -> str:
@@ -75,9 +73,6 @@ class LspClient:
         # Seconds this machine's clock is ahead of LSP's, per recent reply
         # (from its Date header); see clock_skew.
         self._skews: collections.deque = collections.deque(maxlen=20)
-        # Whether GetFilteredEvents' status filter has been seen to work on
-        # this server (None: not checked yet). See get_current_events().
-        self._filter_ok: Optional[bool] = None
         if not cfg.verify_ssl:
             # Said once here rather than as a warning on every request, which
             # would fill the container log.
@@ -258,47 +253,6 @@ class LspClient:
         if not isinstance(data, list):
             raise LspError(f"GetEvents for {channel_id} returned {type(data).__name__}, not a list")
         return data
-
-    def get_current_events(self, channel_id: str) -> list[dict]:
-        """The channel's events that haven't finished (CURRENT_STATUSES),
-        which is all a sync needs: GetEvents returns every event LSP still
-        keeps, a season's worth by spring.
-
-        Uses GetFilteredEvents, but only once it is seen to work on this
-        server: the first call also reads the whole channel and checks the
-        filter returned exactly its unfinished events. Until then, or if a
-        reply ever holds something it shouldn't, the whole channel is read
-        (a filter that dropped live events would make them look deleted)."""
-        if self._filter_ok is False:
-            return self.get_events_for_channel(channel_id)
-        resp = self._request("GET", "/api/v1/GetFilteredEvents",
-                             params={"channelIds": [channel_id],
-                                     "eventStatuses": list(CURRENT_STATUSES)})
-        data = _json(resp, "GetFilteredEvents") if resp.status_code == 200 else None
-        wanted = {s.lower() for s in CURRENT_STATUSES}
-        if not isinstance(data, list) or any(
-                not isinstance(e, dict) or event_status(e) not in wanted
-                or str(e.get("ChannelId") or "").lower() != channel_id.lower() for e in data):
-            self.filter_off("its reply didn't match the filter")
-            return self.get_events_for_channel(channel_id)
-        if self._filter_ok is None:
-            full = self.get_events_for_channel(channel_id)
-            expected = {e.get("Id") for e in full if event_status(e) in wanted}
-            if {e.get("Id") for e in data} != expected:
-                self.filter_off("it left out unfinished events")
-                return full
-            if expected:  # proven only once it has had something to return
-                self._filter_ok = True
-                log.info("LSP's GetFilteredEvents works; reading only unfinished events from now on")
-            return full
-        return data
-
-    def filter_off(self, why: str) -> None:
-        """Stop using GetFilteredEvents (read whole channels) from now on."""
-        if self._filter_ok is not False:
-            log.warning("Not using LSP's GetFilteredEvents (%s); reading every event on each "
-                        "channel instead", why)
-        self._filter_ok = False
 
     def get_event(self, event_id: str) -> Optional[dict]:
         """One event exactly as LSP returns it (GetFilteredEvents), or None."""

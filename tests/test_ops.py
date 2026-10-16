@@ -140,50 +140,6 @@ def test_activity_reads_the_end_of_the_log(tmp_path):
     assert read_log_tail(str(tmp_path / "none")) == []
 
 
-# -- LSP's event filter ----------------------------------------------------------
-
-class _Reply:
-    def __init__(self, body):
-        self.status_code, self._body, self.text, self.headers = 200, body, "", {}
-
-    def json(self):
-        return self._body
-
-
-def _lsp(monkeypatch, events, honours_filter):
-    c = LspClient(LspConfig(base_url="http://lsp.invalid", verify_ssl=True, username="",
-                            password=""), timeout=1)
-    calls = []
-
-    def request(method, url, **kw):
-        calls.append(url.rsplit("/", 1)[-1])
-        if url.endswith("GetFilteredEvents") and honours_filter:
-            wanted = set(kw["params"]["eventStatuses"])
-            return _Reply([e for e in events if e["Status"] in wanted])
-        return _Reply(events)
-
-    monkeypatch.setattr(c.session, "request", request)
-    return c, calls
-
-
-EVENTS = [{"Id": "1", "ChannelId": "c1", "Status": "Waiting"},
-          {"Id": "2", "ChannelId": "c1", "Status": "Complete"}]
-
-
-def test_filter_used_once_proven(monkeypatch):
-    c, calls = _lsp(monkeypatch, EVENTS, honours_filter=True)
-    assert [e["Id"] for e in c.get_current_events("c1")] == ["1", "2"]  # checked against all
-    assert [e["Id"] for e in c.get_current_events("c1")] == ["1"]
-    assert calls == ["GetFilteredEvents", "GetEvents", "GetFilteredEvents"]
-
-
-def test_filter_that_doesnt_work_is_not_used(monkeypatch):
-    c, calls = _lsp(monkeypatch, EVENTS, honours_filter=False)  # ignores it: returns all
-    assert len(c.get_current_events("c1")) == 2
-    assert len(c.get_current_events("c1")) == 2
-    assert calls == ["GetFilteredEvents", "GetEvents", "GetEvents"]
-
-
 def test_lsp_reads_are_retried():
     c = LspClient(LspConfig(base_url="http://lsp.invalid", verify_ssl=True, username="",
                             password=""))

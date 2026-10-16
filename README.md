@@ -266,7 +266,12 @@ channel by name and start. It then sets the variable in the event's workflow
 variables (`Customization.Conditions`, value in `ConditionValue.Text`; an
 empty value means the default) with one `PATCH /api/v1/PatchEvent/{id}`, and
 reads the event back (`GetFilteredEvents`) to check LSP kept it. An event
-updated from the sheet gets the same. If someone sets the variable to
+updated from the sheet gets the same. LSP replaces the part of the event it's
+sent whole, so the tool reads the event by id right before, copies that part
+(the workflow `Customization`, or the `Labels` if the variable is a label
+parameter, never both) exactly as LSP holds it, and changes only the
+variable: the event's other variables and its workflow description are sent
+back as they were. If someone sets the variable to
 something else by hand in LSP (say `VB STANFORD PITT SENIOR NIGHT`), the event
 is **locked** like any other hand edit, so the tool never puts its own value
 back; unlocking it re-applies the sheet, variable included. An event the tool created earlier that
@@ -630,11 +635,8 @@ holding the state file during a redeploy) is retried after a minute rather
 than a whole interval. Warnings are logged once when they appear, not every
 pass, and the Status card lists the first 15.
 
-**LSP reads.** Each pass reads only the events that haven't finished
-(GetFilteredEvents with the Waiting, Queued, Recording and Canceled statuses),
-not each channel's whole history. The filter is checked against a full read
-the first time; if this LSP doesn't apply it exactly, the tool reads every
-event instead. A read that fails to connect, times out or gets a 502/503/504 is
+**LSP reads.** Each pass reads every event on the channels it needs
+(GetEvents). A read that fails to connect, times out or gets a 502/503/504 is
 retried twice before the pass gives up on it; changes to LSP are never
 retried that way, since they may have worked. A booked channel LSP no longer
 lists (deleted, or recreated with a new id) is skipped rather than holding

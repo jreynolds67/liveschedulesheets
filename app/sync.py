@@ -30,7 +30,7 @@ from typing import Callable, Optional
 from dateutil import parser as dateparser
 
 from .config import Config
-from .lsp_client import CURRENT_STATUSES, LspClient, LspError
+from .lsp_client import LspClient, LspError
 from .lsp_client import event_status as _status
 from .models import ScheduledEvent, name_key
 from .runtime import LOCAL_TZ
@@ -59,7 +59,6 @@ _SNAPSHOT_FIELDS = ("Name", "Start", "End", "ChannelId", "CreatedByDisplayName")
 # the tool's to change: LSP has queued or started these (or they ran), and a
 # Canceled one was canceled by hand.
 _ACTIVE = {"queued", "recording", "complete", "failed", "timeout"}
-_CURRENT = {s.lower() for s in CURRENT_STATUSES}
 
 # LSP's clock and this machine's may differ by this much before it's worth
 # a warning ("started" is judged by this machine's clock).
@@ -131,17 +130,16 @@ class PlanItem:
 
 
 class _LspView:
-    """The unfinished events on a set of channels (finished ones aren't
-    needed, and a season of them adds up), fetched once per pass."""
+    """Every event on a set of channels, fetched once per pass (GetEvents:
+    the full events, workflow variables and all)."""
 
     def __init__(self, lsp: LspClient, channel_ids):
         self.by_channel: dict[str, list[dict]] = {}
         self.by_id: dict[str, tuple[str, dict]] = {}
         self.failed: set[str] = set()
-        read = getattr(lsp, "get_current_events", None) or lsp.get_events_for_channel
         for cid in channel_ids:
             try:
-                evs = read(cid)
+                evs = lsp.get_events_for_channel(cid)
             except LspError:
                 log.exception("Could not list events for channel %s", cid)
                 self.failed.add(cid)
@@ -627,8 +625,6 @@ class Syncer:
                 if fresh is None:
                     return f"{label}: deleted or moved in LSP"
                 hit = view.add(fresh, cid)
-                if _status(fresh) in _CURRENT and hasattr(self.lsp, "filter_off"):
-                    self.lsp.filter_off("an unfinished event was missing from its reply")
                 log.warning("%r on %s was missing from LSP's list of the channel's events, but "
                             "LSP still has it", rec.get("lsp_name") or rec.get("name"), label)
             found_cid, e = hit
@@ -930,10 +926,7 @@ class Syncer:
             touched.append((rid, t.channel_id))
             log.info("Updated %r on %s (%s) @ %s", item.lsp_name, t.channel_name,
                      t.message, ev.start.isoformat())
-            view = getattr(self, "_view", None)
-            hit = view.by_id.get(t.event_id) if view else None
-            if hit:
-                self._fill_variable(item, t, t.event_id, hit[1], rid, force)
+            self._fill_variable(item, t, t.event_id, rid, force)
         elif t.status == DELETE:
             self.lsp.remove_event(t.event_id, force=force)
             self.state.events[rid]["bookings"].pop(t.channel_id, None)
@@ -956,8 +949,8 @@ class Syncer:
         touched.append((rid, t.channel_id))
         log.info("Created %r on %s (PCR %s) @ %s (id=%s)", item.lsp_name, t.channel_name,
                  item.event.pcr, item.event.start.isoformat(), event_id)
-        if created:
-            self._fill_variable(item, t, event_id, created, rid, force)
+        if event_id:
+            self._fill_variable(item, t, event_id, rid, force)
         return rid
 
     def _recover_create(self, item: PlanItem, t: Target, rid, force, now,
@@ -1008,15 +1001,28 @@ class Syncer:
         log.warning("Could not find the new event %r on %s in LSP", item.lsp_name, t.channel_name)
         return None
 
-    def _fill_variable(self, item: PlanItem, t: Target, event_id: str, current,
+    def _fill_variable(self, item: PlanItem, t: Target, event_id: str,
                        rid: str, force: bool) -> None:
         """Set the event's event-name variable to its name, if the event has
         that variable and it holds something else (e.g. its default), then
         read the event back to check LSP kept it. Tried once per name, so a
         value LSP won't keep isn't re-sent every pass; a failure is logged
-        and never undoes the create / update."""
+        and never undoes the create / update.
+
+        The event is read by id first, and what's sent back is copied from
+        that read, never from a list of events or a reply: LSP replaces the
+        part it's sent whole, so a partial copy would wipe the event's other
+        workflow variables and description."""
         var = self.cfg.lsp.event_name_variable
-        fields = _with_variable(current, var, item.lsp_name) if var else None
+        if not var:
+            return
+        try:
+            current = self.lsp.get_event(event_id)
+        except LspError as exc:
+            log.warning("Could not read %r on %s to set %r (tried again next pass): %s",
+                        item.lsp_name, t.channel_name, var, exc)
+            return
+        fields = _with_variable(current, var, item.lsp_name) if current else None
         if fields is None:
             return
         b = self.state.events[rid]["bookings"][t.channel_id]
@@ -1180,10 +1186,7 @@ class Syncer:
 
         events, all_ids = [], set()
         for channel_id, pcrs in pcrs_by_channel.items():
-            # Finished events are only needed when asked for (past_days).
-            read = (getattr(self.lsp, "get_current_events", None) if past_days <= 0
-                    else None) or self.lsp.get_events_for_channel
-            for e in read(channel_id):
+            for e in self.lsp.get_events_for_channel(channel_id):
                 all_ids.add(e.get("Id"))
                 end = _parse_utc(e.get("End") or e.get("Start"))
                 if end is None or end < cutoff:
@@ -1444,13 +1447,22 @@ def _variable_value(e: dict, variable: str) -> Optional[str]:
 
 
 def _with_variable(e, variable: str, value: str) -> Optional[dict]:
-    """PatchEvent fields (Customization and/or Labels, copied from the event)
-    that set its event-name variable to `value`; None if the event has no
-    such variable or it already holds `value`."""
+    """PatchEvent fields (the event's Customization or its Labels, whichever
+    holds the variable, copied whole) that set its event-name variable to
+    `value`; None if the event has no such variable or it already holds
+    `value`. `e` must be the event as LSP holds it now, read by id."""
     current = _variable_value(e, variable) if isinstance(e, dict) else None
     if current is None or current.strip() == value.strip():
         return None
-    fields = {k: copy.deepcopy(e[k]) for k in ("Customization", "Labels") if e.get(k)}
+    # Only the part of the event that holds the variable is sent back: LSP
+    # replaces what it's given whole, so everything else in it (the other
+    # workflow variables, the workflow's description) must be as LSP has it.
+    for key in ("Customization", "Labels"):
+        if e.get(key) and _variable({key: e[key]}, variable) is not None:
+            fields = {key: copy.deepcopy(e[key])}
+            break
+    else:
+        return None
     holder, is_var = _variable(fields, variable)
     if is_var:
         holder["ConditionValue"] = holder.get("ConditionValue") or {}

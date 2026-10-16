@@ -808,3 +808,38 @@ def test_warnings_are_logged_once(make_syncer, lsp, caplog):
     for _ in range(3):
         s.plan()
     assert caplog.text.count("clock is 300 seconds ahead") == 1
+
+
+def test_setting_the_variable_never_wipes_the_events_other_variables(var_syncer, lsp):
+    """What's sent back is copied from the event read by id, and is only the
+    part holding the variable: LSP replaces it whole, so a trimmed copy (a
+    list read that leaves things out) would wipe the other variables and the
+    workflow's description."""
+    import copy
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    [eid] = lsp.events
+    e = lsp.events[eid]
+    e["Customization"]["Description"] = "PCR B record workflow"
+    e["Customization"]["Conditions"].append(
+        {"Name": "Director", "ConditionValue": {"Text": ["Jane"]}})
+    e["Labels"] = [{"Name": "Notes", "Parameters": [{"Name": "Crew", "Text": ["A-team"]}]}]
+    real = lsp.get_events_for_channel
+
+    def trimmed(cid):  # a list read that leaves most of the workflow out
+        out = real(cid)
+        for ev in out:
+            ev["Customization"] = {"Conditions": ev["Customization"]["Conditions"][:1]}
+            ev.pop("Labels", None)
+        return out
+
+    lsp.get_events_for_channel = trimmed
+    sent = []
+    real_patch = lsp.patch_event
+    lsp.patch_event = lambda *a, **k: (sent.append(k.get("extra")), real_patch(*a, **k))[1]
+    var_syncer([sheet_event(name="WSOC vs Texas A&M", pcr="B")]).run_once()  # renamed
+    e = lsp.events[eid]
+    assert lsp.variable_of(eid) == "WSOC vs Texas A&M"
+    assert e["Customization"]["Description"] == "PCR B record workflow"
+    assert e["Customization"]["Conditions"][1]["ConditionValue"]["Text"] == ["Jane"]
+    assert e["Labels"][0]["Parameters"][0]["Text"] == ["A-team"]
+    assert [sorted(x) for x in sent if x] == [["Customization"]]  # Labels not resent
