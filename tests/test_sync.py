@@ -991,3 +991,22 @@ def test_test_event_says_when_its_variable_did_not_take(soon_var_syncer, lsp):
     summary = soon_var_syncer.create_test_event("TEST", "A", _soon(2), 10)
     assert summary["created"] == 2
     assert sorted(summary["variable_missing"]) == ["01 - PCR A PGM", "02 - PCR A CLEAN"]
+
+
+def test_test_event_says_when_lsp_moves_its_start(make_syncer, lsp):
+    real_add = lsp.add_event
+
+    def add_early(ev, channel_id, name, force=False, **kw):
+        made = real_add(ev, channel_id, name, force=force, **kw)
+        e = lsp.events[made["Id"]]
+        e.update(Start=(ev.start - timedelta(minutes=3)).isoformat(), Status="Queued")
+        return made
+
+    lsp.add_event = add_early
+    lsp.get_general_settings = lambda: {"EventStartOffset": "00:03:00"}
+    summary = make_syncer([]).create_test_event("TEST", "B", _soon(5), 10)
+    (moved,) = summary["start_moved"]
+    assert moved["channel"] == "01 - PCR B PGM" and moved["status"] == "Queued"
+    assert summary["event_start_offset"] == "00:03:00"
+    lsp.add_event = real_add
+    assert make_syncer([]).create_test_event("TEST 2", "B", _soon(30), 10)["start_moved"] == []

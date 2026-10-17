@@ -811,32 +811,47 @@ class Syncer:
         # Seconds this server's clock is ahead of LSP's: LSP starts recording
         # by its own clock, so a test watched live starts that much off.
         summary["clock_skew"] = getattr(self.lsp, "clock_skew", None)
-        var = self.cfg.lsp.event_name_variable
-        if var:
-            summary["variable"] = var
-            summary["variable_missing"] = self._test_variable_missing(item.record_id, name)
+        summary.update(self._check_test_event(item.record_id, name, start))
         log.info("Created test event %r (PCR %s) @ %s for %d min: created=%d errors=%d", name,
                  pcr, start.isoformat(), minutes, summary["created"], summary["errors"])
         return summary
 
-    def _test_variable_missing(self, rid: Optional[str], name: str) -> list[str]:
-        """The channels where a just-made test event doesn't hold its name in
-        the event-name variable, read back from LSP (so the UI can say so:
-        no later pass sets it, as one does for a sheet event)."""
+    def _check_test_event(self, rid: Optional[str], name: str, start: datetime) -> dict:
+        """Read a just-made test event back from LSP, so the UI can say what
+        didn't come out as asked (no later pass fixes a test event):
+        `variable_missing`, the channels where its event-name variable
+        doesn't hold its name, and `start_moved`, those where LSP holds
+        another start than the one sent (with its status), plus LSP's
+        `event_start_offset` setting, which may explain that."""
         var = self.cfg.lsp.event_name_variable
-        missing = []
+        out: dict = {"start_moved": []}
+        if var:
+            out.update(variable=var, variable_missing=[])
         for cid, b in ((self.state.events.get(rid) or {}).get("bookings") or {}).items():
             label = b.get("channel_name") or cid
             try:
                 e = self.lsp.get_event(b["event_id"]) if b.get("event_id") else None
             except LspError:
                 e = None
-            holds = _variable_value(e, var) if e else None
-            if (holds or "").strip() != name.strip():
-                missing.append(label)
+            if not e:
+                continue
+            if not _same_instant(e.get("Start"), start):
+                out["start_moved"].append({"channel": label, "start": e.get("Start"),
+                                           "status": e.get("Status")})
+                log.warning("Test event %r on %s: sent start %s, LSP holds %s (status %s)",
+                            name, label, start.isoformat(), e.get("Start"), e.get("Status"))
+            holds = _variable_value(e, var) if var else None
+            if var and (holds or "").strip() != name.strip():
+                out["variable_missing"].append(label)
                 log.warning("Test event %r on %s: %r holds %r, not its name", name, label, var,
                             holds)
-        return missing
+        if out["start_moved"]:
+            try:
+                out["event_start_offset"] = self.lsp.get_general_settings().get("EventStartOffset")
+            except LspError:
+                out["event_start_offset"] = None
+            log.warning("LSP's EventStartOffset setting: %s", out["event_start_offset"])
+        return out
 
     def unlock(self, record_id: str) -> dict:
         """Let the tool manage a locked event again.
