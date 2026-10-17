@@ -129,6 +129,7 @@ class State:
                         "start": (s.isoformat() if (s := record_start(rec)) else rec.get("start")),
                         "end": rec.get("end"),
                         "locked": bool(rec.get("locked")),
+                        "test": bool(rec.get("test")),
                     }))
         return out
 

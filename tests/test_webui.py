@@ -25,6 +25,10 @@ class StubManager:
     def settings_saved(self):
         pass
 
+    def create_test_event(self, name, pcr, start, minutes):
+        self.test_event = (name, pcr, start, minutes)
+        return {"name": name, "created": 1}
+
 
 @pytest.fixture
 def client():
@@ -100,3 +104,15 @@ def test_status_says_whether_the_ui_has_a_password(client, monkeypatch):
     assert client.get("/api/status").get_json()["ui_auth"] is False
     monkeypatch.setenv("UI_PASSWORD", "x")
     assert client.get("/api/status", auth=("", "x")).get_json()["ui_auth"] is True
+
+
+def test_test_event_endpoint():
+    manager = StubManager()
+    client = create_app(manager, store=None).test_client()
+    r = client.post("/api/test-event", json={"name": "TEST", "pcr": "A",
+                                             "start": "2026-10-17T18:30:00.000Z", "minutes": "10"})
+    assert r.get_json()["ok"]
+    name, pcr, start, minutes = manager.test_event
+    assert (name, pcr, minutes) == ("TEST", "A", 10) and start.utcoffset().total_seconds() == 0
+    bad = client.post("/api/test-event", json={"name": "TEST", "pcr": "A", "start": "soon"})
+    assert not bad.get_json()["ok"]

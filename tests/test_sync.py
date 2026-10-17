@@ -904,3 +904,61 @@ def test_workflow_lsp_wont_keep_isnt_resent_every_pass(var_syncer, lsp):
     lsp.keeps_variable = False  # PatchEvent drops Customization
     var_syncer([sheet_event(pcr="B")]).run_once()
     assert statuses(var_syncer([sheet_event(pcr="B")])) == [EXISTS]
+
+
+# -- test events made from the UI -----------------------------------------------
+
+def _soon(minutes=30):
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(second=0, microsecond=0) + timedelta(minutes=minutes)
+
+
+def test_test_event_is_created_with_its_variable_and_left_alone(var_syncer, lsp):
+    s = var_syncer([])
+    summary = s.create_test_event("TEST St. Peter's", "a", _soon(), 15)
+    assert summary["created"] == 2 and summary["name"] == "TEST St Peter's"
+    assert sorted(e["ChannelId"] for e in lsp.events.values()) == ["a1", "a2"]
+    for eid, e in lsp.events.items():
+        assert e["Name"] == "TEST St Peter's" and lsp.variable_of(eid) == "TEST St Peter's"
+    (rec,) = State(s.state.path).events.values()
+    assert rec["test"] and rec["tab"] == "Test event"
+    # A sheet game with the same name and time is booked on its own, and the
+    # test event shows in Preview as a test, which a pass doesn't change.
+    game = sheet_event(name="TEST St Peter's")
+    game.start = _soon()
+    s2 = var_syncer([game])
+    items = {i.test: i for i in s2.plan()}
+    assert items[True].status == NOT_IN_SHEET and items[True].to_dict()["test"]
+    assert items[False].record_id is None
+    assert s2.run_once()["updated"] == 0
+
+
+def test_test_event_is_cleaned_up_and_tagged(make_syncer, lsp):
+    s = make_syncer([])
+    s.create_test_event("TEST", "B", _soon(), 10)
+    shown = s.scheduled_events()["events"]
+    assert [(e["by_tool"], e["test"]) for e in shown] == [(True, True)]
+    assert s.delete_created()["deleted"] == 1
+    assert not lsp.events and not State(s.state.path).events
+
+
+@pytest.mark.parametrize("args, error", [
+    (("", "A", 30, 10), "name"),
+    (("TEST", "C", 30, 10), "No LSP channels match PCR C"),
+    (("TEST", "A", -5, 10), "in the past"),
+    (("TEST", "A", 30, 0), "Length"),
+])
+def test_test_event_is_refused(make_syncer, lsp, args, error):
+    name, pcr, minutes_ahead, length = args
+    with pytest.raises(LspError, match=error):
+        make_syncer([]).create_test_event(name, pcr, _soon(minutes_ahead), length)
+    assert not lsp.events
+
+
+def test_test_event_is_not_booked_twice(make_syncer, lsp):
+    start = _soon()
+    lsp.add_hand_made("a2", "TEST", start, start + timedelta(minutes=10))
+    s = make_syncer([])
+    with pytest.raises(LspError, match="02 - PCR A CLEAN already has"):
+        s.create_test_event("test", "A", start, 10)
+    assert len(lsp.events) == 1 and not s.state.events

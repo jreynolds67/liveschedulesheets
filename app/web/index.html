@@ -29,10 +29,11 @@
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
   .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
   label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
-  input[type=text], input[type=number], input[type=password], select {
+  input[type=text], input[type=number], input[type=password], input[type=datetime-local], select {
     width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line);
     border-radius:8px; padding:9px 10px; font-size:14px; }
   input:focus, select:focus { outline:none; border-color:var(--accent); }
+  input[type=datetime-local] { color-scheme:dark; }
   .row { display:flex; align-items:center; gap:10px; }
   .switch { display:flex; align-items:center; gap:8px; }
   button { background:var(--accent); color:#fff; border:none; border-radius:8px;
@@ -68,6 +69,8 @@
   .pill.no_room { background:rgba(245,181,68,.16); color:var(--warn); }
   .pill.ignore { background:rgba(147,161,181,.16); color:var(--muted); }
   .pill.tool { background:rgba(59,209,136,.15); color:var(--accent2); }
+  .pill.test { background:rgba(186,140,255,.18); color:#ba8cff; }
+  .testgrid { display:grid; grid-template-columns:minmax(0,2fr) 110px minmax(0,1.3fr) 120px; gap:14px; align-items:end; }
   .warnlist { margin:4px 0 0; padding-left:20px; }
   pre.activity { max-height:360px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:8px 0 0;
     font-size:12px; }
@@ -130,7 +133,7 @@
     border-radius:10px; padding:10px; box-shadow:0 8px 30px rgba(0,0,0,.45); max-width:min(420px,calc(100vw - 16px)); }
   #rowMenu .btns { margin-top:8px; gap:6px; }
 
-  @media (max-width:680px){ .grid2,.grid3{ grid-template-columns:1fr; }
+  @media (max-width:680px){ .grid2,.grid3,.testgrid{ grid-template-columns:1fr; }
     header { flex-wrap:wrap; } }
 </style>
 </head>
@@ -302,6 +305,26 @@
     <div id="overridesBox" class="hint">No event fixes.</div>
   </div></section>
 
+  <!-- Test events -->
+  <section class="card"><h2>Test event</h2><div class="body">
+    <div class="hint">Make a one-off event in Live Schedule Pro right now, without touching the sheet: it's booked
+      on every channel of the PCR, with its workflow and <b>Event Name</b> variable set just like a sheet event.
+      The name is used as typed (only made a valid file name). This works <b>even with dry run on</b>. Test events
+      are tagged <span class="pill test">test</span> below and in Preview, syncs never change them, and
+      <b>DELETE</b> or <b>Delete tool-created events</b> removes them.</div>
+    <div class="testgrid">
+      <div><label>Event name</label><input type="text" id="test_name" value="TEST" /></div>
+      <div><label>PCR</label><select id="test_pcr"></select></div>
+      <div><label>Start</label><input type="datetime-local" id="test_start" /></div>
+      <div><label>Length (minutes)</label><input type="number" id="test_minutes" min="1" max="1440" value="10" /></div>
+    </div>
+    <div class="hint" id="testHits"></div>
+    <div class="btns">
+      <button id="btnTestEvent">Create test event in LSP</button>
+      <button id="btnTestSoon" class="ghost">Start in 2 minutes</button>
+    </div>
+  </div></section>
+
   <!-- Cleanup / testing -->
   <section class="card"><h2>Scheduled in Live Schedule Pro</h2><div class="body">
     <div class="hint">Live from LSP: events on the mapped PCR channels. Events tagged
@@ -432,6 +455,7 @@ function fillForm(){
 
   renderPcr(get(cfg,"pcr_channel_map",{}));
   renderOverrides();
+  fillTestPcr();
 }
 
 // Canonical PCRs.
@@ -472,6 +496,7 @@ function renderPcrHits(div){
   box.innerHTML = hits.length
     ? `Matches ${hits.length} channel(s): ${hits.map(esc).join(" · ")}`
     : `<span style="color:var(--warn)">No LSP channels match</span>`;
+  renderTestHits();
 }
 
 function addCapRow(sport="", hours=""){
@@ -967,8 +992,8 @@ function renderPreview(items, warnings){
   const tb = $("previewBox").querySelector("tbody");
   items.forEach((i, idx) => {
     const noRoom = !i.pcr;
-    const statusCls = noRoom ? "no_room" : i.status;
-    const statusTxt = noRoom ? "no PCR" : i.status.replace(/_/g,' ');  // pills are shown in caps
+    const statusCls = i.test ? "test" : noRoom ? "no_room" : i.status;
+    const statusTxt = i.test ? "test" : noRoom ? "no PCR" : i.status.replace(/_/g,' ');  // pills are shown in caps
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><span class="pill ${statusCls}">${statusTxt}</span></td>
@@ -1080,7 +1105,7 @@ function renderScheduled(){
     const g = groups.get(k);
     g.channels.push(e.channel); g.ids.push(e.id); if (e.status) g.statuses.add(e.status);
     g.vars.push({channel: e.channel, value: e.variable});
-    if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++; if (e.locked) g.locked = true;
+    if (e.created_by) g.creators.add(e.created_by); if (e.by_tool) g.tool++; if (e.test) g.test = true; if (e.locked) g.locked = true;
   }
   let rows = [...groups.values()];
   if ($("schedToolOnly").checked) rows = rows.filter(g => g.tool);
@@ -1089,7 +1114,7 @@ function renderScheduled(){
   else if (!rows.length) html += `<div class="hint">No events to show.</div>`;
   else html += `<div style="overflow-x:auto"><table><thead><tr><th>Event</th><th>${esc(r.variable || "Variable")}</th><th>PCR</th><th>Start</th><th>End</th><th>Status</th><th>Created by</th><th></th></tr></thead><tbody>`
     + rows.map((g, gi) => `<tr>
-      <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
+      <td>${esc(g.name)}${g.tool?` <span class="pill tool">this tool${g.tool < g.channels.length ? ` (${g.tool}/${g.channels.length})` : ""}</span>`:""}${g.test?` <span class="pill test">test</span>`:""}${g.locked?` <span class="pill locked" title="Changed by hand in LSP; this tool won't touch it">locked</span>`:""}</td>
       <td>${varCell(g)}</td>
       <td>${esc(g.pcr)}<div class="hint" title="${esc(g.channels.join("\n"))}">${g.channels.length > 1 ? `${g.channels.length} channels` : esc(g.channels[0])}</div></td>
       <td class="mono nowrap">${fmtWhen(g.start)}</td><td class="mono nowrap">${fmtWhen(g.end)}</td>
@@ -1116,7 +1141,7 @@ async function deleteScheduled(g, btn){
   const where = g.channels.length > 1 ? `all ${g.channels.length} channels:\n  • ${g.channels.join("\n  • ")}` : g.channels[0];
   const who = g.tool ? (g.locked ? "\n\nIt's locked (changed by hand in LSP)." : "")
                      : "\n\nThis event was NOT created by this tool.";
-  const again = g.tool ? "\n\nIf it's still in the sheet, the next sync creates it again. Tick ignore on it in Preview (and Save) to stop that." : "";
+  const again = g.tool && !g.test ? "\n\nIf it's still in the sheet, the next sync creates it again. Tick ignore on it in Preview (and Save) to stop that." : "";
   if (!confirm(`Delete "${g.name}" (${fmtWhen(g.start)}) from Live Schedule Pro on ${where}?${who}${again}`)) return;
   btn.disabled = true; btn.textContent = "Deleting…";
   const r = await api("POST","/api/delete-events", {event_ids: g.ids});
@@ -1126,6 +1151,62 @@ async function deleteScheduled(g, btn){
   } else toast("Delete failed: " + r.error, 5000);
   loadScheduled(); refreshStatus(); refreshPreviewIfShown();
 }
+
+// -- Test events (made from the UI, not the sheet) --
+function fillTestPcr(){
+  const sel = $("test_pcr"), was = sel.value;
+  const letters = Object.keys(get(cfg,"pcr_channel_map",{}));
+  sel.innerHTML = (letters.length ? letters : ROOMS).map(l => `<option value="${esc(l)}">PCR ${esc(l)}</option>`).join("");
+  if (was && [...sel.options].some(o => o.value === was)) sel.value = was;
+  renderTestHits();
+}
+// The channels the chosen PCR books, per the PCR → channel mapping as typed.
+function testChannels(){
+  const pcr = $("test_pcr").value;
+  const row = [...document.querySelectorAll(".pcr-row")]
+    .find(d => d.querySelector(".pcr-letter").value.trim().toUpperCase() === pcr.toUpperCase());
+  if (!lspChannels || !row) return null;
+  const match = row.querySelector(".pcr-name").value;
+  return lspChannels.filter(c => c.Name && (channelMatches(match, c.Name) || c.Id === row.dataset.channelId))
+    .map(c => c.Name).sort((a,b) => a.localeCompare(b));
+}
+function renderTestHits(){
+  const hits = testChannels();
+  $("testHits").innerHTML = hits == null ? "" : hits.length
+    ? `Books ${hits.length} channel(s): ${hits.map(esc).join(" · ")}`
+    : `<span style="color:var(--warn)">No LSP channels match this PCR</span>`;
+}
+// A datetime-local value `minutes` from now, in the browser's time zone.
+function localInput(minutes){
+  const d = new Date(Date.now() + minutes*60000); d.setSeconds(0, 0);
+  const p = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+$("test_pcr").onchange = renderTestHits;
+$("btnTestSoon").onclick = () => { $("test_start").value = localInput(2); };
+$("btnTestEvent").onclick = async () => {
+  const name = $("test_name").value.trim(), pcr = $("test_pcr").value;
+  const startVal = $("test_start").value, minutes = parseInt($("test_minutes").value, 10);
+  if (!name) return toast("Give the test event a name");
+  if (!startVal) return toast("Pick a start time");
+  if (!(minutes >= 1 && minutes <= 1440)) return toast("Length must be 1 to 1440 minutes");
+  const start = new Date(startVal);
+  if (start < new Date(Date.now() - 60000)) return toast("That start is in the past");
+  const hits = testChannels();
+  const where = hits && hits.length ? `:\n  • ${hits.join("\n  • ")}` : "";
+  const dry = lastStatus?.dry_run ? "\n\nDry run is ON, but this still changes LSP (the scheduled sync stays dry)." : "";
+  if (!confirm(`Create test event "${name}" in Live Schedule Pro?\n\n${fmtWhen(start.toISOString())}, ${minutes} min, `
+    + `on PCR ${pcr}'s channels${where}${dry}\n\nStaged changes are saved first.`)) return;
+  if (!await saveConfig()) return;
+  const btn = $("btnTestEvent"); btn.disabled = true; btn.textContent = "Creating…";
+  const r = await api("POST","/api/test-event", {name, pcr, start: start.toISOString(), minutes});
+  btn.disabled = false; btn.textContent = "Create test event in LSP";
+  if (r.ok){ const s = r.summary;
+    toast(`Created test event "${s.name}" on ${s.created} channel(s)${s.errors?`, ${s.errors} failed - see Activity`:""}`, 4000);
+    $("test_start").value = localInput(5);
+  } else toast("Test event failed: " + r.error, 6000);
+  refreshStatus(); loadScheduled(); refreshPreviewIfShown(); loadActivity();
+};
 
 async function loadGoogleKey(){
   const r = await api("GET","/api/google-key");
@@ -1154,6 +1235,7 @@ async function loadChannels(){
   if (r.ok){
     lspChannels = r.channels;
     document.querySelectorAll(".pcr-row").forEach(renderPcrHits);
+    renderTestHits();
     $("channelHint").textContent = `${r.channels.length} channel(s) in LSP`;
   } else {
     $("channelHint").textContent = "Could not load channels: " + (r.error||"");
@@ -1271,6 +1353,7 @@ $("btnTestAlert").onclick = async () => {
 
 (async function init(){
   await loadConfig();
+  $("test_start").value = localInput(5);
   await refreshStatus();
   loadChannels();
   api("GET","/api/event-name-channels").then(renderVarChannels);

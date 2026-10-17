@@ -10,6 +10,7 @@ import hmac
 import logging
 import os
 import signal
+from datetime import datetime
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -257,6 +258,24 @@ def create_app(manager: SyncManager, store: SettingsStore) -> Flask:
         try:
             summary = manager.send_event(body["source_tab"], body.get("event_date") or "",
                                          body["event_name"], int(body.get("occurrence") or 0))
+            return jsonify({"ok": True, "summary": summary})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(exc)})
+
+    @app.post("/api/test-event")
+    @require_auth
+    def test_event():
+        """Create a one-off test event in LSP now, even in dry run.
+        Body: {name, pcr, start (ISO 8601), minutes}"""
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            start = datetime.fromisoformat(str(body.get("start") or ""))
+            minutes = int(body.get("minutes") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "start (ISO date and time) and minutes are required"})
+        try:
+            summary = manager.create_test_event(str(body.get("name") or ""), str(body.get("pcr") or ""),
+                                                start, minutes)
             return jsonify({"ok": True, "summary": summary})
         except Exception as exc:  # noqa: BLE001
             return jsonify({"ok": False, "error": str(exc)})

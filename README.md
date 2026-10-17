@@ -101,6 +101,19 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   later pass won't repeat it), and can be removed with the cleanup button.
   Also available as `POST /api/send-event` with
   `{source_tab, event_date, event_name, occurrence}` from a preview row.
+- **Test event** — make a one-off event in LSP on the fly, without touching
+  the sheet: type a name, pick a PCR, a start (defaults to 5 minutes from now;
+  **Start in 2 minutes** sets that) and a length in minutes, and **Create test
+  event in LSP** books it on every channel of that PCR, with its workflow and
+  Event Name variable set like a sheet event. The name is used as typed (only
+  made a valid file name, see [Event names in LSP](#event-names-in-lsp)). It
+  works **even with dry run on**, and refuses a start in the past or a name
+  and start a channel already has. Test events are tracked in `state.json`
+  (marked `test`), tagged **test** in Preview and the *Scheduled in Live
+  Schedule Pro* list, never matched to a sheet event or changed by a sync, and
+  removed by **DELETE** or the cleanup button. Also available as `POST
+  /api/test-event` with `{name, pcr, start, minutes}` (`start` in ISO 8601,
+  e.g. `2026-10-17T18:30:00Z`).
 - **Event fixes** — the PCR you pick or the **Ignore** you tick on a Preview
   row is saved as a per-event fix (matched by tab + date + event name, and
   for doubleheaders which game; see below) and applied on top of the sheet

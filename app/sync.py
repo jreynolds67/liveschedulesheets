@@ -32,7 +32,7 @@ from dateutil import parser as dateparser
 from .config import Config
 from .lsp_client import LspClient, LspError
 from .lsp_client import event_status as _status
-from .models import ScheduledEvent, name_key
+from .models import ScheduledEvent, name_key, safe_name
 from .runtime import LOCAL_TZ
 from .sheets import SheetError, SheetReader
 from .state import State, record_start
@@ -78,6 +78,11 @@ GONE_FORGET = timedelta(days=1)
 # and an update must never reach LSP after the recording has begun.
 START_MARGIN = timedelta(minutes=2)
 
+# The "tab" of a test event made from the UI (Syncer.create_test_event).
+TEST_TAB = "Test event"
+# The longest test event the UI can make.
+TEST_MAX_MINUTES = 24 * 60
+
 # How long to keep a record after its event ends, when LSP's own cleanup
 # threshold (settings/general EventCleanupThresholdInDays) can't be read.
 DEFAULT_CLEANUP_DAYS = 365
@@ -110,6 +115,7 @@ class PlanItem:
     locked: bool = False
     new_lock: str = ""       # set when this pass finds a hand edit in LSP
     started: bool = False    # tracked and already started: its record is frozen
+    test: bool = False       # a test event made from the UI, not from the sheet
 
     def to_dict(self) -> dict:
         return {
@@ -130,6 +136,7 @@ class PlanItem:
             "sheet_start": self.event.sheet_start,
             "record_id": self.record_id,
             "locked": self.locked or bool(self.new_lock),
+            "test": self.test,
         }
 
 
@@ -361,7 +368,8 @@ class Syncer:
         recording of it.
         """
         out: dict[int, str] = {}
-        used: set[str] = set()
+        # Test events made from the UI are never a sheet event's.
+        used: set[str] = {rid for rid, rec in self.state.events.items() if rec.get("test")}
         same_day: dict[tuple, list[str]] = defaultdict(list)
         for rid, rec in self.state.events.items():
             same_day[(rec["tab"], rec["date"], name_key(rec["name"]))].append(rid)
@@ -611,11 +619,14 @@ class Syncer:
                    for cid, b in rec.get("bookings", {}).items()]
         edit = ("" if rec.get("locked") or (record_start(rec) or start) <= now
                 else (self._hand_edit(rec, view, now) or ""))
-        msg = "No longer in the sheet; left in LSP (delete it there if it's cancelled)"
+        msg = ("Test event made in the UI, not from the sheet; delete it under Scheduled in Live "
+               "Schedule Pro when done" if rec.get("test")
+               else "No longer in the sheet; left in LSP (delete it there if it's cancelled)")
         if rec.get("locked") or edit:
             msg += f". Locked: {rec.get('lock_reason') or edit}"
         return PlanItem(ev, rec.get("lsp_name") or rec["name"], NOT_IN_SHEET, targets, msg,
-                        record_id=rid, locked=bool(rec.get("locked")), new_lock=edit)
+                        record_id=rid, locked=bool(rec.get("locked")), new_lock=edit,
+                        test=bool(rec.get("test")))
 
     def _hand_edit(self, rec, view: _LspView, now, want: Optional[dict] = None) -> Optional[str]:
         """Why this record's LSP events no longer match what the tool last
@@ -751,6 +762,54 @@ class Syncer:
         log.info("Sent %r to LSP from preview: created=%d updated=%d removed=%d errors=%d",
                  item.lsp_name, summary["created"], summary["updated"], summary["deleted"],
                  summary["errors"])
+        return summary
+
+    def create_test_event(self, name: str, pcr: str, start: datetime, minutes: int) -> dict:
+        """Create a one-off event in LSP from the UI, not from the sheet, on
+        every channel `pcr` maps to, with its workflow and event-name variable
+        set as for a sheet event.
+
+        Always live, even with dry run on, like Preview's SEND TO LSP. It is
+        tracked (marked `test`), so it's tagged in the UI, the cleanup button
+        removes it, and a sync never takes it for a sheet event or touches it.
+        The name is used as given, only made a valid file name."""
+        name = safe_name(name or "")
+        if not name:
+            raise LspError("Give the test event a name")
+        pcr = (pcr or "").strip().upper()
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=LOCAL_TZ)
+        if not 1 <= minutes <= TEST_MAX_MINUTES:
+            raise LspError(f"Length must be 1 to {TEST_MAX_MINUTES} minutes")
+        if start < datetime.now(timezone.utc) - timedelta(minutes=1):
+            raise LspError("That start is in the past")
+        chans = self._resolve_channels().get(pcr) or []
+        if not chans:
+            raise LspError(f"No LSP channels match PCR {pcr or '(none)'}")
+        view = _LspView(self.lsp, {cid for cid, _ in chans})
+        if view.failed:
+            raise LspError("Could not read LSP; try again")
+        self._view, self._templates = view, {}
+        taken = [cname for cid, cname in chans if view.find(cid, name, start)]
+        if taken:
+            raise LspError(f"{', '.join(taken)} already has an event named “{name}” at that "
+                           "start")
+
+        ev = ScheduledEvent(name, pcr, start, start + timedelta(minutes=minutes), TEST_TAB, 0,
+                            event_date=start.astimezone(LOCAL_TZ).date().isoformat())
+        item = PlanItem(ev, name, CREATE, [Target(cid, cname, CREATE) for cid, cname in chans],
+                        test=True)
+        item.record_id = self.state.new_record({**_record_fields(item), "test": True})
+        summary = _summary(False)
+        summary["name"] = name
+        try:
+            self._execute([item], summary, live=True, force=True)
+        finally:
+            if not self.state.events.get(item.record_id, {}).get("bookings"):
+                self.state.events.pop(item.record_id, None)  # nothing was made
+            self.state.save()
+        log.info("Created test event %r (PCR %s) @ %s for %d min: created=%d errors=%d", name,
+                 pcr, start.isoformat(), minutes, summary["created"], summary["errors"])
         return summary
 
     def unlock(self, record_id: str) -> dict:
@@ -1287,6 +1346,7 @@ class Syncer:
                     "created_by": e.get("CreatedByDisplayName"),
                     "variable": _variable_value(e, variable),
                     "by_tool": info is not None,
+                    "test": bool(info and info.get("test")),
                     "locked": bool(info and info.get("locked")),
                 })
         events.sort(key=lambda ev: _parse_utc(ev["start"]) or cutoff)

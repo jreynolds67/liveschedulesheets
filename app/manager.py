@@ -270,6 +270,10 @@ class SyncManager:
             _, syncer = self._components()
             return syncer.send_one(tab, event_date, event_name, occurrence)
 
+    def create_test_event(self, name: str, pcr: str, start: datetime, minutes: int) -> dict:
+        with self._locked(_WRITE_WAIT_SECONDS):
+            return self._lsp_syncer().create_test_event(name, pcr, start, minutes)
+
     def unlock_event(self, record_id: str) -> dict:
         with self._locked(_WRITE_WAIT_SECONDS):
             _, syncer = self._components()
