@@ -965,32 +965,23 @@ def test_test_event_is_not_booked_twice(make_syncer, lsp):
     assert len(lsp.events) == 1 and not s.state.events
 
 
-@pytest.fixture
-def soon_var_syncer(var_syncer, lsp):
-    """LSP queues events starting within 10 minutes (no PatchEvent then);
-    each A channel already has an event to copy the workflow from."""
-    for cid in ("a1", "a2"):
-        lsp.add_hand_made(cid, "MSOC vs UNC", _soon(60 * 24), _soon(60 * 26))
-    lsp.queues_within = timedelta(minutes=10)
-    return var_syncer([])
-
-
-def test_test_event_starting_soon_is_created_with_its_variable(soon_var_syncer, lsp):
-    summary = soon_var_syncer.create_test_event("TEST", "A", _soon(2), 10)
-    assert summary["created"] == 2 and summary["variable_missing"] == []
-    mine = [eid for eid, e in lsp.events.items() if e["Name"] == "TEST"]
-    assert len(mine) == 2 and all(lsp.variable_of(eid) == "TEST" for eid in mine)
-    # Not taken for a hand edit later.
-    (rec,) = [r for r in soon_var_syncer.state.events.values() if r.get("test")]
-    assert all(b["variable_sent"] == "TEST" for b in rec["bookings"].values())
-    assert not soon_var_syncer._hand_edit(rec, _LspView(lsp, {"a1", "a2"}), _soon(0))
-
-
-def test_test_event_says_when_its_variable_did_not_take(soon_var_syncer, lsp):
-    lsp.rejects_extra = True  # created plainly; then too close to its start to patch
-    summary = soon_var_syncer.create_test_event("TEST", "A", _soon(2), 10)
+def test_test_event_says_when_its_variable_did_not_take(var_syncer, lsp):
+    lsp.keeps_variable = False
+    summary = var_syncer([]).create_test_event("TEST", "A", _soon(), 10)
     assert summary["created"] == 2
     assert sorted(summary["variable_missing"]) == ["01 - PCR A PGM", "02 - PCR A CLEAN"]
+
+
+def test_test_event_start_is_sent_in_local_time(make_syncer, lsp, monkeypatch):
+    """LSP books a UTC start (+00:00) at the moment it's sent; sheet events
+    have always gone in local time, and test events must too."""
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr("app.sync.LOCAL_TZ", ZoneInfo("America/New_York"))
+    start = _soon().astimezone(timezone.utc)
+    make_syncer([]).create_test_event("TEST", "B", start, 10)
+    (e,) = lsp.events.values()
+    assert _same_instant(e["Start"], start) and not e["Start"].endswith("+00:00")
 
 
 def test_test_event_says_when_lsp_moves_its_start(make_syncer, lsp):
@@ -1013,8 +1004,8 @@ def test_test_event_says_when_lsp_moves_its_start(make_syncer, lsp):
 
 
 def test_test_event_lsp_starts_at_once_is_found_and_reported(var_syncer, lsp):
-    """LSP books an event starting within minutes right away (as seen: sent
-    for 11:15, booked at 11:10), and its reply has no id."""
+    """LSP books the event at once, not at its start (as it did with UTC
+    starts: sent for 11:15 at 11:10, booked at 11:10), and its reply has no id."""
     lsp.add_hand_made("a1", "MSOC vs UNC", _soon(60 * 24), _soon(60 * 26))
     lsp.add_hand_made("a2", "MSOC vs UNC", _soon(60 * 24), _soon(60 * 26))
     lsp.starts_now_within, lsp.reply_without_id = timedelta(minutes=10), True
@@ -1026,7 +1017,8 @@ def test_test_event_lsp_starts_at_once_is_found_and_reported(var_syncer, lsp):
     assert all(b["event_id"] for b in rec["bookings"].values())
     assert [m["status"] for m in summary["start_moved"]] == ["Recording", "Recording"]
     assert summary["event_start_offset"] == "00:10:00"
-    assert summary["variable_missing"] == []
+    # Started, so LSP won't take the variable either: said, not hidden.
+    assert sorted(summary["variable_missing"]) == ["01 - PCR A PGM", "02 - PCR A CLEAN"]
 
 
 def test_test_event_put_elsewhere_but_waiting_is_moved_back(make_syncer, lsp):

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.config import parse_config
-from app.lsp_client import LspError, LspRejected
+from app.lsp_client import LspError
 from app.models import ScheduledEvent
 from app.state import State
 from app.sync import Syncer
@@ -78,8 +78,6 @@ class FakeLsp:
         self.keeps_variable = True     # False: PatchEvent drops a variable value
         self.name_limit = None         # LSP shortens names to this many characters
         self.before_get_event = None   # called on each GetFilteredEvents read
-        self.queues_within = None      # PatchEvent refuses events starting within this timedelta
-        self.rejects_extra = False     # AddEvent refuses (400) a Customization / Labels
         self.starts_now_within = None  # AddEvent books events starting within this timedelta now
         self.reply_without_id = False  # AddEvent's reply has no Id
 
@@ -109,13 +107,10 @@ class FakeLsp:
                 "Text": [], "Default": {"Text": ["Event XX"]}}}]}
         return e
 
-    def add_event(self, ev, channel_id, name, force=False, extra=None):
-        if extra and self.rejects_extra:
-            raise LspRejected("AddEvent failed (400): Customization is invalid")
+    def add_event(self, ev, channel_id, name, force=False):
         e = self._new(channel_id, name, ev.start, ev.end, "lsp-api")
         if not self.copies_workflow:
             e.pop("Customization", None)
-        e.update(copy.deepcopy(extra or {}))
         if self.starts_now_within is not None:
             from datetime import timezone
             now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -131,11 +126,8 @@ class FakeLsp:
         return copy.deepcopy(e)
 
     def patch_event(self, event_id, name, start, end, force=False, extra=None):
-        if self.queues_within is not None:
-            from datetime import timezone
-            begins = datetime.fromisoformat(self.events[event_id]["Start"])
-            if begins - datetime.now(timezone.utc) < self.queues_within:
-                raise LspError("PatchEvent returned EventAlreadyStarted")
+        if self.events[event_id].get("Status", "Waiting") != "Waiting":
+            raise LspError("PatchEvent returned EventAlreadyStarted")  # only unstarted events
         extra = copy.deepcopy(extra or {})
         if not self.keeps_variable:
             extra.pop("Customization", None)

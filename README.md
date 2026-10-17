@@ -108,20 +108,14 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   Event Name variable set like a sheet event. The name is used as typed (only
   made a valid file name, see [Event names in LSP](#event-names-in-lsp)). It
   works **even with dry run on**, and refuses a start in the past or a name
-  and start a channel already has. Because a test event starts within
-  minutes, LSP may already have queued it, and PatchEvent only changes events
-  that haven't started. So the tool creates it with the Event Name variable
-  already filled in: AddEvent is sent the channel's workflow, copied from the
-  most complete event on that channel with every value cleared and the
-  variable set to the name. If LSP refuses that, the event is created plainly
-  and the variable set afterwards. Each event is then read back, and the
-  message after creating says which channels don't hold the name, if any.
-  LSP may also book an event that starts within a few minutes at the moment
-  it's sent instead of its start (seen: sent for 11:15 at 11:10, booked at
-  11:10). The tool then still finds it (the one new event with that name),
-  moves it back to the start you gave if LSP hasn't started it, and
-  otherwise says so with its status and LSP's `EventStartOffset` setting.
-  So give a test event a few minutes' notice. Test events are tracked in `state.json`
+  and start a channel already has. Each event is read back afterwards, and
+  the message after creating says if any channel doesn't hold the name in
+  its Event Name variable, or holds another start than you gave. LSP
+  mishandles a start sent in UTC (`+00:00`): it books the event the moment
+  it's sent, with no id in its reply. So, like sheet events, test events are
+  sent in local time (`-04:00`), and if LSP does put one at another start,
+  the tool still finds it (the one new event with that name) and moves it
+  back if it hasn't started. Test events are tracked in `state.json`
   (marked `test`), tagged **test** in Preview and the *Scheduled in Live
   Schedule Pro* list, never matched to a sheet event or changed by a sync, and
   removed by **DELETE** or the cleanup button. Also available as `POST
