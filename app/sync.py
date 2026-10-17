@@ -777,8 +777,9 @@ class Syncer:
         if not name:
             raise LspError("Give the test event a name")
         pcr = (pcr or "").strip().upper()
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=LOCAL_TZ)
+        # Sent in local time with its offset, as sheet events are.
+        start = (start.replace(tzinfo=LOCAL_TZ) if start.tzinfo is None
+                 else start.astimezone(LOCAL_TZ))
         if not 1 <= minutes <= TEST_MAX_MINUTES:
             raise LspError(f"Length must be 1 to {TEST_MAX_MINUTES} minutes")
         if start < datetime.now(timezone.utc) - timedelta(minutes=1):
@@ -811,18 +812,20 @@ class Syncer:
         # Seconds this server's clock is ahead of LSP's: LSP starts recording
         # by its own clock, so a test watched live starts that much off.
         summary["clock_skew"] = getattr(self.lsp, "clock_skew", None)
-        summary.update(self._check_test_event(item.record_id, name, start))
+        summary.update(self._check_test_event(item.record_id, name, start, ev.end))
         log.info("Created test event %r (PCR %s) @ %s for %d min: created=%d errors=%d", name,
                  pcr, start.isoformat(), minutes, summary["created"], summary["errors"])
         return summary
 
-    def _check_test_event(self, rid: Optional[str], name: str, start: datetime) -> dict:
+    def _check_test_event(self, rid: Optional[str], name: str, start: datetime,
+                          end: datetime) -> dict:
         """Read a just-made test event back from LSP, so the UI can say what
         didn't come out as asked (no later pass fixes a test event):
         `variable_missing`, the channels where its event-name variable
         doesn't hold its name, and `start_moved`, those where LSP holds
         another start than the one sent (with its status), plus LSP's
-        `event_start_offset` setting, which may explain that."""
+        `event_start_offset` setting, which may explain that. An event LSP
+        put elsewhere but hasn't started is moved back to the start sent."""
         var = self.cfg.lsp.event_name_variable
         out: dict = {"start_moved": []}
         if var:
@@ -835,6 +838,16 @@ class Syncer:
                 e = None
             if not e:
                 continue
+            if not _same_instant(e.get("Start"), start) and _status(e) == "waiting":
+                log.warning("Test event %r on %s: LSP holds start %s, not %s; moving it back",
+                            name, label, e.get("Start"), start.isoformat())
+                try:
+                    self.lsp.patch_event(b["event_id"], name, start, end, force=True)
+                    e = self.lsp.get_event(b["event_id"]) or e
+                except LspError as exc:
+                    log.warning("Could not move test event %r on %s back: %s", name, label, exc)
+                if _same_instant(e.get("Start"), start):
+                    b["snapshot"] = _snapshot(e)
             if not _same_instant(e.get("Start"), start):
                 out["start_moved"].append({"channel": label, "start": e.get("Start"),
                                            "status": e.get("Status")})
@@ -1109,14 +1122,24 @@ class Syncer:
 
     def _find_new_event(self, item: PlanItem, t: Target) -> Optional[dict]:
         """The event on the channel with this name and start that wasn't
-        there when this pass read LSP."""
+        there when this pass read LSP.
+
+        For a test event, which starts within minutes, LSP may put the event
+        at another start (when the send was pressed): then the one new event
+        with its name, so its variable can still be set and its start put
+        back (see _check_test_event)."""
         view = getattr(self, "_view", None)
         known = {e.get("Id") for e in (view.by_channel.get(t.channel_id, []) if view else [])}
-        for e in self.lsp.get_events_for_channel(t.channel_id):
-            if (e.get("Id") not in known
-                    and (e.get("Name") or "").strip() == item.lsp_name.strip()
-                    and _same_instant(e.get("Start"), item.event.start)):
+        new = [e for e in self.lsp.get_events_for_channel(t.channel_id)
+               if e.get("Id") not in known
+               and (e.get("Name") or "").strip() == item.lsp_name.strip()]
+        for e in new:
+            if _same_instant(e.get("Start"), item.event.start):
                 return e
+        if item.test and len(new) == 1:
+            log.warning("LSP put test event %r on %s at %s, not %s as sent", item.lsp_name,
+                        t.channel_name, new[0].get("Start"), item.event.start.isoformat())
+            return new[0]
         return None
 
     def _created_event(self, result, item: PlanItem, t: Target) -> Optional[dict]:

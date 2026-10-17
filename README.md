@@ -115,7 +115,13 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   most complete event on that channel with every value cleared and the
   variable set to the name. If LSP refuses that, the event is created plainly
   and the variable set afterwards. Each event is then read back, and the
-  message after creating says which channels don't hold the name, if any. Test events are tracked in `state.json`
+  message after creating says which channels don't hold the name, if any.
+  LSP may also book an event that starts within a few minutes at the moment
+  it's sent instead of its start (seen: sent for 11:15 at 11:10, booked at
+  11:10). The tool then still finds it (the one new event with that name),
+  moves it back to the start you gave if LSP hasn't started it, and
+  otherwise says so with its status and LSP's `EventStartOffset` setting.
+  So give a test event a few minutes' notice. Test events are tracked in `state.json`
   (marked `test`), tagged **test** in Preview and the *Scheduled in Live
   Schedule Pro* list, never matched to a sheet event or changed by a sync, and
   removed by **DELETE** or the cleanup button. Also available as `POST

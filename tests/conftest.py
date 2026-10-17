@@ -80,6 +80,8 @@ class FakeLsp:
         self.before_get_event = None   # called on each GetFilteredEvents read
         self.queues_within = None      # PatchEvent refuses events starting within this timedelta
         self.rejects_extra = False     # AddEvent refuses (400) a Customization / Labels
+        self.starts_now_within = None  # AddEvent books events starting within this timedelta now
+        self.reply_without_id = False  # AddEvent's reply has no Id
 
     def get_all_channels(self):
         return copy.deepcopy(self.channels)
@@ -114,11 +116,18 @@ class FakeLsp:
         if not self.copies_workflow:
             e.pop("Customization", None)
         e.update(copy.deepcopy(extra or {}))
+        if self.starts_now_within is not None:
+            from datetime import timezone
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            if ev.start - now < self.starts_now_within:
+                e.update(Start=now.isoformat(), Status="Recording")
         if self.add_error is not None:
             if self.add_creates_anyway:
                 self.events[e["Id"]] = e
             raise self.add_error
         self.events[e["Id"]] = e
+        if self.reply_without_id:
+            return {}
         return copy.deepcopy(e)
 
     def patch_event(self, event_id, name, start, end, force=False, extra=None):

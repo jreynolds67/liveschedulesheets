@@ -9,7 +9,7 @@ import pytest
 from app.lsp_client import LspError
 from app.sheets import SheetError
 from app.state import State
-from app.sync import CREATE, EXISTS, LOCKED, NOT_IN_SHEET, OUT_OF_WINDOW, UPDATE, _LspView
+from app.sync import CREATE, EXISTS, LOCKED, NOT_IN_SHEET, OUT_OF_WINDOW, UPDATE, _LspView, _same_instant
 
 from .conftest import FakeReader, sheet_event
 
@@ -1010,3 +1010,36 @@ def test_test_event_says_when_lsp_moves_its_start(make_syncer, lsp):
     assert summary["event_start_offset"] == "00:03:00"
     lsp.add_event = real_add
     assert make_syncer([]).create_test_event("TEST 2", "B", _soon(30), 10)["start_moved"] == []
+
+
+def test_test_event_lsp_starts_at_once_is_found_and_reported(var_syncer, lsp):
+    """LSP books an event starting within minutes right away (as seen: sent
+    for 11:15, booked at 11:10), and its reply has no id."""
+    lsp.add_hand_made("a1", "MSOC vs UNC", _soon(60 * 24), _soon(60 * 26))
+    lsp.add_hand_made("a2", "MSOC vs UNC", _soon(60 * 24), _soon(60 * 26))
+    lsp.starts_now_within, lsp.reply_without_id = timedelta(minutes=10), True
+    lsp.get_general_settings = lambda: {"EventStartOffset": "00:10:00"}
+    s = var_syncer([])
+    summary = s.create_test_event("TEST", "A", _soon(5), 10)
+    # Tracked by id (so cleanup and the variable check work), and reported.
+    (rec,) = [r for r in s.state.events.values() if r.get("test")]
+    assert all(b["event_id"] for b in rec["bookings"].values())
+    assert [m["status"] for m in summary["start_moved"]] == ["Recording", "Recording"]
+    assert summary["event_start_offset"] == "00:10:00"
+    assert summary["variable_missing"] == []
+
+
+def test_test_event_put_elsewhere_but_waiting_is_moved_back(make_syncer, lsp):
+    real_add = lsp.add_event
+
+    def add_elsewhere(ev, channel_id, name, force=False, **kw):
+        made = real_add(ev, channel_id, name, force=force, **kw)
+        lsp.events[made["Id"]]["Start"] = (ev.start - timedelta(minutes=3)).isoformat()
+        return {}
+
+    lsp.add_event = add_elsewhere
+    start = _soon(30)
+    summary = make_syncer([]).create_test_event("TEST", "B", start, 10)
+    assert summary["start_moved"] == []
+    (e,) = lsp.events.values()
+    assert _same_instant(e["Start"], start)
