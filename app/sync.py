@@ -30,7 +30,7 @@ from typing import Callable, Optional
 from dateutil import parser as dateparser
 
 from .config import Config
-from .lsp_client import LspClient, LspError
+from .lsp_client import LspClient, LspError, LspRejected
 from .lsp_client import event_status as _status
 from .models import ScheduledEvent, name_key, safe_name
 from .runtime import LOCAL_TZ
@@ -808,9 +808,32 @@ class Syncer:
             if not self.state.events.get(item.record_id, {}).get("bookings"):
                 self.state.events.pop(item.record_id, None)  # nothing was made
             self.state.save()
+        var = self.cfg.lsp.event_name_variable
+        if var:
+            summary["variable"] = var
+            summary["variable_missing"] = self._test_variable_missing(item.record_id, name)
         log.info("Created test event %r (PCR %s) @ %s for %d min: created=%d errors=%d", name,
                  pcr, start.isoformat(), minutes, summary["created"], summary["errors"])
         return summary
+
+    def _test_variable_missing(self, rid: Optional[str], name: str) -> list[str]:
+        """The channels where a just-made test event doesn't hold its name in
+        the event-name variable, read back from LSP (so the UI can say so:
+        no later pass sets it, as one does for a sheet event)."""
+        var = self.cfg.lsp.event_name_variable
+        missing = []
+        for cid, b in ((self.state.events.get(rid) or {}).get("bookings") or {}).items():
+            label = b.get("channel_name") or cid
+            try:
+                e = self.lsp.get_event(b["event_id"]) if b.get("event_id") else None
+            except LspError:
+                e = None
+            holds = _variable_value(e, var) if e else None
+            if (holds or "").strip() != name.strip():
+                missing.append(label)
+                log.warning("Test event %r on %s: %r holds %r, not its name", name, label, var,
+                            holds)
+        return missing
 
     def unlock(self, record_id: str) -> dict:
         """Let the tool manage a locked event again.
@@ -1000,9 +1023,22 @@ class Syncer:
         """Carry out one CREATE / UPDATE / DELETE target; returns the record id."""
         ev = item.event
         if t.status == CREATE:
-            result = self.lsp.add_event(ev, t.channel_id, item.lsp_name, force=force)
+            extra = self._create_fields(t.channel_id, item.lsp_name) if item.test else None
+            try:
+                result = self.lsp.add_event(ev, t.channel_id, item.lsp_name, force=force,
+                                            **({"extra": extra} if extra else {}))
+            except LspRejected as exc:
+                if not extra:
+                    raise
+                log.warning("LSP refused %r on %s with its workflow filled in (%s); creating it "
+                            "plainly and setting %r afterwards", item.lsp_name, t.channel_name,
+                            exc, self.cfg.lsp.event_name_variable)
+                extra = None
+                result = self.lsp.add_event(ev, t.channel_id, item.lsp_name, force=force)
             created = self._created_event(result, item, t)
             rid = self._record_created(item, t, rid, created, force, now, touched)
+            if extra:
+                self.state.events[rid]["bookings"][t.channel_id]["variable_sent"] = item.lsp_name
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
@@ -1160,6 +1196,21 @@ class Syncer:
             else:
                 log.warning("LSP didn't keep %r = %r on %s: it holds %r",
                             var, item.lsp_name, t.channel_name, holds)
+
+    def _create_fields(self, channel_id: str, name: str) -> Optional[dict]:
+        """AddEvent fields that create an event with its event-name variable
+        already set to `name`: the channel's workflow (copied from the most
+        complete event there, every value cleared, as _fill_variable does)
+        with the variable filled in. None if there's no variable set, or no
+        event on the channel to copy one with it from.
+
+        For test events, which start within minutes: LSP queues an event
+        that close to its start, and PatchEvent only changes ones that
+        haven't started, so setting the variable after creating it may not
+        take."""
+        var = self.cfg.lsp.event_name_variable
+        template = self._workflow_template(channel_id, None) if var else None
+        return _with_variable(_fresh_workflow(template), var, name) if template else None
 
     def _workflow_template(self, channel_id: str, exclude_id: Optional[str]) -> Optional[dict]:
         """The most complete workflow on another event on this channel (the

@@ -1202,7 +1202,12 @@ $("btnTestEvent").onclick = async () => {
   const r = await api("POST","/api/test-event", {name, pcr, start: start.toISOString(), minutes});
   btn.disabled = false; btn.textContent = "Create test event in LSP";
   if (r.ok){ const s = r.summary;
-    toast(`Created test event "${s.name}" on ${s.created} channel(s)${s.errors?`, ${s.errors} failed - see Activity`:""}`, 4000);
+    const miss = s.variable_missing || [];
+    const varMsg = !s.variable ? "" : miss.length
+      ? `. ⚠ ${s.variable} NOT set on ${miss.join(", ")} - see Activity`
+      : `, ${s.variable} set`;
+    toast(`Created test event "${s.name}" on ${s.created} channel(s)${s.errors?`, ${s.errors} failed`:""}${varMsg}`,
+          miss.length || s.errors ? 9000 : 4000);
     $("test_start").value = localInput(5);
   } else toast("Test event failed: " + r.error, 6000);
   refreshStatus(); loadScheduled(); refreshPreviewIfShown(); loadActivity();

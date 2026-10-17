@@ -108,7 +108,14 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   Event Name variable set like a sheet event. The name is used as typed (only
   made a valid file name, see [Event names in LSP](#event-names-in-lsp)). It
   works **even with dry run on**, and refuses a start in the past or a name
-  and start a channel already has. Test events are tracked in `state.json`
+  and start a channel already has. Because a test event starts within
+  minutes, LSP may already have queued it, and PatchEvent only changes events
+  that haven't started. So the tool creates it with the Event Name variable
+  already filled in: AddEvent is sent the channel's workflow, copied from the
+  most complete event on that channel with every value cleared and the
+  variable set to the name. If LSP refuses that, the event is created plainly
+  and the variable set afterwards. Each event is then read back, and the
+  message after creating says which channels don't hold the name, if any. Test events are tracked in `state.json`
   (marked `test`), tagged **test** in Preview and the *Scheduled in Live
   Schedule Pro* list, never matched to a sheet event or changed by a sync, and
   removed by **DELETE** or the cleanup button. Also available as `POST

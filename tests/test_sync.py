@@ -9,7 +9,7 @@ import pytest
 from app.lsp_client import LspError
 from app.sheets import SheetError
 from app.state import State
-from app.sync import CREATE, EXISTS, LOCKED, NOT_IN_SHEET, OUT_OF_WINDOW, UPDATE
+from app.sync import CREATE, EXISTS, LOCKED, NOT_IN_SHEET, OUT_OF_WINDOW, UPDATE, _LspView
 
 from .conftest import FakeReader, sheet_event
 
@@ -962,3 +962,31 @@ def test_test_event_is_not_booked_twice(make_syncer, lsp):
     with pytest.raises(LspError, match="02 - PCR A CLEAN already has"):
         s.create_test_event("test", "A", start, 10)
     assert len(lsp.events) == 1 and not s.state.events
+
+
+@pytest.fixture
+def soon_var_syncer(var_syncer, lsp):
+    """LSP queues events starting within 10 minutes (no PatchEvent then);
+    each A channel already has an event to copy the workflow from."""
+    for cid in ("a1", "a2"):
+        lsp.add_hand_made(cid, "MSOC vs UNC", _soon(60 * 24), _soon(60 * 26))
+    lsp.queues_within = timedelta(minutes=10)
+    return var_syncer([])
+
+
+def test_test_event_starting_soon_is_created_with_its_variable(soon_var_syncer, lsp):
+    summary = soon_var_syncer.create_test_event("TEST", "A", _soon(2), 10)
+    assert summary["created"] == 2 and summary["variable_missing"] == []
+    mine = [eid for eid, e in lsp.events.items() if e["Name"] == "TEST"]
+    assert len(mine) == 2 and all(lsp.variable_of(eid) == "TEST" for eid in mine)
+    # Not taken for a hand edit later.
+    (rec,) = [r for r in soon_var_syncer.state.events.values() if r.get("test")]
+    assert all(b["variable_sent"] == "TEST" for b in rec["bookings"].values())
+    assert not soon_var_syncer._hand_edit(rec, _LspView(lsp, {"a1", "a2"}), _soon(0))
+
+
+def test_test_event_says_when_its_variable_did_not_take(soon_var_syncer, lsp):
+    lsp.rejects_extra = True  # created plainly; then too close to its start to patch
+    summary = soon_var_syncer.create_test_event("TEST", "A", _soon(2), 10)
+    assert summary["created"] == 2
+    assert sorted(summary["variable_missing"]) == ["01 - PCR A PGM", "02 - PCR A CLEAN"]

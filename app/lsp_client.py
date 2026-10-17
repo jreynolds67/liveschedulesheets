@@ -30,6 +30,10 @@ class LspError(Exception):
     pass
 
 
+class LspRejected(LspError):
+    """LSP answered a create with a client error (4xx): nothing was made."""
+
+
 # LSP's EventStatus values, in its enum order.
 EVENT_STATUSES = ("Waiting", "Queued", "Recording", "Complete", "Failed", "Timeout", "Canceled")
 
@@ -272,17 +276,20 @@ class LspClient:
             raise LspError(f"Dry run is on: refusing to {action} in LSP")
 
     def add_event(self, ev: ScheduledEvent, channel_id: str, name: str,
-                  force: bool = False) -> dict:
+                  force: bool = False, extra: Optional[dict] = None) -> dict:
+        """Create an event (POST /api/v1/AddEvent). `extra` adds fields, e.g.
+        Customization / Labels to create it with its variables already set."""
         self._check_writable(f"create event {name!r}", force)
         body = {
             "Name": name,
             "Start": _iso(ev.start),
             "End": _iso(ev.end),
             "ChannelId": channel_id,
+            **(extra or {}),
         }
         resp = self._request("POST", "/api/v1/AddEvent", json=body)
         if resp.status_code != 200:
-            raise LspError(
+            raise (LspRejected if 400 <= resp.status_code < 500 else LspError)(
                 f"AddEvent failed for {name!r} ({resp.status_code}): {resp.text[:400]}"
             )
         try:
