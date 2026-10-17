@@ -917,6 +917,7 @@ def test_test_event_is_created_with_its_variable_and_left_alone(var_syncer, lsp)
     s = var_syncer([])
     summary = s.create_test_event("TEST St. Peter's", "a", _soon(), 15)
     assert summary["created"] == 2 and summary["name"] == "TEST St Peter's"
+    assert "clock_skew" in summary
     assert sorted(e["ChannelId"] for e in lsp.events.values()) == ["a1", "a2"]
     for eid, e in lsp.events.items():
         assert e["Name"] == "TEST St Peter's" and lsp.variable_of(eid) == "TEST St Peter's"

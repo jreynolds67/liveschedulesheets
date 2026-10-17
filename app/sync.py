@@ -808,6 +808,9 @@ class Syncer:
             if not self.state.events.get(item.record_id, {}).get("bookings"):
                 self.state.events.pop(item.record_id, None)  # nothing was made
             self.state.save()
+        # Seconds this server's clock is ahead of LSP's: LSP starts recording
+        # by its own clock, so a test watched live starts that much off.
+        summary["clock_skew"] = getattr(self.lsp, "clock_skew", None)
         var = self.cfg.lsp.event_name_variable
         if var:
             summary["variable"] = var

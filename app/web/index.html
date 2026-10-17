@@ -1206,8 +1206,13 @@ $("btnTestEvent").onclick = async () => {
     const varMsg = !s.variable ? "" : miss.length
       ? `. ⚠ ${s.variable} NOT set on ${miss.join(", ")} - see Activity`
       : `, ${s.variable} set`;
-    toast(`Created test event "${s.name}" on ${s.created} channel(s)${s.errors?`, ${s.errors} failed`:""}${varMsg}`,
-          miss.length || s.errors ? 9000 : 4000);
+    // skew = this server's clock minus LSP's; LSP starts recording by its own clock.
+    const skew = s.clock_skew, off = skew != null && Math.abs(skew) >= 30;
+    const clockMsg = !off ? "" : `. ⚠ LSP's clock is ${Math.round(Math.abs(skew)/60*10)/10} min `
+      + `${skew < 0 ? "ahead of" : "behind"} this server's, so it records about that much `
+      + `${skew < 0 ? "early" : "late"} by real time - check NTP on the LSP server`;
+    toast(`Created test event "${s.name}" on ${s.created} channel(s)${s.errors?`, ${s.errors} failed`:""}${varMsg}${clockMsg}`,
+          miss.length || s.errors || off ? 12000 : 4000);
     $("test_start").value = localInput(5);
   } else toast("Test event failed: " + r.error, 6000);
   refreshStatus(); loadScheduled(); refreshPreviewIfShown(); loadActivity();
