@@ -46,6 +46,19 @@ class DateParsingConfig:
 
 
 @dataclass
+class ExtraRoom:
+    """Events of `sport` also record on PCR `pcr`'s channels, when enabled."""
+    sport: str
+    pcr: str
+    enabled: bool = True
+
+
+# Used when the config has no scheduling.extra_rooms yet: basketball can also
+# record in PCR C, off until turned on in the UI.
+DEFAULT_EXTRA_ROOMS = (("MBB", "C"), ("WBB", "C"))
+
+
+@dataclass
 class SchedulingConfig:
     lead_in_minutes: int
     safety_cap_hours: float
@@ -58,6 +71,20 @@ class SchedulingConfig:
     # names as the sheet has them); see models.format_event_name.
     home_team: str = "Pitt"
     sport_codes: tuple[str, ...] = DEFAULT_SPORT_CODES
+    # Sports that also record in another PCR besides their own; see rooms_for().
+    extra_rooms: list[ExtraRoom] = field(default_factory=list)
+
+    def rooms_for(self, event_name: str, pcr: str) -> list[str]:
+        """The PCRs an event records in: its own, then the extra PCR of every
+        turned-on row whose sport appears in its name as a whole word ("MBB"
+        in "MBB vs Duke"). None without a PCR of its own."""
+        if not pcr:
+            return []
+        rooms = [pcr]
+        for x in self.extra_rooms:
+            if x.enabled and x.pcr not in rooms and channel_name_matches(x.sport, event_name):
+                rooms.append(x.pcr)
+        return rooms
 
     def lsp_name(self, ev) -> str:
         """A sheet event's name in LSP (the event and its Event Name variable)."""
@@ -273,6 +300,7 @@ def parse_sheet_settings(raw: dict) -> SheetSettings:
         past_grace_minutes=_number(sc_raw, "past_grace_minutes", 30, "scheduling", int, 0, 24 * 60),
         event_name_prefix=str(sc_raw.get("event_name_prefix", "")),
         sport_safety_caps=_parse_sport_caps(sc_raw.get("sport_safety_caps")),
+        extra_rooms=_parse_extra_rooms(sc_raw.get("extra_rooms")),
         home_team=str(sc_raw.get("home_team", "Pitt") if sc_raw.get("home_team") is not None
                       else "Pitt").strip(),
         sport_codes=tuple(c.strip().upper() for c in _as_list(sc_raw.get("sport_codes"))
@@ -385,6 +413,26 @@ def _parse_sport_caps(raw) -> list[tuple[str, float]]:
         if not 0 < hours <= 48:
             raise ConfigError(f"Safety cap for {sport} must be more than 0 and at most 48 hours")
         out.append((sport, hours))
+    return out
+
+
+def _parse_extra_rooms(raw) -> list[ExtraRoom]:
+    """raw: [{sport: "MBB", pcr: "C", enabled: true}, ...]; None (not set
+    yet) gives DEFAULT_EXTRA_ROOMS, turned off."""
+    if raw is None:
+        return [ExtraRoom(sport, pcr, enabled=False) for sport, pcr in DEFAULT_EXTRA_ROOMS]
+    out = []
+    for item in raw or []:
+        item = item or {}
+        sport = str(item.get("sport") or "").strip()
+        pcr = str(item.get("pcr") or "").strip().upper()
+        if pcr.startswith("PCR"):
+            pcr = pcr[3:].strip()
+        if not sport and not pcr:
+            continue
+        if not sport or not pcr:
+            raise ConfigError("Each 'also record in' row needs a sport and a PCR")
+        out.append(ExtraRoom(sport, pcr, enabled=bool(item.get("enabled", True))))
     return out
 
 

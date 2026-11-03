@@ -50,6 +50,15 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   (x264)`, `01 - PCR A PGM (ProRes422)`, `02 - PCR A CLEAN (x264)`, etc.
   Channels are looked up live every pass, so added or renamed channels are
   picked up automatically; the UI lists which channels each PCR matches.
+  Under **Also record in another PCR**, a sport can record in a second PCR
+  as well as its own: with `MBB` → `PCR C` turned on, an MBB game in PCR A
+  is booked on A's channels **and** C's (a game already in C is booked once).
+  The sport counts when its code is in the event name as a whole word. Rows
+  for MBB and WBB → PCR C are there to start with, turned **off**; tick
+  **On** to use one. Turning a row on or off adds or removes the extra PCR's
+  bookings on events already in LSP that haven't started (unless locked);
+  Preview shows the extra PCR under the event's PCR. Test events book only
+  the PCR picked for them.
   Below the mapping, set the **Event name variable** (default `Event Name`).
   **Check channels** lists each PCR channel as **found** or **not found**,
   according to whether its events carry that variable. The *Scheduled in

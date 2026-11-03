@@ -1035,3 +1035,65 @@ def test_test_event_put_elsewhere_but_waiting_is_moved_back(make_syncer, lsp):
     assert summary["start_moved"] == []
     (e,) = lsp.events.values()
     assert _same_instant(e["Start"], start)
+
+
+# -- sports that also record in another PCR -----------------------------------
+
+@pytest.fixture
+def basketball(key_file, state_path, lsp, make_syncer):
+    """make(events, on=True): a syncer whose MBB and WBB events also record
+    in PCR C (`on`), with PCR C's two channels in LSP."""
+    from app.config import parse_config
+    from .conftest import raw_config
+    lsp.channels += [{"Id": "c1", "Name": "01 - PCR C PGM"}, {"Id": "c2", "Name": "02 - PCR C CLEAN"}]
+
+    def make(events, on=True):
+        raw = raw_config(key_file, state_path, scheduling={"extra_rooms": [
+            {"sport": "MBB", "pcr": "C", "enabled": on}, {"sport": "WBB", "pcr": "C", "enabled": on}]})
+        raw["pcr_channel_map"]["C"] = {"channel_match": "PCR C"}
+        return make_syncer(events, parse_config(raw))
+    return make
+
+
+def channels(lsp):
+    return sorted(e["ChannelId"] for e in lsp.events.values())
+
+
+def test_basketball_also_records_in_the_extra_pcr(basketball, lsp):
+    s = basketball([sheet_event(name="MBB vs Duke", pcr="A")])
+    [item] = s.plan()
+    assert item.to_dict()["rooms"] == ["A", "C"]
+    assert s.run_once()["created"] == 4
+    assert channels(lsp) == ["a1", "a2", "c1", "c2"]
+    assert statuses(basketball([sheet_event(name="MBB vs Duke", pcr="A")])) == [EXISTS]
+
+
+def test_other_sports_and_turned_off_rows_record_their_own_pcr_only(basketball, lsp):
+    basketball([sheet_event(name="WSOC vs Texas", pcr="A"), sheet_event(name="WBB vs UNC", pcr="B")],
+               on=False).run_once()
+    assert channels(lsp) == ["a1", "a2", "b1"]
+
+
+def test_event_in_the_extra_pcr_is_booked_once(basketball, lsp):
+    basketball([sheet_event(name="WBB vs UNC", pcr="C")]).run_once()
+    assert channels(lsp) == ["c1", "c2"]
+
+
+def test_turning_the_extra_pcr_on_and_off_updates_lsp(basketball, lsp):
+    ev = sheet_event(name="MBB vs Duke", pcr="A")
+    basketball([ev], on=False).run_once()
+    assert basketball([ev]).run_once()["created"] == 2
+    assert channels(lsp) == ["a1", "a2", "c1", "c2"]
+    s = basketball([ev], on=False)
+    [item] = s.plan()
+    assert {t.message for t in item.targets if t.channel_id.startswith("c")} == {
+        "No longer also records in PCR C; will be removed from this channel"}
+    assert s.run_once()["deleted"] == 2
+    assert channels(lsp) == ["a1", "a2"]
+
+
+def test_pcr_change_keeps_the_extra_pcr(basketball, lsp):
+    basketball([sheet_event(name="MBB vs Duke", pcr="A")]).run_once()
+    summary = basketball([sheet_event(name="MBB vs Duke", pcr="B")]).run_once()
+    assert (summary["created"], summary["deleted"]) == (1, 2)
+    assert channels(lsp) == ["b1", "c1", "c2"]

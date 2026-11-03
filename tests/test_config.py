@@ -46,3 +46,25 @@ def test_password_is_only_sent_to_the_url_it_was_entered_for(key_file, state_pat
     assert parse_config(raw).lsp.password == ""  # neither the stored nor the env one
     del raw["lsp"]["password_for"], raw["lsp"]["password"]
     assert parse_config(raw).lsp.password == "from-env"  # never bound: first setup
+
+
+def test_extra_rooms_default_to_basketball_in_c_turned_off(key_file, state_path):
+    sc = parse_config(raw_config(key_file, state_path)).scheduling
+    assert [(x.sport, x.pcr, x.enabled) for x in sc.extra_rooms] == [("MBB", "C", False),
+                                                                     ("WBB", "C", False)]
+    assert sc.rooms_for("MBB vs Duke", "A") == ["A"]
+
+
+def test_extra_rooms_for_a_sport(key_file, state_path):
+    sc = parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [
+        {"sport": "MBB", "pcr": "pcr c"}, {"sport": "WBB", "pcr": "C", "enabled": False}]})).scheduling
+    assert sc.rooms_for("MBB vs Duke", "A") == ["A", "C"]
+    assert sc.rooms_for("mbb vs Duke", "C") == ["C"]
+    assert sc.rooms_for("WBB vs UNC", "A") == ["A"]
+    assert sc.rooms_for("XMBB vs Duke", "A") == ["A"]
+    assert sc.rooms_for("MBB vs Duke", "") == []
+
+
+def test_extra_room_row_needs_a_pcr(key_file, state_path):
+    with pytest.raises(ConfigError):
+        parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [{"sport": "MBB"}]}))

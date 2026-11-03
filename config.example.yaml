@@ -85,6 +85,13 @@ scheduling:
   # sport_safety_caps). Empty = the usual ones: FB, MBB, WBB, MSOC, WSOC, VB,
   # GYM, WRS, BSB, SB, ...
   sport_codes: []
+  # Sports that also record in a second PCR, besides the event's own: an MBB
+  # game in PCR A then books PCR A's channels and PCR C's. A sport applies
+  # when its code is in the event name as a whole word. Left out = these two
+  # rows, turned off (enabled: false).
+  extra_rooms:
+    - { sport: "MBB", pcr: "C", enabled: false }
+    - { sport: "WBB", pcr: "C", enabled: false }
 
 # PCR letter (from the sheet) -> Live Schedule Pro channels.
 # Each event is booked on EVERY channel whose name contains channel_match as a

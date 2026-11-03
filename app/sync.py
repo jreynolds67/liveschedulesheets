@@ -96,6 +96,9 @@ class Target:
     status: str
     message: str = ""
     event_id: Optional[str] = None
+    # The PCR this channel is booked for: the event's own, or an extra one
+    # its sport also records in (SchedulingConfig.rooms_for).
+    room: str = ""
     # For a new event: a booking to record without creating anything (a hand-
     # made LSP event already there).
     adopt: Optional[dict] = None
@@ -122,6 +125,8 @@ class PlanItem:
             "name": self.lsp_name,
             "event_name": self.event.name,
             "pcr": self.event.pcr,
+            # Every PCR it records in, its own first ("A", "C").
+            "rooms": list(dict.fromkeys(t.room for t in self.targets if t.room)),
             "start": self.event.start.isoformat(),
             "end": self.event.end.isoformat(),
             "status": self.status,
@@ -419,17 +424,18 @@ class Syncer:
     def _plan_new(self, ev, by_pcr, view: _LspView, planned_keys) -> PlanItem:
         """A sheet event the tool isn't tracking yet."""
         name = self.cfg.scheduling.lsp_name(ev)
-        chans = by_pcr.get(ev.pcr) or []
+        chans = self._channels_for(ev, by_pcr)
         if not self._within_window(ev):
             return PlanItem(ev, name, OUT_OF_WINDOW,
-                            [Target(cid, cname, OUT_OF_WINDOW) for cid, cname in chans],
+                            [Target(cid, cname, OUT_OF_WINDOW, room=room)
+                             for cid, cname, room in chans],
                             message="Start is outside the active window")
         if not chans:
             return PlanItem(ev, name, NO_CHANNEL,
                             message=f"No LSP channels match PCR {ev.pcr or '(none)'}")
 
-        targets = [self._new_target(cid, cname, name, ev, view, planned_keys)
-                   for cid, cname in chans]
+        targets = [self._new_target(cid, cname, name, ev, view, planned_keys, room)
+                   for cid, cname, room in chans]
         if any(t.status == ERROR for t in targets):
             return PlanItem(ev, name, ERROR, targets, message="Could not read LSP; skipped this pass")
         to_create = sum(t.status == CREATE for t in targets)
@@ -442,9 +448,15 @@ class Syncer:
                         message=(f"Not added on {owned} channel(s): {_OWNED}" if owned
                                  else f"Already on all {len(targets)} channels"))
 
-    def _new_target(self, cid, cname, name, ev, view: _LspView, planned_keys) -> Target:
+    def _new_target(self, cid, cname, name, ev, view: _LspView, planned_keys,
+                    room: str = "") -> Target:
         """What to do on a channel an event isn't booked on yet: create it,
         but never add a second copy of one already there."""
+        t = self._new_target_status(cid, cname, name, ev, view, planned_keys)
+        t.room = room
+        return t
+
+    def _new_target_status(self, cid, cname, name, ev, view: _LspView, planned_keys) -> Target:
         key = (cid, name_key(name), _minute_key(ev.start))
         if key in planned_keys:
             return Target(cid, cname, EXISTS, "Same event earlier in the sheet")
@@ -507,14 +519,15 @@ class Syncer:
                             message=f"Start {ev.start:%Y-%m-%d %H:%M} is outside the active "
                                     "window; LSP left as it was. If that's a typo, fix the sheet.")
 
-        chans = by_pcr.get(ev.pcr) or []
+        chans = self._channels_for(ev, by_pcr)
+        rooms = {room for _, _, room in chans}
         if not chans:
             return PlanItem(ev, name, NO_CHANNEL, as_is(EXISTS, "Left as is"), record_id=rid,
                             message=f"No LSP channels match PCR {ev.pcr or '(none)'}; "
                                     "existing bookings left as they are")
         key = (name_key(name), _minute_key(ev.start))
         targets, wanted = [], set()
-        for cid, cn in chans:
+        for cid, cn, room in chans:
             wanted.add(cid)
             b = bookings.get(cid)
             hand = None if b is None or b.get("by_tool") else view.by_id.get(b.get("event_id"))
@@ -523,7 +536,7 @@ class Syncer:
             if b is None:
                 # A new channel for this event (its PCR changed, or the hand-
                 # made event there was deleted).
-                targets.append(self._new_target(cid, cn, name, ev, view, planned_keys))
+                targets.append(self._new_target(cid, cn, name, ev, view, planned_keys, room))
             elif not b.get("by_tool"):
                 e = hand[1] if hand else {}
                 differs = hand and ((e.get("Name") or "").strip() != name.strip()
@@ -531,7 +544,7 @@ class Syncer:
                                     or not _same_instant(e.get("End"), ev.end))
                 targets.append(Target(cid, cn, EXISTS,
                                       _HAND_DIFFERS if differs else "Made by hand in LSP; left alone",
-                                      event_id=b.get("event_id")))
+                                      event_id=b.get("event_id"), room=room))
             else:
                 # Untouched by hand (checked above), so LSP's current values
                 # are what the tool last wrote; the snapshot is the fallback.
@@ -556,12 +569,13 @@ class Syncer:
                     # start would record the same thing twice.
                     other = view.find(cid, name, ev.start)
                     if (cid, *key) in planned_keys or (other and other.get("Id") != event_id):
-                        targets.append(Target(cid, cn, EXISTS, _DUPLICATE, event_id=event_id))
+                        targets.append(Target(cid, cn, EXISTS, _DUPLICATE, event_id=event_id,
+                                              room=room))
                         continue
                     planned_keys.add((cid, *key))
                 targets.append(Target(cid, cn, UPDATE if diffs else EXISTS,
                                       f"Will update {', '.join(diffs)}" if diffs else "Up to date",
-                                      event_id=event_id))
+                                      event_id=event_id, room=room))
         for cid, b in bookings.items():
             if cid in getattr(self, "_gone", ()):
                 targets.append(Target(cid, cname(cid), EXISTS, _GONE,
@@ -572,10 +586,15 @@ class Syncer:
             # By where it is now, in case LSP gave the event a new id.
             hit = _locate(b, cid, view)
             event_id = hit[1].get("Id") if hit else b.get("event_id")
-            # The PCR the booking was made for (older bookings: the record's).
-            if (b.get("pcr") or rec.get("pcr") or "") != (ev.pcr or ""):
+            # The PCR the booking was made for (older bookings: the event's
+            # own then, or the record's).
+            own = b.get("pcr") or rec.get("pcr") or ""
+            booked_for = b.get("room") or own
+            if booked_for not in rooms:
+                why = ("PCR changed" if booked_for == own
+                       else f"No longer also records in PCR {booked_for}")
                 targets.append(Target(cid, cname(cid), DELETE,
-                                      "PCR changed; will be removed from this channel",
+                                      f"{why}; will be removed from this channel",
                                       event_id=event_id))
             else:
                 # Same PCR, but the channel no longer matches it (renamed in
@@ -615,7 +634,8 @@ class Syncer:
         ev = ScheduledEvent(rec["name"], rec.get("pcr") or "", start, end or start, rec["tab"],
                             rec.get("column") or 0, rec["date"], rec.get("occurrence", 0))
         targets = [Target(cid, names.get(cid) or b.get("channel_name") or cid, EXISTS,
-                          "Left in LSP", event_id=b.get("event_id"))
+                          "Left in LSP", event_id=b.get("event_id"),
+                          room=b.get("room") or b.get("pcr") or rec.get("pcr") or "")
                    for cid, b in rec.get("bookings", {}).items()]
         edit = ("" if rec.get("locked") or (record_start(rec) or start) <= now
                 else (self._hand_edit(rec, view, now) or ""))
@@ -1063,7 +1083,8 @@ class Syncer:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
             b = self.state.events[rid]["bookings"][t.channel_id]
             b.update(event_id=t.event_id, name=item.lsp_name, snapshot=None,
-                     written=_written(item), updated_at=now, pcr=ev.pcr)
+                     written=_written(item), updated_at=now, pcr=ev.pcr,
+                     room=t.room or b.get("room") or ev.pcr)
             touched.append((rid, t.channel_id))
             log.info("Updated %r on %s (%s) @ %s", item.lsp_name, t.channel_name,
                      t.message, ev.start.isoformat())
@@ -1084,6 +1105,7 @@ class Syncer:
         self.state.events[rid]["bookings"][t.channel_id] = {
             "event_id": event_id, "channel_name": t.channel_name, "by_tool": True,
             "created_at": now, "name": item.lsp_name, "pcr": item.event.pcr,
+            "room": t.room or item.event.pcr,
             "snapshot": _snapshot(created) if created else None,
             "written": _written(item),
         }
@@ -1518,6 +1540,18 @@ class Syncer:
             else:
                 log.warning("PCR %s: no LSP channels match %r", pcr, ref.match)
         return resolved
+
+    def _channels_for(self, ev: ScheduledEvent, by_pcr) -> list[tuple[str, str, str]]:
+        """[(channel_id, channel_name, pcr)] an event books: its own PCR's
+        channels, then those of any extra PCR its sport also records in (a
+        channel on both counts once, for the first)."""
+        out, seen = [], set()
+        for room in self.cfg.scheduling.rooms_for(ev.name, ev.pcr):
+            for cid, cname in by_pcr.get(room) or []:
+                if cid not in seen:
+                    seen.add(cid)
+                    out.append((cid, cname, room))
+        return out
 
     def _within_window(self, ev: ScheduledEvent) -> bool:
         now = datetime.now(timezone.utc)
