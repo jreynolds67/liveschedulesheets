@@ -80,6 +80,8 @@ class FakeLsp:
         self.before_get_event = None   # called on each GetFilteredEvents read
         self.starts_now_within = None  # AddEvent books events starting within this timedelta now
         self.reply_without_id = False  # AddEvent's reply has no Id
+        self.reply_wrapped = False     # AddEvent replies {"Entity": event, "ResultKind": ...}
+        self.starts_now_status = "Recording"  # status of an event booked from now
 
     def get_all_channels(self):
         return copy.deepcopy(self.channels)
@@ -115,14 +117,16 @@ class FakeLsp:
             from datetime import timezone
             now = datetime.now(timezone.utc).replace(microsecond=0)
             if ev.start - now < self.starts_now_within:
-                e.update(Start=now.isoformat(), Status="Recording")
+                e.update(Start=now.isoformat(), Status=self.starts_now_status)
         if self.add_error is not None:
             if self.add_creates_anyway:
                 self.events[e["Id"]] = e
             raise self.add_error
         self.events[e["Id"]] = e
         if self.reply_without_id:
-            return {}
+            return {"Entity": None, "ResultKind": "Success"} if self.reply_wrapped else {}
+        if self.reply_wrapped:
+            return {"Entity": copy.deepcopy(e), "ResultKind": "Success"}
         return copy.deepcopy(e)
 
     def patch_event(self, event_id, name, start, end, force=False, extra=None):

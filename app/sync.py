@@ -1077,7 +1077,7 @@ class Syncer:
         ev = item.event
         if t.status == CREATE:
             result = self.lsp.add_event(ev, t.channel_id, item.lsp_name, force=force)
-            created = self._created_event(result, item, t)
+            created = self._created_event(result, item, t, force)
             rid = self._record_created(item, t, rid, created, force, now, touched)
         elif t.status == UPDATE:
             self.lsp.patch_event(t.event_id, item.lsp_name, ev.start, ev.end, force=force)
@@ -1092,7 +1092,8 @@ class Syncer:
         elif t.status == DELETE:
             self.lsp.remove_event(t.event_id, force=force)
             self.state.events[rid]["bookings"].pop(t.channel_id, None)
-            log.info("Removed %r from %s (PCR now %s)", item.lsp_name, t.channel_name, ev.pcr)
+            log.info("Removed %r from %s (%s)", item.lsp_name, t.channel_name,
+                     t.message.split(";")[0] or f"PCR now {ev.pcr}")
         return rid
 
     def _record_created(self, item: PlanItem, t: Target, rid, created: Optional[dict],
@@ -1127,6 +1128,7 @@ class Syncer:
             return rid, False
         if found is None:
             return rid, False
+        found = self._put_back(found, item, t, force)
         log.warning("AddEvent for %r on %s failed, but LSP created the event anyway; tracking it",
                     item.lsp_name, t.channel_name)
         return self._record_created(item, t, rid, found, force, now, touched), True
@@ -1135,10 +1137,10 @@ class Syncer:
         """The event on the channel with this name and start that wasn't
         there when this pass read LSP.
 
-        For a test event, if LSP put it at another start (as it did with a
-        UTC start, see create_test_event): the one new event with its name,
-        so its variable can still be set and its start put back (see
-        _check_test_event)."""
+        If LSP put it at another start (as it did with a UTC start, see
+        create_test_event, and with a game the same evening, see _put_back):
+        the one new event with its name, so its variable can still be set
+        and its start put back."""
         view = getattr(self, "_view", None)
         known = {e.get("Id") for e in (view.by_channel.get(t.channel_id, []) if view else [])}
         new = [e for e in self.lsp.get_events_for_channel(t.channel_id)
@@ -1147,13 +1149,46 @@ class Syncer:
         for e in new:
             if _same_instant(e.get("Start"), item.event.start):
                 return e
-        if item.test and len(new) == 1:
-            log.warning("LSP put test event %r on %s at %s, not %s as sent", item.lsp_name,
+        if len(new) == 1:
+            log.warning("LSP put %r on %s at %s, not %s as sent", item.lsp_name,
                         t.channel_name, new[0].get("Start"), item.event.start.isoformat())
             return new[0]
         return None
 
-    def _created_event(self, result, item: PlanItem, t: Target) -> Optional[dict]:
+    def _created_event(self, result, item: PlanItem, t: Target,
+                       force: bool = False) -> Optional[dict]:
+        """The event AddEvent just made, as LSP now holds it, put back at the
+        start sent if LSP put it elsewhere (see _put_back)."""
+        return self._put_back(self._read_created(result, item, t), item, t, force)
+
+    def _put_back(self, e: Optional[dict], item: PlanItem, t: Target,
+                  force: bool) -> Optional[dict]:
+        """A new event LSP put at another start than the one sent: moved back
+        if it hasn't started, else flagged for an engineer. Seen 2026-11-03:
+        a game that evening, added on another channel that afternoon, was
+        booked from the moment it was sent (keeping its length)."""
+        if not e or not e.get("Id") or _same_instant(e.get("Start"), item.event.start):
+            return e
+        sent = item.event.start.isoformat()
+        if _status(e) == "waiting":
+            log.warning("LSP put %r on %s at %s, not %s as sent; moving it back", item.lsp_name,
+                        t.channel_name, e.get("Start"), sent)
+            try:
+                self.lsp.patch_event(e["Id"], item.lsp_name, item.event.start, item.event.end,
+                                     force=force)
+                e = self.lsp.get_event(e["Id"]) or e
+            except LspError as exc:
+                log.warning("Could not move %r on %s back: %s", item.lsp_name, t.channel_name, exc)
+        if not _same_instant(e.get("Start"), item.event.start):
+            w = {"key": f"moved:{e['Id']}", "text": (
+                f"LSP put “{item.lsp_name}” on {t.channel_name} at {_local(e.get('Start'))}, not "
+                f"{_local(sent)} as sent, and it couldn't be moved back (status "
+                f"{e.get('Status') or 'unknown'}): fix it by hand in LSP")}
+            self.sheet_warnings.append(w)
+            log.warning("%s", w["text"])
+        return e
+
+    def _read_created(self, result, item: PlanItem, t: Target) -> Optional[dict]:
         """The event AddEvent just made, as LSP now holds it: LSP copies the
         channel's workflow variables into it (e.g. Event Name = its default)
         before replying. Found by the id in the reply, or, if the reply has
@@ -1612,18 +1647,30 @@ def _summary(dry_run: bool) -> dict:
 
 
 def _event_id(result) -> Optional[str]:
-    """The event id in an AddEvent reply (the Event, per the API docs)."""
+    """The event id in an AddEvent reply: the Event, per the API docs, or
+    (seen 2026-11-03) the Event wrapped as {"Entity": ..., "ResultKind": ...}."""
     if isinstance(result, dict):
+        if isinstance(result.get("Entity"), dict):
+            return _event_id(result["Entity"])
         return result.get("Id") or result.get("id") or result.get("EventId")
     if isinstance(result, str) and len(result.strip('"')) == 36:
         return result.strip('"')  # a bare id
     return None
 
 
+def _local(value) -> str:
+    """An LSP or ISO time as local "HH:MM" (as given if it doesn't parse)."""
+    dt = _parse_any(value)
+    if dt is None:
+        return str(value)
+    return (dt.astimezone(LOCAL_TZ) if dt.tzinfo else dt).strftime("%H:%M")
+
+
 def _describe(result) -> str:
     """A short description of an unexpected reply, for the log."""
     if isinstance(result, dict):
-        return f"keys: {', '.join(sorted(result)) or 'none'}"
+        kind = f", ResultKind {result['ResultKind']}" if "ResultKind" in result else ""
+        return f"keys: {', '.join(sorted(result)) or 'none'}{kind}"
     return f"{type(result).__name__}: {str(result)[:120]}"
 
 

@@ -59,6 +59,10 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   bookings on events already in LSP that haven't started (unless locked);
   Preview shows the extra PCR under the event's PCR. Test events book only
   the PCR picked for them.
+  If LSP books a new event at another start than the one sent (seen on
+  2026-11-03: a game that evening, added to PCR C that afternoon, was booked
+  from the moment it was sent), the tool moves it back to the right start
+  if it hasn't started, or flags it under Needs attention to fix by hand.
   Below the mapping, set the **Event name variable** (default `Event Name`).
   **Check channels** lists each PCR channel as **found** or **not found**,
   according to whether its events carry that variable. The *Scheduled in

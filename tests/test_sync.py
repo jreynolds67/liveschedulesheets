@@ -1097,3 +1097,50 @@ def test_pcr_change_keeps_the_extra_pcr(basketball, lsp):
     summary = basketball([sheet_event(name="MBB vs Duke", pcr="B")]).run_once()
     assert (summary["created"], summary["deleted"]) == (1, 2)
     assert channels(lsp) == ["b1", "c1", "c2"]
+
+
+# -- LSP replies and starts seen 2026-11-03 --------------------------------------
+
+def test_event_id_is_read_from_a_wrapped_reply(var_syncer, lsp):
+    lsp.reply_wrapped = True
+    var_syncer([sheet_event(pcr="B")]).run_once()
+    [eid] = lsp.events
+    assert lsp.variable_of(eid) == "WSOC vs Texas"
+    [rec] = var_syncer([]).state.events.values()
+    assert rec["bookings"]["b1"]["event_id"] == eid
+
+
+def test_new_event_lsp_books_from_now_is_moved_back(var_syncer, lsp):
+    lsp.starts_now_within, lsp.starts_now_status = timedelta(days=3), "Waiting"
+    lsp.reply_wrapped = lsp.reply_without_id = True
+    ev = sheet_event(pcr="B", days=1)
+    s = var_syncer([ev])
+    assert s.run_once()["created"] == 1
+    [e] = lsp.events.values()
+    assert _same_instant(e["Start"], ev.start) and e["Name"] == "WSOC vs Texas"
+    assert lsp.variable_of(e["Id"]) == "WSOC vs Texas"
+    assert not s.sheet_warnings
+    # Tracked as it is now: next pass leaves it alone, and makes no second one.
+    lsp.starts_now_within = None
+    s2 = var_syncer([ev])
+    assert statuses(s2) == [EXISTS]
+    assert s2.run_once()["created"] == 0 and len(lsp.events) == 1
+
+
+def test_new_event_lsp_starts_at_once_is_flagged_not_recreated(var_syncer, lsp):
+    lsp.starts_now_within = timedelta(days=3)  # booked from now, already recording
+    lsp.reply_wrapped = lsp.reply_without_id = True
+    ev = sheet_event(pcr="B", days=1)
+    s = var_syncer([ev])
+    s.run_once()
+    assert any("couldn't be moved back" in w["text"] for w in s.sheet_warnings)
+    lsp.starts_now_within = None
+    assert var_syncer([ev]).run_once()["created"] == 0 and len(lsp.events) == 1
+
+
+def test_removal_from_an_extra_pcr_says_why(basketball, lsp, caplog):
+    ev = sheet_event(name="MBB vs Duke", pcr="A")
+    basketball([ev]).run_once()
+    with caplog.at_level("INFO"):
+        basketball([ev], on=False).run_once()
+    assert "Removed 'MBB vs Duke' from 01 - PCR C PGM (No longer also records in PCR C)" in caplog.text
