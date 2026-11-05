@@ -1144,3 +1144,47 @@ def test_removal_from_an_extra_pcr_says_why(basketball, lsp, caplog):
     with caplog.at_level("INFO"):
         basketball([ev], on=False).run_once()
     assert "Removed 'MBB vs Duke' from 01 - PCR C PGM (No longer also records in PCR C)" in caplog.text
+
+
+def test_extra_pcr_start_offset_moves_only_its_start(key_file, state_path, lsp, make_syncer):
+    from app.config import parse_config
+    from .conftest import raw_config
+    lsp.channels += [{"Id": "c1", "Name": "01 - PCR C PGM"}]
+
+    def make(events, minutes):
+        raw = raw_config(key_file, state_path, scheduling={"extra_rooms": [
+            {"sport": "MBB", "pcr": "C", "minutes": minutes}]})
+        raw["pcr_channel_map"]["C"] = {"channel_match": "PCR C"}
+        return make_syncer(events, parse_config(raw))
+
+    ev = sheet_event(name="MBB vs Duke", pcr="B")  # starts 18:50
+    s = make([ev], "-50")
+    [item] = s.plan()
+    assert {c["room"]: c["start"] for c in item.to_dict()["channels"]} == {
+        "B": ev.start.isoformat(), "C": (ev.start - timedelta(minutes=50)).isoformat()}
+    s.run_once()
+
+    def times(cid):
+        [e] = [e for e in lsp.events.values() if e["ChannelId"] == cid]
+        return e["Start"], e["End"]
+    assert times("b1") == (ev.start.isoformat(), ev.end.isoformat())
+    assert times("c1") == ((ev.start - timedelta(minutes=50)).isoformat(), ev.end.isoformat())
+    # Next pass: up to date (not taken for a hand edit, nothing re-sent).
+    assert statuses(make([ev], -50)) == [EXISTS]
+    # A new offset moves only the extra PCR's start.
+    assert make([ev], "+30").run_once()["updated"] == 1
+    assert times("b1") == (ev.start.isoformat(), ev.end.isoformat())
+    assert times("c1") == ((ev.start + timedelta(minutes=30)).isoformat(), ev.end.isoformat())
+    assert statuses(make([ev], 30)) == [EXISTS]
+
+
+def test_extra_pcr_offset_past_the_end_uses_the_events_own_start(basketball, key_file,
+                                                                 state_path, lsp, make_syncer):
+    from app.config import parse_config
+    from .conftest import raw_config
+    raw = raw_config(key_file, state_path, scheduling={"extra_rooms": [
+        {"sport": "MBB", "pcr": "C", "minutes": 600}]})
+    raw["pcr_channel_map"]["C"] = {"channel_match": "PCR C"}
+    ev = sheet_event(name="MBB vs Duke", pcr="A")  # 3-hour cap
+    make_syncer([ev], parse_config(raw)).run_once()
+    assert all(_same_instant(e["Start"], ev.start) for e in lsp.events.values())

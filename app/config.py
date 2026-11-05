@@ -47,10 +47,16 @@ class DateParsingConfig:
 
 @dataclass
 class ExtraRoom:
-    """Events of `sport` also record on PCR `pcr`'s channels, when enabled."""
+    """Events of `sport` also record on PCR `pcr`'s channels, when enabled,
+    starting `minutes` later there (negative = earlier); same end."""
     sport: str
     pcr: str
     enabled: bool = True
+    minutes: int = 0
+
+
+# How far an extra PCR's start may move from the event's own, in minutes.
+MAX_EXTRA_ROOM_MINUTES = 24 * 60
 
 
 # Used when the config has no scheduling.extra_rooms yet: basketball can also
@@ -78,12 +84,18 @@ class SchedulingConfig:
         """The PCRs an event records in: its own, then the extra PCR of every
         turned-on row whose sport appears in its name as a whole word ("MBB"
         in "MBB vs Duke"). None without a PCR of its own."""
+        return [room for room, _ in self.room_offsets(event_name, pcr)]
+
+    def room_offsets(self, event_name: str, pcr: str) -> list[tuple[str, int]]:
+        """rooms_for() with each PCR's start offset in minutes (0 for the
+        event's own PCR; the first matching row's for an extra one)."""
         if not pcr:
             return []
-        rooms = [pcr]
+        rooms = [(pcr, 0)]
         for x in self.extra_rooms:
-            if x.enabled and x.pcr not in rooms and channel_name_matches(x.sport, event_name):
-                rooms.append(x.pcr)
+            if (x.enabled and all(x.pcr != r for r, _ in rooms)
+                    and channel_name_matches(x.sport, event_name)):
+                rooms.append((x.pcr, x.minutes))
         return rooms
 
     def lsp_name(self, ev) -> str:
@@ -432,7 +444,16 @@ def _parse_extra_rooms(raw) -> list[ExtraRoom]:
             continue
         if not sport or not pcr:
             raise ConfigError("Each 'also record in' row needs a sport and a PCR")
-        out.append(ExtraRoom(sport, pcr, enabled=bool(item.get("enabled", True))))
+        try:
+            minutes = int(float(str(item.get("minutes") or 0).replace(" ", "")))
+        except ValueError:
+            raise ConfigError(f"The start offset for {sport} in PCR {pcr} must be a whole "
+                              "number of minutes, like -50 or 30") from None
+        if abs(minutes) > MAX_EXTRA_ROOM_MINUTES:
+            raise ConfigError(f"The start offset for {sport} in PCR {pcr} must be within "
+                              f"{MAX_EXTRA_ROOM_MINUTES} minutes")
+        out.append(ExtraRoom(sport, pcr, enabled=bool(item.get("enabled", True)),
+                             minutes=minutes))
     return out
 
 

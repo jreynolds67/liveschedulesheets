@@ -68,3 +68,16 @@ def test_extra_rooms_for_a_sport(key_file, state_path):
 def test_extra_room_row_needs_a_pcr(key_file, state_path):
     with pytest.raises(ConfigError):
         parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [{"sport": "MBB"}]}))
+
+
+def test_extra_room_start_offset(key_file, state_path):
+    def offsets(minutes):
+        return parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [
+            {"sport": "MBB", "pcr": "C", "minutes": minutes}]})).scheduling.room_offsets(
+            "MBB vs Duke", "A")
+    assert offsets("-50") == [("A", 0), ("C", -50)]
+    assert offsets("+50") == offsets(50) == [("A", 0), ("C", 50)]
+    assert offsets("") == offsets(None) == [("A", 0), ("C", 0)]
+    for bad in ("soon", 24 * 60 + 1):
+        with pytest.raises(ConfigError):
+            offsets(bad)
