@@ -1158,25 +1158,25 @@ def test_extra_pcr_start_offset_moves_only_its_start(key_file, state_path, lsp, 
         return make_syncer(events, parse_config(raw))
 
     ev = sheet_event(name="MBB vs Duke", pcr="B")  # game 19:00, 10 minute lead-in: 18:50
-    game = ev.start + timedelta(minutes=10)
-    s = make([ev], "-50")
+    s = make([ev], "-50")  # 19:00 - 50 - 10 = 18:00
     [item] = s.plan()
     assert {c["room"]: c["start"] for c in item.to_dict()["channels"]} == {
-        "B": ev.start.isoformat(), "C": (game - timedelta(minutes=50)).isoformat()}
+        "B": ev.start.isoformat(), "C": (ev.start - timedelta(minutes=50)).isoformat()}
+    assert (ev.start - timedelta(minutes=50)).strftime("%H:%M") == "18:00"
     s.run_once()
 
     def times(cid):
         [e] = [e for e in lsp.events.values() if e["ChannelId"] == cid]
         return e["Start"], e["End"]
     assert times("b1") == (ev.start.isoformat(), ev.end.isoformat())
-    assert times("c1") == ((game - timedelta(minutes=50)).isoformat(), ev.end.isoformat())
+    assert times("c1") == ((ev.start - timedelta(minutes=50)).isoformat(), ev.end.isoformat())
     # Next pass: up to date (not taken for a hand edit, nothing re-sent).
     assert statuses(make([ev], -50)) == [EXISTS]
-    # A new offset moves only the extra PCR's start: 0 = at the game's start.
-    assert make([ev], "0").run_once()["updated"] == 1
+    # A new offset moves only the extra PCR's start.
+    assert make([ev], "+20").run_once()["updated"] == 1
     assert times("b1") == (ev.start.isoformat(), ev.end.isoformat())
-    assert times("c1") == (game.isoformat(), ev.end.isoformat())
-    assert statuses(make([ev], 0)) == [EXISTS]
+    assert times("c1") == ((ev.start + timedelta(minutes=20)).isoformat(), ev.end.isoformat())
+    assert statuses(make([ev], 20)) == [EXISTS]
     # Blank: back to the event's own start.
     assert make([ev], "").run_once()["updated"] == 1
     assert times("c1") == (ev.start.isoformat(), ev.end.isoformat())

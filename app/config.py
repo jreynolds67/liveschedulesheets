@@ -48,8 +48,9 @@ class DateParsingConfig:
 @dataclass
 class ExtraRoom:
     """Events of `sport` also record on PCR `pcr`'s channels, when enabled.
-    There they start `minutes` after the game's start in the sheet (negative
-    = before it; None = when the event's own PCR starts), with the same end."""
+    There the game's start counts as `minutes` later (negative = earlier),
+    and the lead-in applies on top as on every channel; same end. None (or
+    0) = when the event's own PCR starts."""
     sport: str
     pcr: str
     enabled: bool = True
@@ -88,8 +89,8 @@ class SchedulingConfig:
         return [room for room, _ in self.room_offsets(event_name, pcr)]
 
     def room_offsets(self, event_name: str, pcr: str) -> list[tuple[str, Optional[int]]]:
-        """rooms_for() with each PCR's start in minutes from the game's start
-        (None = the event's own start: always for its own PCR)."""
+        """rooms_for() with each PCR's start offset in minutes (None = the
+        event's own start: always for its own PCR)."""
         if not pcr:
             return []
         rooms: list[tuple[str, Optional[int]]] = [(pcr, None)]
@@ -445,10 +446,9 @@ def _parse_extra_rooms(raw) -> list[ExtraRoom]:
             continue
         if not sport or not pcr:
             raise ConfigError("Each 'also record in' row needs a sport and a PCR")
-        # "game_offset", not the older "minutes" (counted from the event's own
-        # start, with blank saved as 0): those are dropped, not misread.
-        raw_min = str(item.get("game_offset") if item.get("game_offset") is not None
-                      else "").replace(" ", "")
+        # "minutes": the name the first version saved it under (same meaning).
+        value = item.get("game_offset", item.get("minutes"))
+        raw_min = str(value if value is not None else "").replace(" ", "")
         try:
             minutes = int(float(raw_min)) if raw_min else None
         except ValueError:

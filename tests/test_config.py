@@ -84,7 +84,7 @@ def test_extra_room_start_offset(key_file, state_path):
             offsets(bad)
 
 
-def test_older_minutes_setting_is_dropped_not_misread(key_file, state_path):
+def test_offset_saved_under_its_first_name_is_read(key_file, state_path):
     sc = parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [
-        {"sport": "MBB", "pcr": "C", "minutes": 0}]})).scheduling
-    assert sc.room_offsets("MBB vs Duke", "A") == [("A", None), ("C", None)]
+        {"sport": "MBB", "pcr": "C", "minutes": -50}]})).scheduling
+    assert sc.room_offsets("MBB vs Duke", "A") == [("A", None), ("C", -50)]

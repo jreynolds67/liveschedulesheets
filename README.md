@@ -55,11 +55,11 @@ see [Deploy in Portainer](#deploy-in-portainer)). From there an engineer can:
   is booked on A's channels **and** C's (a game already in C is booked once).
   The sport counts when its code is in the event name as a whole word. Rows
   for MBB and WBB → PCR C are there to start with, turned **off**; tick
-  **On** to use one. **Start (min)** sets when the extra PCR starts, in
-  minutes from the game's start in the sheet, keeping the end: for a 7:00 PM
-  game, `-50` starts PCR C at 6:10 PM and `0` at 7:00 PM, whatever the
-  lead-in. Blank = with the event's own PCR. A start at or after the end is
-  ignored. Once any of a game's channels has started, none of them is
+  **On** to use one. **Start (min)** moves the game's start in the extra
+  PCR, and the lead-in applies on top as on every channel, keeping the end:
+  for a 7:00 PM game with a 10-minute lead-in, PCR A starts at 6:50 PM and
+  `-50` starts PCR C at 6:00 PM. Blank or `0` = with the event's own PCR. A
+  start at or after the end is ignored. Once any of a game's channels has started, none of them is
   changed. Turning a row on or off adds or removes the extra PCR's
   bookings on events already in LSP that haven't started (unless locked);
   Preview shows the extra PCR under the event's PCR. Test events book only

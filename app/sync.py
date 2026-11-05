@@ -1601,16 +1601,13 @@ class Syncer:
         """[(channel_id, channel_name, pcr, start)] an event books: its own
         PCR's channels, then those of any extra PCR its sport also records in
         (a channel on both counts once, for the first). `start` is None for
-        the event's own start, else the extra PCR's: its offset from the
-        game's start in the sheet (the event's start plus the lead-in), but
-        never at or past the end (then the event's own start)."""
+        the event's own start, else the extra PCR's: the game's start moved by
+        its offset, less the same lead-in as every channel (so the event's
+        own start moved by the offset), but never at or past the end (then
+        the event's own start)."""
         out, seen = [], set()
-        sc = self.cfg.scheduling
-        for room, minutes in sc.room_offsets(ev.name, ev.pcr):
-            start = (ev.start + timedelta(minutes=sc.lead_in_minutes + minutes)
-                     if minutes is not None else None)
-            if start == ev.start:
-                start = None
+        for room, minutes in self.cfg.scheduling.room_offsets(ev.name, ev.pcr):
+            start = ev.start + timedelta(minutes=minutes) if minutes else None
             if start and start >= ev.end:
                 log.warning("%r: starting %+d minutes from the game in PCR %s would start it at "
                             "or after its end; using its own start there", ev.name, minutes, room)
