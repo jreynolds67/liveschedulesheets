@@ -220,9 +220,9 @@
       <div class="hint" style="margin-bottom:8px">Events of these sports record on their own PCR's channels
         <b>and</b> on the PCR picked here - e.g. with MBB → PCR C, an MBB game in PCR A records on A's and
         C's program and clean. The sport code counts when it's in the event name as a whole word, ignoring
-        case (“MBB” matches “MBB vs Duke”). <b>Start (min)</b> moves the start in the extra PCR only: with
-        −50, a game recorded from 6:50 PM starts at 6:00 PM in PCR C; +50 starts it at 7:40 PM. The end
-        stays the same. Untick <b>On</b> to turn a row off. Changing this adds, moves or removes the extra
+        case (“MBB” matches “MBB vs Duke”). <b>Start (min)</b> sets when the extra PCR starts, in minutes
+        from the game's start in the sheet: for a 7:00 PM game, −50 starts PCR C at 6:10 PM and 0 at 7:00 PM.
+        Leave it blank to start with the event's own PCR (the lead-in). The end stays the same. Untick <b>On</b> to turn a row off. Changing this adds, moves or removes the extra
         PCR on events already in LSP that haven't started (unless they're locked).</div>
       <div id="extraRows"></div>
       <div class="row"><button id="btnAddExtra" class="ghost">+ Add sport</button></div></div>
@@ -457,7 +457,7 @@ function fillForm(){
   $("extraRows").innerHTML = "";
   // Not set yet: the defaults the server uses (app/config.py DEFAULT_EXTRA_ROOMS), off.
   get(cfg,"scheduling.extra_rooms",[{sport:"MBB",pcr:"C",enabled:false},{sport:"WBB",pcr:"C",enabled:false}])
-    .forEach(x => addExtraRow(x.sport, x.pcr, x.enabled !== false, x.minutes || 0));
+    .forEach(x => addExtraRow(x.sport, x.pcr, x.enabled !== false, x.game_offset ?? ""));
 
   $("poll_interval").value = get(cfg,"runtime.poll_interval_seconds",900);
   $("alert_webhook").value = "";
@@ -526,7 +526,7 @@ function addCapRow(sport="", hours=""){
   $("capRows").appendChild(div);
 }
 
-function addExtraRow(sport="", pcr="C", on=true, minutes=0){
+function addExtraRow(sport="", pcr="C", on=true, minutes=""){
   const div = document.createElement("div"); div.className = "extra-row";
   const letters = [...new Set([...ROOMS, ...(pcr ? [pcr] : [])])];
   div.innerHTML = `
@@ -535,8 +535,8 @@ function addExtraRow(sport="", pcr="C", on=true, minutes=0){
     <div><label>Also record in</label><select class="extra-pcr">${letters.map(l =>
       `<option value="${esc(l)}" ${l===pcr?"selected":""}>PCR ${esc(l)}</option>`).join("")}</select></div>
     <div><label>Start (min)</label><input type="text" inputmode="numeric" class="extra-min"
-      placeholder="0" title="Minutes to move the start in this PCR: -50 = 50 minutes earlier, +50 = later"
-      value="${minutes ? (minutes > 0 ? "+" : "") + minutes : ""}" /></div>
+      placeholder="same" title="Start in this PCR, in minutes from the game's start: -50 = 50 minutes before the game, 0 = at the game's start. Blank = when the event's own PCR starts."
+      value="${minutes === "" || minutes == null ? "" : (+minutes > 0 ? "+" : "") + +minutes}" /></div>
     <button class="rm" title="Remove">✕</button>`;
   div.querySelector(".rm").onclick = () => div.remove();
   $("extraRows").appendChild(div);
@@ -579,7 +579,7 @@ function gather(){
     .map(r => ({sport: r.querySelector(".extra-sport").value.trim().toUpperCase(),
                 pcr: r.querySelector(".extra-pcr").value,
                 enabled: r.querySelector(".extra-on").checked,
-                minutes: r.querySelector(".extra-min").value.replace(/\s+/g, "") || 0}))
+                game_offset: r.querySelector(".extra-min").value.replace(/\s+/g, "") || null}))
     .filter(x => x.sport);
 
   cfg.runtime = cfg.runtime || {};

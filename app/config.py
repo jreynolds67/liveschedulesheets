@@ -47,12 +47,13 @@ class DateParsingConfig:
 
 @dataclass
 class ExtraRoom:
-    """Events of `sport` also record on PCR `pcr`'s channels, when enabled,
-    starting `minutes` later there (negative = earlier); same end."""
+    """Events of `sport` also record on PCR `pcr`'s channels, when enabled.
+    There they start `minutes` after the game's start in the sheet (negative
+    = before it; None = when the event's own PCR starts), with the same end."""
     sport: str
     pcr: str
     enabled: bool = True
-    minutes: int = 0
+    minutes: Optional[int] = None
 
 
 # How far an extra PCR's start may move from the event's own, in minutes.
@@ -86,12 +87,12 @@ class SchedulingConfig:
         in "MBB vs Duke"). None without a PCR of its own."""
         return [room for room, _ in self.room_offsets(event_name, pcr)]
 
-    def room_offsets(self, event_name: str, pcr: str) -> list[tuple[str, int]]:
-        """rooms_for() with each PCR's start offset in minutes (0 for the
-        event's own PCR; the first matching row's for an extra one)."""
+    def room_offsets(self, event_name: str, pcr: str) -> list[tuple[str, Optional[int]]]:
+        """rooms_for() with each PCR's start in minutes from the game's start
+        (None = the event's own start: always for its own PCR)."""
         if not pcr:
             return []
-        rooms = [(pcr, 0)]
+        rooms: list[tuple[str, Optional[int]]] = [(pcr, None)]
         for x in self.extra_rooms:
             if (x.enabled and all(x.pcr != r for r, _ in rooms)
                     and channel_name_matches(x.sport, event_name)):
@@ -444,12 +445,16 @@ def _parse_extra_rooms(raw) -> list[ExtraRoom]:
             continue
         if not sport or not pcr:
             raise ConfigError("Each 'also record in' row needs a sport and a PCR")
+        # "game_offset", not the older "minutes" (counted from the event's own
+        # start, with blank saved as 0): those are dropped, not misread.
+        raw_min = str(item.get("game_offset") if item.get("game_offset") is not None
+                      else "").replace(" ", "")
         try:
-            minutes = int(float(str(item.get("minutes") or 0).replace(" ", "")))
+            minutes = int(float(raw_min)) if raw_min else None
         except ValueError:
             raise ConfigError(f"The start offset for {sport} in PCR {pcr} must be a whole "
                               "number of minutes, like -50 or 30") from None
-        if abs(minutes) > MAX_EXTRA_ROOM_MINUTES:
+        if minutes is not None and abs(minutes) > MAX_EXTRA_ROOM_MINUTES:
             raise ConfigError(f"The start offset for {sport} in PCR {pcr} must be within "
                               f"{MAX_EXTRA_ROOM_MINUTES} minutes")
         out.append(ExtraRoom(sport, pcr, enabled=bool(item.get("enabled", True)),

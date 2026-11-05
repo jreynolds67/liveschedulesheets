@@ -87,12 +87,13 @@ scheduling:
   sport_codes: []
   # Sports that also record in a second PCR, besides the event's own: an MBB
   # game in PCR A then books PCR A's channels and PCR C's. A sport applies
-  # when its code is in the event name as a whole word. `minutes` moves the
-  # start in the extra PCR only (-50 = 50 minutes earlier), same end. Left
-  # out = these two rows, turned off (enabled: false).
+  # when its code is in the event name as a whole word. `game_offset` is when the
+  # extra PCR starts, in minutes from the game's start in the sheet (-50 =
+  # 50 minutes before the game; left out = with the event's own PCR), same
+  # end. Left out = these two rows, turned off (enabled: false).
   extra_rooms:
-    - { sport: "MBB", pcr: "C", enabled: false, minutes: 0 }
-    - { sport: "WBB", pcr: "C", enabled: false, minutes: 0 }
+    - { sport: "MBB", pcr: "C", enabled: false }
+    - { sport: "WBB", pcr: "C", enabled: false }
 
 # PCR letter (from the sheet) -> Live Schedule Pro channels.
 # Each event is booked on EVERY channel whose name contains channel_match as a

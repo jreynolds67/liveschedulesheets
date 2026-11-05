@@ -1153,29 +1153,33 @@ def test_extra_pcr_start_offset_moves_only_its_start(key_file, state_path, lsp, 
 
     def make(events, minutes):
         raw = raw_config(key_file, state_path, scheduling={"extra_rooms": [
-            {"sport": "MBB", "pcr": "C", "minutes": minutes}]})
+            {"sport": "MBB", "pcr": "C", "game_offset": minutes}]})
         raw["pcr_channel_map"]["C"] = {"channel_match": "PCR C"}
         return make_syncer(events, parse_config(raw))
 
-    ev = sheet_event(name="MBB vs Duke", pcr="B")  # starts 18:50
+    ev = sheet_event(name="MBB vs Duke", pcr="B")  # game 19:00, 10 minute lead-in: 18:50
+    game = ev.start + timedelta(minutes=10)
     s = make([ev], "-50")
     [item] = s.plan()
     assert {c["room"]: c["start"] for c in item.to_dict()["channels"]} == {
-        "B": ev.start.isoformat(), "C": (ev.start - timedelta(minutes=50)).isoformat()}
+        "B": ev.start.isoformat(), "C": (game - timedelta(minutes=50)).isoformat()}
     s.run_once()
 
     def times(cid):
         [e] = [e for e in lsp.events.values() if e["ChannelId"] == cid]
         return e["Start"], e["End"]
     assert times("b1") == (ev.start.isoformat(), ev.end.isoformat())
-    assert times("c1") == ((ev.start - timedelta(minutes=50)).isoformat(), ev.end.isoformat())
+    assert times("c1") == ((game - timedelta(minutes=50)).isoformat(), ev.end.isoformat())
     # Next pass: up to date (not taken for a hand edit, nothing re-sent).
     assert statuses(make([ev], -50)) == [EXISTS]
-    # A new offset moves only the extra PCR's start.
-    assert make([ev], "+30").run_once()["updated"] == 1
+    # A new offset moves only the extra PCR's start: 0 = at the game's start.
+    assert make([ev], "0").run_once()["updated"] == 1
     assert times("b1") == (ev.start.isoformat(), ev.end.isoformat())
-    assert times("c1") == ((ev.start + timedelta(minutes=30)).isoformat(), ev.end.isoformat())
-    assert statuses(make([ev], 30)) == [EXISTS]
+    assert times("c1") == (game.isoformat(), ev.end.isoformat())
+    assert statuses(make([ev], 0)) == [EXISTS]
+    # Blank: back to the event's own start.
+    assert make([ev], "").run_once()["updated"] == 1
+    assert times("c1") == (ev.start.isoformat(), ev.end.isoformat())
 
 
 def test_extra_pcr_offset_past_the_end_uses_the_events_own_start(basketball, key_file,
@@ -1183,7 +1187,7 @@ def test_extra_pcr_offset_past_the_end_uses_the_events_own_start(basketball, key
     from app.config import parse_config
     from .conftest import raw_config
     raw = raw_config(key_file, state_path, scheduling={"extra_rooms": [
-        {"sport": "MBB", "pcr": "C", "minutes": 600}]})
+        {"sport": "MBB", "pcr": "C", "game_offset": 600}]})
     raw["pcr_channel_map"]["C"] = {"channel_match": "PCR C"}
     ev = sheet_event(name="MBB vs Duke", pcr="A")  # 3-hour cap
     make_syncer([ev], parse_config(raw)).run_once()

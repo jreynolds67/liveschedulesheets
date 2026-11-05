@@ -73,11 +73,18 @@ def test_extra_room_row_needs_a_pcr(key_file, state_path):
 def test_extra_room_start_offset(key_file, state_path):
     def offsets(minutes):
         return parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [
-            {"sport": "MBB", "pcr": "C", "minutes": minutes}]})).scheduling.room_offsets(
+            {"sport": "MBB", "pcr": "C", "game_offset": minutes}]})).scheduling.room_offsets(
             "MBB vs Duke", "A")
-    assert offsets("-50") == [("A", 0), ("C", -50)]
-    assert offsets("+50") == offsets(50) == [("A", 0), ("C", 50)]
-    assert offsets("") == offsets(None) == [("A", 0), ("C", 0)]
+    assert offsets("-50") == [("A", None), ("C", -50)]
+    assert offsets("+50") == offsets(50) == [("A", None), ("C", 50)]
+    assert offsets("0") == offsets(0) == [("A", None), ("C", 0)]
+    assert offsets("") == offsets(None) == [("A", None), ("C", None)]
     for bad in ("soon", 24 * 60 + 1):
         with pytest.raises(ConfigError):
             offsets(bad)
+
+
+def test_older_minutes_setting_is_dropped_not_misread(key_file, state_path):
+    sc = parse_config(raw_config(key_file, state_path, scheduling={"extra_rooms": [
+        {"sport": "MBB", "pcr": "C", "minutes": 0}]})).scheduling
+    assert sc.room_offsets("MBB vs Duke", "A") == [("A", None), ("C", None)]
